@@ -1,0 +1,40 @@
+# ===== AuditAgentX 后端依赖 =====
+# Web 框架
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+# Python 3.9 下解析 `X | None` 联合类型注解所需
+eval_type_backport==0.2.0
+python-multipart==0.0.9
+
+# 数据库
+sqlalchemy==2.0.35
+# 如需 PostgreSQL 取消下一行注释
+# psycopg2-binary==2.9.9
+
+# Git 仓库拉取
+GitPython==3.1.43
+
+# 代码解析
+pygments==2.18.0
+# tree-sitter 可选（高级语法解析）
+# tree-sitter==0.23.0
+
+# 大模型调用（OpenAI 兼容接口，支持 DeepSeek/Qwen/本地模型）
+openai==1.51.0
+httpx==0.27.2
+
+# 报告生成
+jinja2==3.1.4
+markdown==3.7
+# PDF 导出（可选，需系统安装 wkhtmltopdf 或使用 weasyprint）
+# weasyprint==62.3
+
+# 工具
+python-dotenv==1.0.1
+rich==13.9.2
+
+# 测试
+pytest==8.3.3
+pytest-asyncio==0.24.0

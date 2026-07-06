@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Databases and runtime data
+*.db
+*.sqlite
+*.sqlite3
+data/projects/*
+data/scans/*
+data/reports/*
+data/sandbox/*
+!data/**/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary scan outputs
+*.sarif
+tmp/

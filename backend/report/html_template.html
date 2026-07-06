@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{ project.name }} 安全审计报告</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 40px auto; max-width: 960px; color: #222; line-height: 1.6; }
+  h1 { border-bottom: 3px solid #2c3e50; padding-bottom: 8px; }
+  h2 { color: #2c3e50; margin-top: 32px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  th { background: #f4f6f8; }
+  code, pre { background: #f6f8fa; border-radius: 4px; }
+  pre { padding: 12px; overflow-x: auto; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; color: #fff; font-size: 12px; }
+  .critical { background: #7b241c; } .high { background: #c0392b; }
+  .medium { background: #e67e22; } .low { background: #27ae60; }
+  .meta { color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>{{ project.name }} 安全审计报告</h1>
+  <p class="meta">生成工具：{{ tool }}　生成时间：{{ generated_at }}</p>
+
+  <h2>1. 执行摘要</h2>
+  <p>{{ summary.executive_summary }}</p>
+  <p>总体风险等级：<span class="badge {{ summary.overall_risk }}">{{ summary.overall_risk | upper }}</span></p>
+
+  <h2>2. 项目概况</h2>
+  <table>
+    <tr><th>项目名称</th><td>{{ project.name }}</td></tr>
+    <tr><th>来源</th><td>{{ project.url or project.local_path }}</td></tr>
+    <tr><th>语言</th><td>{{ project.languages | join(", ") }}</td></tr>
+    <tr><th>框架</th><td>{{ project.frameworks | join(", ") }}</td></tr>
+    <tr><th>文件数 / 代码行数</th><td>{{ project.file_count }} / {{ project.loc }}</td></tr>
+  </table>
+
+  <h2>3. 漏洞统计</h2>
+  <table>
+    <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>合计</th></tr>
+    <tr>
+      <td>{{ stats.critical }}</td><td>{{ stats.high }}</td>
+      <td>{{ stats.medium }}</td><td>{{ stats.low }}</td>
+      <td><b>{{ findings | length }}</b></td>
+    </tr>
+  </table>
+
+  <h2>4. 漏洞明细</h2>
+  {% for f in findings %}
+  <h3>4.{{ loop.index }} {{ f.type }} <span class="badge {{ f.severity }}">{{ f.severity | upper }}</span></h3>
+  <p class="meta">{{ f.file }}:{{ f.start_line or f.line }}　置信度 {{ f.confidence }}
+     {{ "已验证" if f.verified else "未验证" }}　状态 {{ f.status }}</p>
+  <pre><code>{{ f.code_snippet or f.vulnerable_code }}</code></pre>
+  <p><b>修复建议：</b>{{ f.fix_suggestion or "使用参数化查询 / 输入校验 / 最小权限等通用加固手段。" }}</p>
+  {% endfor %}
+
+  <h2>5. 关键风险</h2>
+  <ul>{% for r in summary.key_risks %}<li>{{ r }}</li>{% endfor %}</ul>
+
+  <h2>6. 结论</h2>
+  <p>{{ summary.conclusion }}</p>
+
+  <hr>
+  <p class="meta">本报告由 AuditAgentX 自动生成，PoC 仅在本地授权沙箱环境验证。</p>
+</body>
+</html>

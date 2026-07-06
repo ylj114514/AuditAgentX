@@ -1,0 +1,23 @@
+# AuditAgentX 自定义 Semgrep 规则示例（Python 危险函数）
+# 用法：semgrep scan --config rules/custom/python_dangerous.yml <target>
+rules:
+  - id: python-os-system-injection
+    languages: [python]
+    severity: ERROR
+    message: "os.system 拼接外部输入，可能导致命令注入"
+    patterns:
+      - pattern: os.system(...)
+      - pattern-not: os.system("...")
+
+  - id: python-pickle-loads
+    languages: [python]
+    severity: ERROR
+    message: "pickle.loads 反序列化不可信数据，存在 RCE 风险"
+    pattern: pickle.loads(...)
+
+  - id: python-sql-string-concat
+    languages: [python]
+    severity: WARNING
+    message: "SQL 语句字符串拼接，可能导致 SQL 注入"
+    patterns:
+      - pattern: $CUR.execute("..." + ...)

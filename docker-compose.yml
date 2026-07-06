@@ -1,0 +1,45 @@
+# ===== AuditAgentX 本地编排 =====
+# 说明：sandbox 服务用于 PoC 隔离验证，属进阶功能，默认不随后端启动。
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: auditagentx-backend
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./rules:/app/rules
+      # 挂载 docker.sock 以便后端调度沙箱容器（进阶功能，注意安全风险）
+      # - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # 前端（开发期可直接 npm run dev，此处提供生产构建示例）
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #   container_name: auditagentx-frontend
+  #   ports:
+  #     - "5173:80"
+  #   depends_on:
+  #     - backend
+
+  # PostgreSQL（可选，默认使用 SQLite）
+  # db:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: auditagentx
+  #     POSTGRES_PASSWORD: auditagentx
+  #     POSTGRES_DB: auditagentx
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+# volumes:
+#   pgdata:
