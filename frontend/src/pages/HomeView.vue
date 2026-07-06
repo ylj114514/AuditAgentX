@@ -5,13 +5,12 @@
         <p class="eyebrow">AuditAgentX</p>
         <h1>开源项目智能安全审计与验证系统</h1>
         <p class="hero-text">
-          将仓库解析、静态扫描、LLM 智能体复核、动态验证和证据链报告串成一条可查看的审计流程。
+          将仓库解析、静态扫描、LLM 智能体复核和证据链报告串成一条可查看的审计流程。
         </p>
         <div class="hero-actions">
           <el-button type="primary" size="large" @click="router.push('/projects/new')">新建审计项目</el-button>
           <el-button size="large" @click="router.push('/scans')">进入分析工作台</el-button>
-          <el-button size="large" @click="router.push('/analytics')">对比分析</el-button>
-          <el-button size="large" @click="router.push('/history')">查看历史记录</el-button>
+          <el-button size="large" @click="router.push('/history')">查看历史项目</el-button>
         </div>
       </div>
       <div class="hero-metrics" aria-label="系统模块概览">
@@ -29,23 +28,18 @@
       </button>
       <button class="quick-card" @click="router.push('/scans')">
         <span>02</span>
-        <h2>静态 / 动态分析</h2>
-        <p>静态结果、动态验证和可利用代码分标签查看，便于演示。</p>
+        <h2>静态分析</h2>
+        <p>查看静态扫描、智能体复核和漏洞证据链，便于演示审计流程。</p>
       </button>
       <button class="quick-card" @click="router.push('/history')">
         <span>03</span>
-        <h2>历史查看</h2>
+        <h2>查看历史项目</h2>
         <p>本地缓存扫描记录，重新进入系统后可继续查看历史分析。</p>
       </button>
       <button class="quick-card" @click="router.push('/reports/latest')">
         <span>04</span>
         <h2>报告导出</h2>
         <p>生成包含漏洞列表、等级、证据链和修复建议的结构化报告。</p>
-      </button>
-      <button class="quick-card" @click="router.push('/analytics')">
-        <span>05</span>
-        <h2>对比分析</h2>
-        <p>跨项目漏洞统计、项目横向对比，以及与同类开源审计系统的能力对标。</p>
       </button>
     </div>
 

@@ -12,8 +12,7 @@
         <el-menu-item index="/">首页</el-menu-item>
         <el-menu-item index="/projects/new">新建项目</el-menu-item>
         <el-menu-item index="/scans">分析工作台</el-menu-item>
-        <el-menu-item index="/analytics">对比分析</el-menu-item>
-        <el-menu-item index="/history">历史记录</el-menu-item>
+        <el-menu-item index="/history">查看历史项目</el-menu-item>
       </el-menu>
       <div class="sidebar-note">
         <b>本地授权测试</b>
@@ -28,7 +27,7 @@
           <h2>开源项目安全缺陷自动审计与验证</h2>
         </div>
         <div class="topbar-actions">
-          <el-button @click="router.push('/history')">历史查看</el-button>
+          <el-button @click="router.push('/history')">查看历史项目</el-button>
           <el-button type="primary" @click="router.push('/projects/new')">新建审计</el-button>
         </div>
       </el-header>
