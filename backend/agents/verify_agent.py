@@ -1,17 +1,18 @@
-"""VerifyAgent: independent review agent for candidate findings.
-
-The verifier combines LLM review with local tool calls:
-- code_context_reader reads source lines around the finding;
-- heuristic_static_verifier checks common source-to-sink and false-positive patterns.
-"""
+"""VerifyAgent: independent MCP+Skill review agent for candidate findings."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from backend.agents.base_agent import BaseAgent
 from backend.agents.verification_tools import build_verification_context
+from backend.mcp.audit_mcp_client import AuditMCPClient
+from backend.skills.loader import load_skill
+
+
+logger = logging.getLogger(__name__)
 
 
 class VerifyAgent(BaseAgent):
@@ -20,14 +21,15 @@ class VerifyAgent(BaseAgent):
 
     def run(self, candidate: dict[str, Any], code_root: Path | None = None) -> dict[str, Any]:
         """Review one candidate finding and return a normalized verdict."""
-        tool_context = build_verification_context(candidate, code_root)
+        tool_context = self._build_mcp_skill_context(candidate, code_root)
         user_content = json.dumps({
             "candidate_finding": candidate,
             "tool_evidence": tool_context,
             "instruction": (
-                "Use the tool_evidence to independently confirm or reject the finding. "
+                "Use the MCP+Skill tool_evidence to independently confirm or reject the finding. "
                 "Return JSON with is_valid, false_positive_reason, confidence, source, "
-                "sink, propagation_path, required_runtime_conditions, and recommended_poc_strategy."
+                "sink, propagation_path, call_path, tool_calls, evidence_chain, "
+                "required_runtime_conditions, and recommended_poc_strategy."
             ),
         }, ensure_ascii=False)
 
@@ -40,6 +42,18 @@ class VerifyAgent(BaseAgent):
     def run_batch(self, candidates: list[dict[str, Any]],
                   code_root: Path | None = None) -> list[dict[str, Any]]:
         return [self.run(c, code_root=code_root) for c in candidates]
+
+    @staticmethod
+    def _build_mcp_skill_context(candidate: dict[str, Any], code_root: Path | None) -> dict[str, Any]:
+        try:
+            skill = load_skill("vulnerability-verification")
+            return AuditMCPClient().run_verification_skill(candidate, code_root, skill)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("MCP+Skill verification failed, falling back to local tools: %s", exc)
+            context = build_verification_context(candidate, code_root)
+            context["architecture"] = "local-tool-fallback"
+            context["mcp_error"] = str(exc)
+            return context
 
     @staticmethod
     def _merge_verdict(candidate: dict[str, Any], tool_context: dict[str, Any],
@@ -68,7 +82,7 @@ class VerifyAgent(BaseAgent):
                 verdict[field] = heuristic[field]
 
         if not verdict.get("evidence_chain"):
-            verdict["evidence_chain"] = {
+            verdict["evidence_chain"] = tool_context.get("evidence_chain") or {
                 "tool_calls": tool_context.get("tools_used", []),
                 "call_path": verdict.get("call_path", []),
                 "checks": heuristic.get("checks", []),
@@ -79,6 +93,8 @@ class VerifyAgent(BaseAgent):
         if not verdict.get("required_runtime_conditions"):
             verdict["required_runtime_conditions"] = _runtime_conditions(candidate, heuristic)
 
+        verdict.setdefault("mcp_server", tool_context.get("mcp_server"))
+        verdict.setdefault("skill", tool_context.get("skill"))
         verdict["_tool_evidence"] = tool_context
         verdict["_llm_result"] = llm_result
         return verdict

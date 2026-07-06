@@ -36,21 +36,21 @@ def build_verification_context(
             },
         ],
         "tools_used": [],
-        "code_context": _read_code_context(candidate, code_root, radius=radius),
+        "code_context": read_code_context(candidate, code_root, radius=radius),
     }
     context["tools_used"].append({
         "name": "code_context_reader",
         "purpose": "Read source lines around the candidate finding.",
         "success": bool(context["code_context"].get("found")),
     })
-    heuristic = _run_heuristic_verifier(candidate, context["code_context"])
+    heuristic = run_heuristic_static_verifier(candidate, context["code_context"])
     context["heuristic_result"] = heuristic
     context["tools_used"].append({
         "name": "heuristic_static_verifier",
         "purpose": "Check common source-to-sink and false-positive patterns.",
         "success": True,
     })
-    sast_replay = _local_sast_replay(candidate, context["code_context"])
+    sast_replay = run_local_sast_replay(candidate, context["code_context"])
     context["sast_replay"] = sast_replay
     context["tools_used"].append({
         "name": "local_sast_replay",
@@ -59,6 +59,21 @@ def build_verification_context(
         "matched_rules": [rule["rule_id"] for rule in sast_replay.get("matched_rules", [])],
     })
     return context
+
+
+def read_code_context(candidate: dict[str, Any], code_root: Path | None, *, radius: int = 8) -> dict[str, Any]:
+    """Public MCP tool implementation for reading nearby source code."""
+    return _read_code_context(candidate, code_root, radius=radius)
+
+
+def run_heuristic_static_verifier(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
+    """Public MCP tool implementation for source-to-sink and false-positive checks."""
+    return _run_heuristic_verifier(candidate, code_context)
+
+
+def run_local_sast_replay(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
+    """Public MCP tool implementation for deterministic local SAST replay."""
+    return _local_sast_replay(candidate, code_context)
 
 
 def _read_code_context(candidate: dict[str, Any], code_root: Path | None, *, radius: int) -> dict[str, Any]:

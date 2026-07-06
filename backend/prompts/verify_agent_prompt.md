@@ -4,7 +4,7 @@
 
 你会收到两类输入：
 1. candidate_finding：候选漏洞，包含漏洞类型、文件、行号、扫描工具、代码片段等。
-2. tool_evidence：本地工具调用结果，采用类似 MCP/Skills 的结构，包含 tool_manifest、tools_used、code_context_reader、heuristic_static_verifier、local_sast_replay 等确定性工具输出。
+2. tool_evidence：MCP+Skill 工具调用结果，包含 architecture、mcp_server、skill、tool_manifest、tools_used、read_code_context、run_sast_replay、verify_source_sink、build_evidence_chain 等确定性工具输出。
 
 复核时必须检查：
 1. 用户输入是否可控。
@@ -31,5 +31,7 @@
 - propagation_path
 - call_path
 - tool_calls
+- mcp_server
+- skill
 - required_runtime_conditions
 - recommended_poc_strategy

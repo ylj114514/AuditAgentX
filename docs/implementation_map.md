@@ -35,7 +35,12 @@ GET  /api/projects/{project_id}/tree
 backend/agents/orchestrator_agent.py    # 总控编排 RepoParser -> StaticScan -> Audit -> Verify -> Exploit -> Report
 backend/agents/static_scan_agent.py     # 扫描智能体，调用 scanners 工具注册表
 backend/agents/audit_agent.py           # LLM 语义审计智能体
-backend/agents/verify_agent.py          # LLM 独立验证智能体
+backend/agents/verify_agent.py          # MCP+Skill 独立验证智能体，复核并过滤误报
+backend/mcp/audit_mcp_server.py         # 验证工具 MCP Server：源码上下文、SAST replay、source/sink 复核、证据链
+backend/mcp/audit_mcp_client.py         # MCP Client：按 Skill 工作流调度 MCP tools
+backend/mcp/stdio_server.py             # 可选标准 stdio MCP 入口，安装官方 mcp SDK 后可运行
+backend/skills/vulnerability_verification/SKILL.md # 漏洞复核 Skill，声明工具和执行流程
+backend/skills/loader.py                # Skill 加载器
 backend/scanners/registry.py            # 工具调用注册表
 backend/scanners/semgrep_runner.py      # Semgrep SAST 调用
 backend/scanners/bandit_runner.py       # Bandit 调用
