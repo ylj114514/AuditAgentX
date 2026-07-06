@@ -63,9 +63,18 @@ class VerifyAgent(BaseAgent):
             verdict["confidence"] = heuristic.get("confidence", candidate.get("confidence", 0.5))
         verdict["confidence"] = _bounded_float(verdict.get("confidence"), default=0.5)
 
-        for field in ("source", "sink", "propagation_path", "recommended_poc_strategy"):
+        for field in ("source", "sink", "propagation_path", "recommended_poc_strategy", "call_path"):
             if not verdict.get(field) and heuristic.get(field):
                 verdict[field] = heuristic[field]
+
+        if not verdict.get("evidence_chain"):
+            verdict["evidence_chain"] = {
+                "tool_calls": tool_context.get("tools_used", []),
+                "call_path": verdict.get("call_path", []),
+                "checks": heuristic.get("checks", []),
+                "sast_replay": tool_context.get("sast_replay", {}),
+            }
+        verdict["tool_calls"] = tool_context.get("tools_used", [])
 
         if not verdict.get("required_runtime_conditions"):
             verdict["required_runtime_conditions"] = _runtime_conditions(candidate, heuristic)

@@ -17,6 +17,10 @@ def _build_call_path(verify_result: dict, exploit: dict) -> list[dict]:
     source = verify_result.get("source")
     sink = verify_result.get("sink")
     prop = verify_result.get("propagation_path")
+    structured = verify_result.get("call_path")
+
+    if isinstance(structured, list) and structured:
+        return structured
 
     if source:
         hops.append({"stage": "source", "detail": str(source)})

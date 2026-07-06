@@ -17,6 +17,24 @@ def build_verification_context(
     radius: int = 8,
 ) -> dict[str, Any]:
     context = {
+        "mcp_skill_style": True,
+        "tool_manifest": [
+            {
+                "name": "code_context_reader",
+                "description": "Read nearby source code around a candidate finding.",
+                "input_schema": {"file": "string", "line": "integer", "radius": "integer"},
+            },
+            {
+                "name": "heuristic_static_verifier",
+                "description": "Run deterministic source-to-sink and false-positive checks.",
+                "input_schema": {"candidate": "object", "code_context": "object"},
+            },
+            {
+                "name": "local_sast_replay",
+                "description": "Replay lightweight SAST checks on the local code window.",
+                "input_schema": {"snippet": "string", "vulnerability_type": "string"},
+            },
+        ],
         "tools_used": [],
         "code_context": _read_code_context(candidate, code_root, radius=radius),
     }
@@ -31,6 +49,14 @@ def build_verification_context(
         "name": "heuristic_static_verifier",
         "purpose": "Check common source-to-sink and false-positive patterns.",
         "success": True,
+    })
+    sast_replay = _local_sast_replay(candidate, context["code_context"])
+    context["sast_replay"] = sast_replay
+    context["tools_used"].append({
+        "name": "local_sast_replay",
+        "purpose": "Replay lightweight SAST checks on the candidate code window.",
+        "success": True,
+        "matched_rules": [rule["rule_id"] for rule in sast_replay.get("matched_rules", [])],
     })
     return context
 
@@ -97,21 +123,88 @@ def _run_heuristic_verifier(candidate: dict[str, Any], code_context: dict[str, A
     checks: list[dict[str, Any]] = []
 
     if "sql" in vuln_type:
-        return _verify_sql(lowered, checks)
+        return _with_call_path(_verify_sql(lowered, checks), candidate, code_context)
     if "command" in vuln_type or "rce" in vuln_type:
-        return _verify_command(lowered, checks)
+        return _with_call_path(_verify_command(lowered, checks), candidate, code_context)
     if "path" in vuln_type or "traversal" in vuln_type:
-        return _verify_path_traversal(lowered, checks)
+        return _with_call_path(_verify_path_traversal(lowered, checks), candidate, code_context)
     if "secret" in vuln_type or "credential" in vuln_type or "key" in vuln_type:
-        return _verify_secret(text, checks)
+        return _with_call_path(_verify_secret(text, checks), candidate, code_context)
 
     checks.append({"name": "generic_context_present", "passed": bool(text.strip())})
-    return {
+    return _with_call_path({
         "is_valid": None,
         "confidence": 0.55,
         "checks": checks,
         "reason": "No type-specific local verifier matched this finding.",
-    }
+    }, candidate, code_context)
+
+
+def _local_sast_replay(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
+    vuln_type = str(candidate.get("type") or candidate.get("vulnerability_type") or "")
+    text = "\n".join([
+        str(candidate.get("code_snippet") or candidate.get("vulnerable_code") or ""),
+        str(code_context.get("snippet") or ""),
+    ])
+    rules = []
+    rule_specs = [
+        ("sqli-string-concat", "SQL Injection", r"(execute|query|cursor\.execute)\s*\(.*?(\+|f['\"]|format\s*\()"),
+        ("command-dynamic-exec", "Command Injection", r"(os\.system|subprocess\.(run|call|popen)|exec|eval)\s*\(.*?(\+|shell\s*=\s*true|f['\"]|format\s*\()"),
+        ("path-user-file-read", "Path Traversal", r"(open|readfile|file_get_contents|include|require)\s*\(.*?(request|_GET|_POST|params|args\.get|input)"),
+        ("hardcoded-secret-literal", "Hardcoded Secret", r"(password|passwd|secret|api[_-]?key|token|access[_-]?key)\s*[=:]\s*['\"][^'\"]{6,}['\"]"),
+    ]
+    for rule_id, rule_type, pattern in rule_specs:
+        if rule_type.lower() in vuln_type.lower() or not vuln_type:
+            if re.search(pattern, text, re.I | re.S):
+                rules.append({"rule_id": rule_id, "type": rule_type, "matched": True})
+    if "sql" in vuln_type.lower() and not any(rule["type"] == "SQL Injection" for rule in rules):
+        built_query_var = re.search(
+            r"(?P<var>[a-zA-Z_][\w]*)\s*=\s*[^\n]*(select|insert|update|delete)[^\n]*(\+|f['\"]|format\s*\()",
+            text,
+            re.I,
+        )
+        if built_query_var and re.search(rf"\bexecute\s*\(\s*{re.escape(built_query_var.group('var'))}\s*\)", text, re.I):
+            rules.append({
+                "rule_id": "sqli-built-query-variable",
+                "type": "SQL Injection",
+                "matched": True,
+                "detail": "SQL query is built dynamically and later passed to execute().",
+            })
+    return {"matched_rules": rules, "snippet_available": bool(text.strip())}
+
+
+def _with_call_path(result: dict[str, Any], candidate: dict[str, Any],
+                    code_context: dict[str, Any]) -> dict[str, Any]:
+    result.setdefault("call_path", _build_static_call_path(candidate, code_context, result))
+    return result
+
+
+def _build_static_call_path(candidate: dict[str, Any], code_context: dict[str, Any],
+                            verdict: dict[str, Any]) -> list[dict[str, Any]]:
+    file_path = candidate.get("file") or candidate.get("file_path") or code_context.get("file")
+    finding_line = _to_int(candidate.get("start_line") or candidate.get("line") or code_context.get("line"))
+    lines = code_context.get("lines") or []
+    snippet = candidate.get("code_snippet") or candidate.get("vulnerable_code") or ""
+    hops: list[dict[str, Any]] = []
+
+    source_line = _find_line(lines, ["request", "args.get", "_get", "_post", "params", "input"], fallback=finding_line)
+    sink_line = _find_line(lines, ["execute", "query", "os.system", "subprocess", "open(", "readfile", "pickle.loads"], fallback=finding_line)
+
+    if verdict.get("source"):
+        hops.append({"stage": "source", "file": file_path, "line": source_line, "detail": verdict["source"]})
+    if snippet:
+        hops.append({"stage": "candidate", "file": file_path, "line": finding_line, "detail": snippet[:240]})
+    if verdict.get("sink"):
+        hops.append({"stage": "sink", "file": file_path, "line": sink_line, "detail": verdict["sink"]})
+    return hops
+
+
+def _find_line(lines: list[dict[str, Any]], needles: list[str], fallback: int | None) -> int | None:
+    for row in lines:
+        code = str(row.get("code") or "").lower()
+        if any(needle in code for needle in needles):
+            return _to_int(row.get("line")) or fallback
+    return fallback
 
 
 def _verify_sql(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:

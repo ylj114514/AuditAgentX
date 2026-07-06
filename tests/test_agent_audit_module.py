@@ -37,6 +37,9 @@ def test_verify_agent_confirms_unsafe_sql_with_local_tools(monkeypatch, tmp_path
     assert result["_tool_evidence"]["code_context"]["found"] is True
     assert result["_tool_evidence"]["heuristic_result"]["is_valid"] is True
     assert "code_context_reader" in {tool["name"] for tool in result["_tool_evidence"]["tools_used"]}
+    assert "local_sast_replay" in {tool["name"] for tool in result["tool_calls"]}
+    assert result["call_path"]
+    assert result["evidence_chain"]["sast_replay"]["matched_rules"]
 
 
 def test_verify_agent_filters_parameterized_sql_false_positive(monkeypatch, tmp_path: Path):
@@ -60,3 +63,24 @@ def test_verify_agent_filters_parameterized_sql_false_positive(monkeypatch, tmp_
     assert result["is_valid"] is False
     assert "parameterized" in result["false_positive_reason"].lower()
     assert result["_tool_evidence"]["heuristic_result"]["is_valid"] is False
+
+
+def test_exploit_fallback_uses_verified_call_path():
+    from backend.agents.exploit_agent import ExploitAgent
+    from backend.verifier import exploit_templates as tpl
+
+    template = tpl.match_template("SQL Injection")
+    finding = {
+        "type": "SQL Injection",
+        "file": "app.py",
+        "line": 21,
+        "_verify": {
+            "call_path": [
+                {"stage": "source", "file": "app.py", "line": 17, "detail": "request.args['id']"},
+                {"stage": "sink", "file": "app.py", "line": 21, "detail": "cursor.execute"},
+            ]
+        },
+    }
+    result = ExploitAgent._fallback(finding, template)
+    assert "source" in result["exploit_path"]
+    assert "/user" in result["exploit_code"]
