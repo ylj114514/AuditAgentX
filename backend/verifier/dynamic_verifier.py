@@ -62,7 +62,7 @@ class HttpProbe:
         rec = ProbeRecord(url=url, method=method, params={param: payload}, payload=payload)
         t0 = time.time()
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+            with httpx.Client(timeout=self.timeout, follow_redirects=True, trust_env=False) as client:
                 if method == "GET":
                     resp = client.get(url, params={param: payload})
                 else:
