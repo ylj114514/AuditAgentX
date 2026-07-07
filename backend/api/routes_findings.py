@@ -181,6 +181,7 @@ def _decode_evidence(ev: Evidence) -> dict:
         tool_calls = poc.get("tool_calls")
         static_evidence_chain = poc.get("static_evidence_chain")
         verification = poc.get("verification")
+        sandbox = poc.get("sandbox")
     else:
         exploit = None
         runtime = None
@@ -190,6 +191,10 @@ def _decode_evidence(ev: Evidence) -> dict:
         tool_calls = None
         static_evidence_chain = None
         verification = None
+        sandbox = None
+    # 沙箱信息也可能嵌在 runtime 里
+    if sandbox is None and isinstance(runtime, dict):
+        sandbox = runtime.get("sandbox")
     return {
         "source": _loads(ev.source),
         "sink": _loads(ev.sink),
@@ -198,6 +203,7 @@ def _decode_evidence(ev: Evidence) -> dict:
         "exploit": exploit,
         "runtime": runtime,
         "harness": harness,
+        "sandbox": sandbox,
         "poc_result": poc_result,
         "tool_calls": tool_calls or [],
         "static_evidence_chain": static_evidence_chain or {},

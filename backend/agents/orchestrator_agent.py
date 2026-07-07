@@ -414,6 +414,7 @@ class OrchestratorAgent:
                         "runtime": ev.get("runtime"),
                         "call_path": ev.get("call_path"),
                         "harness": ev.get("harness"),
+                        "sandbox": ev.get("sandbox"),
                         "poc_result": ev.get("poc_result"),
                         "tool_calls": ev.get("tool_calls"),
                         "static_evidence_chain": ev.get("static_evidence_chain"),

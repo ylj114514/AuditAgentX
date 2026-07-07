@@ -46,41 +46,49 @@
       </el-card>
 
       <el-card class="panel-card config-card" shadow="never">
-        <template #header>分析配置</template>
-        <div class="switch-list">
-          <div class="switch-row">
-            <div><b>静态分析</b><p>调用 custom / Semgrep / Gitleaks 等工具生成候选漏洞。</p></div>
-            <el-switch v-model="analysis.static" disabled />
+        <template #header>扫描模式</template>
+        <div class="mode-list">
+          <div :class="['mode-row', scanMode === 'quick' && 'mode-active']" @click="scanMode = 'quick'">
+            <div><b>Quick 快速扫描</b><p>仅静态扫描（Semgrep / Gitleaks / 污点规则），不调用 LLM，不动态验证。</p></div>
+            <el-radio :model-value="scanMode" value="quick" />
           </div>
-          <div class="switch-row">
-            <div><b>LLM 审计与验证</b><p>启用 AuditAgent 和 VerifyAgent 进行语义分析和误报过滤。</p></div>
-            <el-switch v-model="analysis.llm" />
+          <div :class="['mode-row', scanMode === 'standard' && 'mode-active']" @click="scanMode = 'standard'">
+            <div><b>Standard 标准智能体审计</b><p>含 Quick + AuditAgent 语义审计 + VerifyAgent 复核去误报 + source→sink 证据链 + 报告。不主动发起动态请求。</p></div>
+            <el-radio :model-value="scanMode" value="standard" />
           </div>
-          <div class="switch-row">
-            <div><b>动态分析</b><p>对本地授权靶场执行动态验证，保存运行时证据。</p></div>
-            <el-switch v-model="analysis.dynamic" />
-          </div>
-          <div class="switch-row">
-            <div><b>可利用代码</b><p>为已验证漏洞生成本地授权 PoC / 利用代码骨架。</p></div>
-            <el-switch v-model="analysis.exploit" />
+          <div :class="['mode-row', scanMode === 'deep' && 'mode-active']" @click="scanMode = 'deep'">
+            <div><b>Deep Docker 沙箱验证</b><p>含 Standard + 在 Docker 沙箱中尝试启动 GitHub 项目，对本地容器服务执行授权动态验证 + Harness 验证。</p></div>
+            <el-radio :model-value="scanMode" value="deep" />
           </div>
         </div>
 
         <el-alert
-          v-if="analysis.dynamic"
+          v-if="scanMode === 'deep'"
           type="warning"
           show-icon
           :closable="false"
-          title="动态分析仅面向本地授权靶场，不会也不应攻击真实第三方系统。"
+          title="Deep 模式将在 Docker 沙箱中尝试启动 GitHub 项目，只对本地容器服务执行授权动态验证，不会攻击真实第三方系统。"
           class="notice"
         />
 
-        <el-form v-if="analysis.dynamic" :model="dynamic" label-position="top" class="dynamic-form">
-          <el-form-item label="动态目标 Base URL">
-            <el-input v-model="dynamic.base_url" placeholder="http://127.0.0.1:8080" />
+        <el-form v-if="scanMode === 'deep'" :model="deep" label-position="top" class="dynamic-form">
+          <p class="deep-hint">高级配置可留空，后端 launch_detector 会自动推断启动方式。</p>
+          <el-form-item label="安装命令 install_command">
+            <el-input v-model="deep.install_command" placeholder="pip install -r requirements.txt" />
           </el-form-item>
-          <el-form-item label="端点列表">
-            <el-input v-model="dynamic.endpoints" placeholder="/user,/search" />
+          <el-form-item label="启动命令 run_command">
+            <el-input v-model="deep.run_command" placeholder="python app.py" />
+          </el-form-item>
+          <div class="deep-inline">
+            <el-form-item label="端口 port">
+              <el-input v-model="deep.port" placeholder="5000" />
+            </el-form-item>
+            <el-form-item label="健康检查路径">
+              <el-input v-model="deep.health_path" placeholder="/" />
+            </el-form-item>
+          </div>
+          <el-form-item label="环境变量 env（每行 KEY=VALUE）">
+            <el-input v-model="deep.env" type="textarea" :rows="2" placeholder="DEBUG=1" />
           </el-form-item>
         </el-form>
 
@@ -118,8 +126,10 @@ const form = reactive({
   branch: "",
 });
 
-const analysis = reactive({ static: true, llm: true, dynamic: true, exploit: true });
-const dynamic = reactive({ base_url: "http://127.0.0.1:8080", endpoints: "/user" });
+// 扫描模式：quick / standard / deep（Docker 沙箱）
+const scanMode = ref<"quick" | "standard" | "deep">("standard");
+// Deep 模式可选高级配置（留空则由后端 launch_detector 自动推断）
+const deep = reactive({ install_command: "", run_command: "", port: "", health_path: "/", env: "" });
 
 function pickDirectory() {
   directoryInput.value?.click();
@@ -167,27 +177,30 @@ async function submit() {
       const { data } = await ProjectApi.create(payload);
       proj = data;
     }
-    const enabledAgents = analysis.llm ? ["audit", "verify"] : [];
-    if (analysis.exploit) enabledAgents.push("exploit");
-
-    const options: any = {
-      enable_poc: false,
-      enable_exploit: analysis.exploit,
-      enable_dynamic: analysis.dynamic,
-    };
-    if (analysis.dynamic) {
+    // Deep 模式：组装 docker_project 靶场 + 可选 launch_plan 覆盖项
+    const options: any = { enable_poc: false };
+    if (scanMode.value === "deep") {
+      const launchPlan: any = {};
+      if (deep.install_command.trim()) launchPlan.install_command = deep.install_command.trim();
+      if (deep.run_command.trim()) launchPlan.run_command = deep.run_command.trim();
+      if (deep.port.trim()) launchPlan.port = Number(deep.port.trim());
+      if (deep.health_path.trim()) launchPlan.health_path = deep.health_path.trim();
+      const env: Record<string, string> = {};
+      deep.env.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).forEach((kv) => {
+        const i = kv.indexOf("="); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1);
+      });
       options.dynamic_target = {
-        mode: "url",
-        base_url: dynamic.base_url,
-        endpoints: dynamic.endpoints.split(",").map((item) => item.trim()).filter(Boolean),
+        mode: "docker_project",
+        ...(Object.keys(launchPlan).length ? { launch_plan: launchPlan } : {}),
+        ...(Object.keys(env).length ? { env } : {}),
       };
     }
 
     const { data: scan } = await ScanApi.create({
       project_id: proj.project_id,
-      scan_type: analysis.dynamic ? "full" : "static",
+      scan_mode: scanMode.value,
+      scan_type: scanMode.value === "quick" ? "static" : "full",
       enabled_tools: ["custom", "semgrep", "gitleaks"],
-      enabled_agents: enabledAgents,
       options,
     });
 
@@ -229,6 +242,13 @@ async function submit() {
 .switch-list { display: flex; flex-direction: column; gap: 14px; }
 .switch-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid #e4ebf3; border-radius: 12px; background: #fbfdff; }
 .switch-row p { margin: 4px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
+.mode-list { display: flex; flex-direction: column; gap: 12px; }
+.mode-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px; border: 1px solid #e4ebf3; border-radius: 12px; background: #fbfdff; cursor: pointer; transition: all .15s; }
+.mode-row:hover { border-color: #2f80ed; }
+.mode-active { border-color: #2f80ed; background: #eef5ff; }
+.mode-row p { margin: 4px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
+.deep-hint { color: #98a2b3; font-size: 13px; margin: 0 0 8px; }
+.deep-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .notice { margin-top: 14px; }
 .dynamic-form { margin-top: 14px; }
 .submit-btn { width: 100%; margin-top: 18px; }

@@ -8,7 +8,7 @@
 | 文件 | 职责 |
 |---|---|
 | `strategy.py` | 漏洞类型 → 动态验证策略映射（http / harness / both / not_applicable），覆盖 30+ 漏洞类型 |
-| `launch_detector.py` | 自动识别项目启动方式（Flask/FastAPI/Django/Express/Spring/PHP/Docker），推断启动命令与端口 |
+| `launch_detector.py` | 自动识别项目启动方式，输出结构化 launch_plan（framework/install_command/run_command/port/health_path…） |
 | `endpoint_extractor.py` | 自动提取路由/端点（多框架正则），确定动态验证攻击面 |
 | `symbol_resolver.py` | **Vulnhuntr 式跨文件符号解析**：按名字找函数/类定义源码，供 AuditAgent 递归补全调用链 |
 

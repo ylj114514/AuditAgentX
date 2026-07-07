@@ -87,6 +87,7 @@
 {% if f.evidence.exploit %}- 利用路径：{{ f.evidence.exploit.exploit_path or "N/A" }}
 - 触发位置：`{{ f.evidence.exploit.trigger_location or "N/A" }}`
 - Payload：`{{ (f.evidence.exploit.payloads or []) | join(" / ") or "N/A" }}`
+{% endif %}{% if f.evidence.sandbox %}- Docker 沙箱：{{ f.evidence.sandbox.status }}（健康检查 {{ f.evidence.sandbox.health_check }}，镜像 `{{ f.evidence.sandbox.image or "N/A" }}`，启动命令 `{{ f.evidence.sandbox.launch_command or "N/A" }}`）
 {% endif %}{% if f.evidence.runtime %}- 动态验证状态：{{ f.evidence.runtime.reproduction_status or ("可复现" if f.evidence.runtime.reproducible else "未复现") }}
 - 命中特征：`{{ f.evidence.runtime.matched_indicator or "N/A" }}`
 - 响应状态：{{ f.evidence.runtime.response_status or "N/A" }}

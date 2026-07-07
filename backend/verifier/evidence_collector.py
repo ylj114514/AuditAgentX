@@ -53,11 +53,13 @@ class EvidenceCollector:
     @staticmethod
     def build(verify_result: dict, exploit: dict | None = None,
               dynamic: dict | None = None, poc_result: dict | None = None,
-              harness: dict | None = None) -> dict:
-        """组装写入 evidence 表的证据结构（md 7.9 证据链格式 + 动态利用/Harness 证据）。"""
+              harness: dict | None = None, sandbox: dict | None = None) -> dict:
+        """组装写入 evidence 表的证据结构（md 7.9 证据链格式 + 动态利用/Harness/Docker 沙箱证据）。"""
         exploit = exploit or {}
         dynamic = dynamic or {}
         harness = harness or {}
+        # 沙箱元信息可能已由 pipeline 塞进 dynamic，优先用显式参数
+        sandbox = sandbox or (dynamic.get("sandbox") if isinstance(dynamic, dict) else None)
         logs = ["候选漏洞由 AuditAgent 产生", "VerifyAgent 独立复核通过"]
 
         if exploit:
@@ -74,6 +76,9 @@ class EvidenceCollector:
             logs.append(f"Fuzzing Harness 验证: {harness.get('verdict', '')}"
                         + (f"（{harness.get('trigger_detail', '')}）"
                            if harness.get('dynamically_triggered') else ""))
+        if sandbox:
+            logs.append(f"Docker 沙箱: {sandbox.get('status', '')}"
+                        f"（健康检查 {sandbox.get('health_check', '')}）")
 
         confirmed = dynamic.get("confirmed_record") or {}
         sample_record = confirmed or ((dynamic.get("records") or [{}])[0] if dynamic.get("records") else {})
@@ -100,6 +105,7 @@ class EvidenceCollector:
                 "records": dynamic.get("records", [])[:10],
                 "candidate_endpoints": dynamic.get("candidate_endpoints") or [],
                 "evidence_flow": _build_runtime_flow(verify_result, exploit, sample_record, dynamic),
+                "sandbox": sandbox,
             }
 
         return {
@@ -121,6 +127,8 @@ class EvidenceCollector:
             },
             # 动态运行时证据
             "runtime": runtime,
+            # Docker 沙箱环境证据（Deep 模式 docker_project）
+            "sandbox": sandbox,
             "poc_result": {
                 "poc": (poc_result or {}).get("poc"),
                 "executed": (poc_result or {}).get("poc_executed", False),

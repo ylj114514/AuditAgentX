@@ -45,6 +45,8 @@ class ScanOptions(BaseModel):
 class ScanCreate(BaseModel):
     project_id: str
     scan_type: str = "full"
+    # 扫描模式：quick（仅静态）| standard（+语义审计+复核）| deep（+Docker 沙箱动态验证）
+    scan_mode: str | None = None
     enabled_tools: list[str] = ["semgrep", "gitleaks"]
     enabled_agents: list[str] = ["audit", "verify"]
     options: ScanOptions = ScanOptions()

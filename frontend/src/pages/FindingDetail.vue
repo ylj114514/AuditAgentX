@@ -43,6 +43,20 @@
             <el-button type="primary" :loading="verifying" @click="runVerify">执行动态验证</el-button>
           </div>
           <el-alert type="warning" show-icon :closable="false" title="动态验证仅限本地授权靶场，不要对真实第三方系统使用。" />
+
+          <el-descriptions v-if="evidence?.sandbox" :column="2" border class="evidence-desc" title="Docker 沙箱环境">
+            <el-descriptions-item label="沙箱模式">{{ evidence.sandbox.mode || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="状态">
+              <el-tag :type="evidence.sandbox.status === 'started' ? 'success' : 'danger'">{{ evidence.sandbox.status }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="镜像">{{ evidence.sandbox.image || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="容器 ID">{{ evidence.sandbox.container_id || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="Base URL">{{ evidence.sandbox.base_url || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="健康检查">{{ evidence.sandbox.health_check || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="启动命令" :span="2"><code>{{ evidence.sandbox.launch_command || "N/A" }}</code></el-descriptions-item>
+            <el-descriptions-item label="容器日志摘要" :span="2"><pre class="mini-pre">{{ evidence.sandbox.logs_excerpt || "N/A" }}</pre></el-descriptions-item>
+          </el-descriptions>
+
           <el-descriptions v-if="evidence?.runtime" :column="2" border class="evidence-desc">
             <el-descriptions-item label="验证结论">
               <el-tag :type="runtimeTagType(evidence.runtime)">{{ runtimeStatusLabel(evidence.runtime) }}</el-tag>

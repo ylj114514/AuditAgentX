@@ -13,11 +13,16 @@ SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", "__pycache__", "
 
 
 def detect_launch(code_root: Path | None) -> dict:
-    """返回 {framework, command, port, health_path, dockerfile, compose, confidence, notes}。"""
+    """返回结构化 launch_plan：
+
+    {framework, install_command, run_command, command(兼容旧字段), port,
+     health_path, dockerfile, compose, confidence, notes, manual_steps}
+    """
     result = {
-        "framework": None, "command": None, "port": None,
-        "health_path": "/", "dockerfile": None, "compose": None,
-        "confidence": "low", "notes": [],
+        "framework": None, "install_command": None, "run_command": None,
+        "command": None, "port": None, "health_path": "/",
+        "dockerfile": None, "compose": None, "confidence": "low",
+        "notes": [], "manual_steps": [],
     }
     if not code_root or not Path(code_root).exists():
         result["notes"].append("code_root 不存在，无法识别启动方式")
@@ -43,9 +48,37 @@ def detect_launch(code_root: Path | None) -> dict:
     if detected:
         result.update({k: v for k, v in detected.items() if v})
         result["confidence"] = "medium" if not result["dockerfile"] else "high"
+        # run_command 兼容旧 command 字段
+        if result.get("command") and not result.get("run_command"):
+            result["run_command"] = result["command"]
+        elif result.get("run_command") and not result.get("command"):
+            result["command"] = result["run_command"]
+        # 补依赖安装命令
+        if not result.get("install_command"):
+            result["install_command"] = _install_command(root, result.get("framework"))
     if not result["framework"]:
         result["notes"].append("未识别到已知 Web 框架，建议手动指定启动命令")
+        result["manual_steps"].append("请手动提供 install_command / run_command / port")
     return result
+
+
+def _install_command(root: Path, framework: str | None) -> str | None:
+    """根据依赖清单文件推断依赖安装命令。"""
+    if (root / "requirements.txt").exists():
+        return "pip install --no-cache-dir -r requirements.txt"
+    if (root / "pyproject.toml").exists():
+        return "pip install --no-cache-dir ."
+    if (root / "Pipfile").exists():
+        return "pipenv install --deploy"
+    if (root / "package.json").exists():
+        return "npm install"
+    if (root / "composer.json").exists():
+        return "composer install --no-dev"
+    if (root / "pom.xml").exists():
+        return "mvn -q -DskipTests package"
+    if (root / "build.gradle").exists():
+        return "gradle build -x test"
+    return None
 
 
 def _read(path: Path) -> str:

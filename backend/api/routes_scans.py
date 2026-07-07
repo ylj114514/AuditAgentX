@@ -27,6 +27,34 @@ def _run_scan_task(scan_id: str) -> None:
         db.close()
 
 
+def resolve_scan_mode(payload: ScanCreate) -> dict:
+    """把 scan_mode（quick/standard/deep）映射为 enabled_agents + options。
+
+    - quick    ：仅静态扫描，不审计/不复核/不动态。
+    - standard ：+ AuditAgent 语义审计 + VerifyAgent 复核 + 误报过滤 + 报告；不主动动态验证。
+    - deep     ：+ Docker-first 动态验证（exploit + HTTP + harness），dynamic_target 默认 docker_project。
+
+    未显式传 scan_mode 时，沿用 payload 里的 enabled_agents/options（向后兼容）。
+    """
+    mode = (payload.scan_mode or "").lower()
+    agents = list(payload.enabled_agents)
+    opts = payload.options.model_dump()
+
+    if mode == "quick":
+        agents = []
+        opts.update(enable_exploit=False, enable_dynamic=False, enable_harness=False)
+    elif mode == "standard":
+        agents = ["audit", "verify"]
+        opts.update(enable_exploit=False, enable_dynamic=False, enable_harness=False)
+    elif mode == "deep":
+        agents = ["audit", "verify", "exploit", "harness"]
+        opts.update(enable_exploit=True, enable_dynamic=True, enable_harness=True)
+        # Deep 默认 Docker-first：未显式指定动态目标时用 docker_project
+        if not opts.get("dynamic_target"):
+            opts["dynamic_target"] = {"mode": "docker_project", "scan_id": None}
+    return {"enabled_agents": agents, "options": opts, "scan_mode": mode or None}
+
+
 @router.post("", response_model=ScanOut)
 def create_scan(payload: ScanCreate, background: BackgroundTasks,
                 db: Session = Depends(get_db)) -> ScanOut:
@@ -34,13 +62,19 @@ def create_scan(payload: ScanCreate, background: BackgroundTasks,
     if not project:
         raise HTTPException(404, "project not found")
     sid = ids.scan_id()
+    resolved = resolve_scan_mode(payload)
+    # Deep 模式把 scan_id 补进 docker_project 目标，便于容器命名
+    dt = resolved["options"].get("dynamic_target")
+    if isinstance(dt, dict) and dt.get("mode") == "docker_project" and not dt.get("scan_id"):
+        dt["scan_id"] = sid
     scan = Scan(
         id=sid, project_id=payload.project_id, scan_type=payload.scan_type,
         status="queued", progress=0,
         config_json=json.dumps({
+            "scan_mode": resolved["scan_mode"],
             "enabled_tools": payload.enabled_tools,
-            "enabled_agents": payload.enabled_agents,
-            "options": payload.options.model_dump(),
+            "enabled_agents": resolved["enabled_agents"],
+            "options": resolved["options"],
         }, ensure_ascii=False),
     )
     db.add(scan)
