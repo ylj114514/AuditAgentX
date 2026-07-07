@@ -296,23 +296,9 @@ class AuditMCPServer:
         dv = DynamicVerifier()
         dr = dv.verify(base_url, exploit, endpoints)
 
-        # 把 DynamicResult 的 reason 映射到 ACP reproduction_status
-        if dr.reproducible:
-            status = "dynamic_confirmed"
-        elif dr.skipped:
-            # skipped 在 DynamicVerifier 只出现在"无 payloads"或"空 base_url"
-            # 此处 base_url 非空，所以只能是无 payloads
-            status = "not_executed"
-        else:
-            # 用 reason 精确区分失败原因
-            reason_map = {
-                "connection_failed": "connection_failed",
-                "request_timeout": "request_timeout",
-                "endpoint_not_found": "endpoint_not_found",
-                "payload_not_matched": "not_reproduced",
-                "no_probe_executed": "not_executed",
-            }
-            status = reason_map.get(dr.reason, "not_reproduced")
+        status = dr.reproduction_status or (
+            "dynamic_confirmed" if dr.reproducible else "not_reproduced"
+        )
 
         confirmed = dr.confirmed_record or {}
         return {

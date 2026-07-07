@@ -17,6 +17,7 @@ export const ScanApi = {
   create: (data: any) => http.post("/scans", data),
   get: (id: string) => http.get(`/scans/${id}`),
   findings: (id: string) => http.get(`/scans/${id}/findings`),
+  agentMessages: (id: string, full = false) => http.get(`/scans/${id}/agent-messages`, { params: { full } }),
 };
 
 export const FindingApi = {

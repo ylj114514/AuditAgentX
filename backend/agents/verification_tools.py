@@ -10,6 +10,14 @@ from pathlib import Path
 from typing import Any
 
 
+RUNTIME_VULN_KEYWORDS = ("sql", "command", "rce", "path", "traversal", "ssrf", "ssti", "upload")
+STATIC_ASSET_PARTS = {
+    "static", "assets", "asset", "public", "dist", "build", "vendor",
+    "node_modules", "third-party", "third_party", "layui", "ueditor", "dplayer",
+}
+STATIC_ASSET_SUFFIXES = (".min.js", ".bundle.js", ".chunk.js", ".map")
+
+
 def build_verification_context(
     candidate: dict[str, Any],
     code_root: Path | None,
@@ -130,6 +138,10 @@ def _read_code_context(candidate: dict[str, Any], code_root: Path | None, *, rad
 
 def _run_heuristic_verifier(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
     vuln_type = str(candidate.get("type") or candidate.get("vulnerability_type") or "").lower()
+    asset_fp = _static_asset_false_positive(candidate, vuln_type)
+    if asset_fp:
+        return _with_call_path(asset_fp, candidate, code_context)
+
     text = "\n".join([
         str(candidate.get("code_snippet") or candidate.get("vulnerable_code") or ""),
         str(code_context.get("snippet") or ""),
@@ -152,6 +164,7 @@ def _run_heuristic_verifier(candidate: dict[str, Any], code_context: dict[str, A
         "confidence": 0.55,
         "checks": checks,
         "reason": "No type-specific local verifier matched this finding.",
+        "runtime_verification_status": "not_runtime_verifiable",
     }, candidate, code_context)
 
 
@@ -192,6 +205,46 @@ def _with_call_path(result: dict[str, Any], candidate: dict[str, Any],
                     code_context: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("call_path", _build_static_call_path(candidate, code_context, result))
     return result
+
+
+def _static_asset_false_positive(candidate: dict[str, Any], vuln_type: str) -> dict[str, Any] | None:
+    """Reject server-side runtime findings reported inside static/third-party assets.
+
+    A SQL/command/path traversal finding in a minified frontend asset usually has no
+    server-side source-to-sink path and should not be sent to dynamic HTTP probing.
+    """
+    if not any(keyword in vuln_type for keyword in RUNTIME_VULN_KEYWORDS):
+        return None
+
+    file_path = str(candidate.get("file") or candidate.get("file_path") or "").replace("\\", "/").lower()
+    if not file_path:
+        return None
+    parts = {part for part in file_path.split("/") if part}
+    is_static_asset = (
+        bool(parts & STATIC_ASSET_PARTS)
+        or file_path.endswith(STATIC_ASSET_SUFFIXES)
+        or "/static_" in file_path
+    )
+    if not is_static_asset:
+        return None
+
+    return {
+        "is_valid": False,
+        "confidence": 0.9,
+        "checks": [
+            {"name": "static_or_third_party_asset_detected", "passed": True, "file": file_path},
+            {"name": "server_side_runtime_flow_absent", "passed": True},
+        ],
+        "false_positive_reason": (
+            "Candidate is located in a static/third-party/minified frontend asset, "
+            "so no server-side runtime source-to-sink path is established."
+        ),
+        "source": None,
+        "sink": None,
+        "propagation_path": [],
+        "runtime_verification_status": "not_runtime_verifiable",
+        "recommended_poc_strategy": "Do not run dynamic HTTP verification unless a backend route reaches this code.",
+    }
 
 
 def _build_static_call_path(candidate: dict[str, Any], code_context: dict[str, Any],

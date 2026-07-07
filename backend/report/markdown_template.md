@@ -78,11 +78,31 @@
 
 - Source：`{{ f.evidence.source or "N/A" }}`
 - Sink：`{{ f.evidence.sink or "N/A" }}`
+{% if f.evidence.call_path %}
+- 调用路径：
+{% for hop in f.evidence.call_path %}
+  {{ loop.index }}. {{ hop.stage or "step" }}：{{ hop.detail or hop }}
+{% endfor %}
+{% endif %}
 {% if f.evidence.exploit %}- 利用路径：{{ f.evidence.exploit.exploit_path or "N/A" }}
 - 触发位置：`{{ f.evidence.exploit.trigger_location or "N/A" }}`
-{% endif %}{% if f.evidence.runtime %}- 动态验证：{{ "可复现" if f.evidence.runtime.reproducible else "未复现" }}
+- Payload：`{{ (f.evidence.exploit.payloads or []) | join(" / ") or "N/A" }}`
+{% endif %}{% if f.evidence.runtime %}- 动态验证状态：{{ f.evidence.runtime.reproduction_status or ("可复现" if f.evidence.runtime.reproducible else "未复现") }}
 - 命中特征：`{{ f.evidence.runtime.matched_indicator or "N/A" }}`
 - 响应状态：{{ f.evidence.runtime.response_status or "N/A" }}
+- 请求：`{{ (f.evidence.runtime.request or {}).url or "N/A" }}`
+- 原因：{{ f.evidence.runtime.reason or "N/A" }}
+{% if f.evidence.runtime.evidence_flow %}
+- 动态证据流：
+{% for step in f.evidence.runtime.evidence_flow %}
+  {{ loop.index }}. {{ step.stage }}：{{ step.detail }}
+{% endfor %}
+{% endif %}
+{% endif %}{% if f.evidence.harness %}- Harness：{{ f.evidence.harness.verdict or "N/A" }}，触发={{ "是" if f.evidence.harness.dynamically_triggered else "否" }}
+{% endif %}{% if f.evidence.tool_calls %}- 工具调用：
+{% for tc in f.evidence.tool_calls %}
+  {{ loop.index }}. {{ tc.name or tc.tool_name }}：{{ tc.purpose or "" }}
+{% endfor %}
 {% endif %}
 {% endif %}
 

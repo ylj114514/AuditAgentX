@@ -96,8 +96,8 @@
             <el-table-column prop="file" label="位置" min-width="220" show-overflow-tooltip />
             <el-table-column label="验证结论" width="120">
               <template #default="scope">
-                <el-tag :type="scope.row.runtime?.reproducible ? 'success' : 'warning'">
-                  {{ scope.row.runtime?.reproducible ? "可复现" : "未复现" }}
+                <el-tag :type="runtimeTagType(scope.row.runtime)">
+                  {{ runtimeStatusLabel(scope.row.runtime) }}
                 </el-tag>
               </template>
             </el-table-column>
@@ -133,6 +133,34 @@
             </article>
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="Agent 通信流" name="agents">
+          <div class="tab-intro">
+            <h2>Agent 通信流</h2>
+            <p>回放本次扫描保存的 ACP 消息，展示每个 Agent 的输入、输出、裁决和置信度。</p>
+          </div>
+          <el-empty v-if="agentMessages.length === 0" description="暂无 Agent 通信记录，扫描完成后会写入 ACP trace。" />
+          <el-timeline v-else class="agent-timeline">
+            <el-timeline-item
+              v-for="msg in agentMessages"
+              :key="msg.message_id"
+              :timestamp="formatTime(msg.timestamp)"
+              :type="agentTimelineType(msg)"
+            >
+              <div class="agent-message-card">
+                <div class="agent-message-head">
+                  <strong>{{ agentName(msg.sender) }} → {{ agentName(msg.receiver) }}</strong>
+                  <el-tag size="small" :type="verdictTagType(msg.verdict)">{{ msg.verdict || msg.state }}</el-tag>
+                </div>
+                <p>{{ msg.intent || msg.message_type }}</p>
+                <div class="agent-message-meta">
+                  <span>{{ msg.message_type }}</span>
+                  <span v-if="msg.confidence !== null && msg.confidence !== undefined">置信度 {{ msg.confidence }}</span>
+                </div>
+              </div>
+            </el-timeline-item>
+          </el-timeline>
+        </el-tab-pane>
       </el-tabs>
     </el-card>
   </section>
@@ -165,6 +193,7 @@ const loading = ref(false);
 const status = ref<any>(null);
 const findings = ref<any[]>([]);
 const evidenceMap = ref<Record<string, any>>({});
+const agentMessages = ref<any[]>([]);
 
 const highCount = computed(() => findings.value.filter((item) => ["high", "critical"].includes(String(item.severity).toLowerCase())).length);
 const verifiedCount = computed(() => findings.value.filter((item) => item.verified).length);
@@ -210,7 +239,7 @@ async function loadByScanId(nextScanId: string) {
     status.value = data;
     const { data: f } = await ScanApi.findings(nextScanId);
     findings.value = f.findings;
-    await loadEvidence();
+    await Promise.all([loadEvidence(), loadAgentMessages(nextScanId)]);
     upsertHistory({
       scanId: nextScanId,
       projectId: data.project_id,
@@ -235,6 +264,15 @@ async function loadEvidence() {
     }
   }));
   evidenceMap.value = Object.fromEntries(pairs.filter(([, evidence]) => evidence));
+}
+
+async function loadAgentMessages(nextScanId: string) {
+  try {
+    const { data } = await ScanApi.agentMessages(nextScanId);
+    agentMessages.value = data.messages || [];
+  } catch {
+    agentMessages.value = [];
+  }
 }
 
 async function genReport() {
@@ -335,6 +373,44 @@ function severityType(severity: string) {
   return "success";
 }
 
+function runtimeStatusLabel(runtime: any) {
+  const status = runtime?.reproduction_status;
+  if (status === "dynamic_confirmed" || runtime?.reproducible) return "可复现";
+  if (status === "not_reproduced") return "未复现";
+  if (status === "not_executed") return "未执行";
+  if (status === "not_runtime_verifiable") return "不适合动态验证";
+  if (status === "connection_failed") return "连接失败";
+  if (status === "request_timeout") return "请求超时";
+  if (status === "endpoint_not_found") return "入口不存在";
+  return status || "未执行";
+}
+
+function runtimeTagType(runtime: any) {
+  const status = runtime?.reproduction_status;
+  if (status === "dynamic_confirmed" || runtime?.reproducible) return "success";
+  if (status === "not_reproduced") return "warning";
+  if (status === "not_executed" || status === "not_runtime_verifiable") return "info";
+  return "danger";
+}
+
+function agentName(value?: string) {
+  return String(value || "unknown").replace(/_/g, " ");
+}
+
+function verdictTagType(verdict?: string) {
+  const v = String(verdict || "").toLowerCase();
+  if (v.includes("false") || v.includes("failed")) return "danger";
+  if (v.includes("dynamic") || v.includes("confirmed") || v.includes("verified")) return "success";
+  if (v.includes("exploit") || v.includes("harness")) return "warning";
+  return "info";
+}
+
+function agentTimelineType(msg: any) {
+  if (msg.state === "failed") return "danger";
+  if (msg.verdict) return verdictTagType(msg.verdict);
+  return msg.state === "success" ? "success" : "primary";
+}
+
 onMounted(() => {
   refreshHistoryRecords();
   if (scanId.value) loadByScanId(scanId.value);
@@ -368,6 +444,11 @@ onMounted(() => {
 .exploit-head { display: flex; justify-content: space-between; gap: 16px; }
 .exploit-head h3 { margin: 0; }
 .exploit-head p, .exploit-path { color: #667085; margin: 6px 0 12px; }
+.agent-timeline { padding: 8px 0 0; }
+.agent-message-card { border: 1px solid #dce6f0; border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
+.agent-message-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #162235; }
+.agent-message-card p { margin: 8px 0; color: #475467; }
+.agent-message-meta { display: flex; flex-wrap: wrap; gap: 10px; color: #667085; font-size: 12px; }
 pre { background: #101828; color: #d7e3f1; padding: 14px; border-radius: 12px; overflow: auto; }
 @media (max-width: 980px) { .summary-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 680px) { .query-row, .summary-grid { grid-template-columns: 1fr; } .page-title-row { align-items: flex-start; flex-direction: column; } }

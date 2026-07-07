@@ -29,10 +29,21 @@ def create_report(payload: ReportCreate, db: Session = Depends(get_db)) -> Repor
 
     findings = []
     for f in rows:
+        detail = _decode_json(f.detail_json) or {}
+        verify_detail = detail.get("_verify") or {}
         ev = (db.query(Evidence)
               .filter(Evidence.finding_id == f.id)
               .order_by(Evidence.created_at.desc())
               .first())
+        evidence = _decode_report_evidence(ev) if ev else None
+        tool_calls = (
+            verify_detail.get("tool_calls")
+            or (verify_detail.get("_tool_evidence") or {}).get("tools_used")
+            or []
+        )
+        if evidence is not None:
+            evidence["tool_calls"] = tool_calls
+            evidence["static_evidence_chain"] = verify_detail.get("evidence_chain")
         findings.append({
             "finding_id": f.id,
             "type": f.type,
@@ -46,7 +57,8 @@ def create_report(payload: ReportCreate, db: Session = Depends(get_db)) -> Repor
             "verified": f.verified,
             "status": f.status,
             "fix_suggestion": f.fix_suggestion,
-            "evidence": _decode_report_evidence(ev) if ev else None,
+            "tool_calls": tool_calls,
+            "evidence": evidence,
         })
 
     project_ctx = {
@@ -100,7 +112,10 @@ def _decode_report_evidence(ev: Evidence) -> dict:
         "source": _decode_json(ev.source),
         "sink": _decode_json(ev.sink),
         "data_flow": _decode_json(ev.data_flow),
+        "call_path": poc.get("call_path") if isinstance(poc, dict) else None,
         "exploit": exploit,
         "runtime": runtime,
+        "harness": poc.get("harness") if isinstance(poc, dict) else None,
+        "poc_result": poc.get("poc_result") if isinstance(poc, dict) else None,
         "logs": _decode_json(ev.logs),
     }

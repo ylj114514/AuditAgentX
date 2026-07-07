@@ -39,6 +39,7 @@ class ProbeRecord:
 class DynamicResult:
     verified: bool = False
     reproducible: bool = False
+    reproduction_status: str = "not_executed"
     matched_indicator: str = ""
     confirmed_record: dict | None = None
     records: list = field(default_factory=list)   # list[ProbeRecord as dict]
@@ -105,6 +106,7 @@ class DynamicVerifier:
         result = DynamicResult()
         if not base_url:
             result.skipped = True
+            result.reproduction_status = "not_executed"
             result.reason = "无可用目标 base_url（未启用沙箱/靶场）"
             return result
 
@@ -114,6 +116,7 @@ class DynamicVerifier:
         paths = endpoints or _HEURISTIC_PATHS
         if not payloads:
             result.skipped = True
+            result.reproduction_status = "not_runtime_verifiable"
             result.reason = "该漏洞无动态载荷（可能为静态类，如硬编码密钥）"
             return result
 
@@ -145,6 +148,7 @@ class DynamicVerifier:
                     if hit:
                         result.verified = True
                         result.reproducible = True
+                        result.reproduction_status = "dynamic_confirmed"
                         result.matched_indicator = hit
                         result.confirmed_record = rec.__dict__
                         result.logs.append(
@@ -218,6 +222,13 @@ class DynamicVerifier:
 
     @staticmethod
     def _finalize(result: DynamicResult) -> DynamicResult:
+        if not result.reproduction_status or result.reproduction_status == "not_executed":
+            if result.reproducible:
+                result.reproduction_status = "dynamic_confirmed"
+            elif result.reason == "payload_not_matched":
+                result.reproduction_status = "not_reproduced"
+            elif result.reason in {"connection_failed", "request_timeout", "endpoint_not_found", "no_probe_executed"}:
+                result.reproduction_status = result.reason
         # 只保留前若干条记录，避免证据体积过大
         result.records = result.records[:30]
         return result

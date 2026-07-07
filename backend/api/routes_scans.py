@@ -11,6 +11,7 @@ from backend.core import ids
 from backend.models import Project, Scan, Finding
 from backend.schemas import ScanCreate, ScanOut, ScanStatus, FindingBrief
 from backend.agents.orchestrator_agent import OrchestratorAgent
+from backend.acp.trace import ACPTracer
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -60,6 +61,26 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)) -> ScanStatus:
         finished_at=scan.finished_at.isoformat() if scan.finished_at else None,
         error=scan.error,
     )
+
+
+@router.get("/{scan_id}/agent-messages")
+def get_scan_agent_messages(scan_id: str, full: bool = False,
+                            db: Session = Depends(get_db)) -> dict:
+    """返回该扫描的 ACP Agent 通信流，用于前端展示审计过程。"""
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(404, "scan not found")
+
+    tracer = ACPTracer(scan_id=scan_id)
+    messages = tracer.load_all()
+    response = {
+        "scan_id": scan_id,
+        "total": len(messages),
+        "messages": tracer.summary(),
+    }
+    if full:
+        response["full_messages"] = [msg.to_dict() for msg in messages]
+    return response
 
 
 @router.get("/{scan_id}/findings")

@@ -44,13 +44,25 @@
           </div>
           <el-alert type="warning" show-icon :closable="false" title="动态验证仅限本地授权靶场，不要对真实第三方系统使用。" />
           <el-descriptions v-if="evidence?.runtime" :column="2" border class="evidence-desc">
-            <el-descriptions-item label="验证结论">{{ evidence.runtime.reproducible ? "可复现" : "未复现" }}</el-descriptions-item>
+            <el-descriptions-item label="验证结论">
+              <el-tag :type="runtimeTagType(evidence.runtime)">{{ runtimeStatusLabel(evidence.runtime) }}</el-tag>
+            </el-descriptions-item>
             <el-descriptions-item label="命中特征">{{ evidence.runtime.matched_indicator || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="请求 URL">{{ evidence.runtime.request?.url || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="状态码">{{ evidence.runtime.response_status || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="原因" :span="2">{{ evidence.runtime.reason || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item v-if="evidence.runtime.candidate_endpoints?.length" label="候选入口" :span="2">{{ evidence.runtime.candidate_endpoints.join(", ") }}</el-descriptions-item>
             <el-descriptions-item label="Payload" :span="2"><code>{{ evidence.runtime.request?.payload || "N/A" }}</code></el-descriptions-item>
             <el-descriptions-item label="响应摘要" :span="2"><pre class="mini-pre">{{ evidence.runtime.response_excerpt || "N/A" }}</pre></el-descriptions-item>
           </el-descriptions>
+          <div v-if="evidence?.runtime?.evidence_flow?.length" class="flow-block">
+            <h3>动态证据流</h3>
+            <ol>
+              <li v-for="(step, index) in evidence.runtime.evidence_flow" :key="index">
+                <b>{{ step.stage }}</b>：{{ typeof step.detail === "string" ? step.detail : JSON.stringify(step.detail) }}
+              </li>
+            </ol>
+          </div>
 
           <div v-if="evidence?.harness" class="harness-block">
             <h3>Fuzzing Harness 动态验证（DeepAudit 式）</h3>
@@ -84,13 +96,53 @@
             <pre class="code-block"><code>{{ evidence.exploit.exploit_code || "暂无代码" }}</code></pre>
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="Agent/MCP 调用" name="agent">
+          <div class="tab-intro"><h2>Agent 与 MCP 工具证据</h2><p>展示 VerifyAgent 使用的 Skill、MCP Server、工具调用和静态证据链。</p></div>
+          <el-empty v-if="!hasAgentEvidence" description="暂无 Agent/MCP 调用证据。启用 VerifyAgent 后重新扫描可生成。" />
+          <div v-else class="agent-evidence-block">
+            <el-descriptions :column="2" border>
+              <el-descriptions-item label="MCP Server">{{ evidence?.verification?.mcp_server || evidence?.static_evidence_chain?.mcp_server || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item label="Skill">{{ evidence?.verification?.skill?.name || evidence?.verification?.skill || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item label="静态裁决">{{ evidence?.verification?.static_verdict || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item label="动态裁决">{{ evidence?.verification?.dynamic_verdict || evidence?.runtime?.reproduction_status || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item label="最终裁决" :span="2">{{ evidence?.verification?.final_verdict || detail.verification.status || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item v-if="evidence?.verification?.false_positive_reason" label="误报原因" :span="2">{{ evidence.verification.false_positive_reason }}</el-descriptions-item>
+            </el-descriptions>
+
+            <div v-if="evidence?.tool_calls?.length" class="tool-call-list">
+              <h3>MCP / 本地工具调用</h3>
+              <article v-for="(tool, index) in evidence.tool_calls" :key="index" class="tool-call-card">
+                <div class="tool-call-head">
+                  <strong>{{ tool.tool_name || tool.name || tool.tool || `tool_${index + 1}` }}</strong>
+                  <el-tag size="small" :type="toolStatusType(tool)">{{ tool.status || (tool.success === false ? "failed" : "success") }}</el-tag>
+                </div>
+                <pre class="mini-pre">{{ JSON.stringify(tool, null, 2) }}</pre>
+              </article>
+            </div>
+
+            <div v-if="evidence?.call_path?.length" class="flow-block">
+              <h3>Source → Sink 调用路径</h3>
+              <ol>
+                <li v-for="(step, index) in evidence.call_path" :key="index">
+                  <b>{{ step.stage || `step_${index + 1}` }}</b>：{{ step.detail || JSON.stringify(step) }}
+                </li>
+              </ol>
+            </div>
+
+            <div v-if="hasStaticEvidenceChain" class="tool-call-list">
+              <h3>静态证据链原始结构</h3>
+              <pre class="mini-pre">{{ JSON.stringify(evidence.static_evidence_chain, null, 2) }}</pre>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </el-card>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { FindingApi } from "../api";
@@ -103,6 +155,23 @@ const evidence = ref<any>(null);
 const verifying = ref(false);
 const verifyForm = reactive({ base_url: "http://127.0.0.1:8080", endpoints: "/user", timeout: 10 });
 
+const hasStaticEvidenceChain = computed(() => {
+  const chain = evidence.value?.static_evidence_chain;
+  return !!chain && Object.keys(chain).length > 0;
+});
+const hasVerificationEvidence = computed(() => {
+  const verification = evidence.value?.verification;
+  return !!verification && Object.values(verification).some((value) => value !== null && value !== undefined && value !== "");
+});
+const hasAgentEvidence = computed(() => {
+  return Boolean(
+    hasVerificationEvidence.value
+    || evidence.value?.tool_calls?.length
+    || evidence.value?.call_path?.length
+    || hasStaticEvidenceChain.value,
+  );
+});
+
 const VERDICT_LABELS: Record<string, string> = {
   confirmed_dynamic: "动态确认可利用",
   not_reproduced: "未复现",
@@ -110,6 +179,33 @@ const VERDICT_LABELS: Record<string, string> = {
 };
 function verdictLabel(v: string) {
   return VERDICT_LABELS[v] || v || "N/A";
+}
+
+function runtimeStatusLabel(runtime: any) {
+  const status = runtime?.reproduction_status;
+  if (status === "dynamic_confirmed" || runtime?.reproducible) return "可复现";
+  if (status === "not_reproduced") return "未复现";
+  if (status === "not_executed") return "未执行";
+  if (status === "not_runtime_verifiable") return "不适合动态验证";
+  if (status === "connection_failed") return "连接失败";
+  if (status === "request_timeout") return "请求超时";
+  if (status === "endpoint_not_found") return "入口不存在";
+  return status || "未执行";
+}
+
+function runtimeTagType(runtime: any) {
+  const status = runtime?.reproduction_status;
+  if (status === "dynamic_confirmed" || runtime?.reproducible) return "success";
+  if (status === "not_reproduced") return "warning";
+  if (status === "not_executed" || status === "not_runtime_verifiable") return "info";
+  return "danger";
+}
+
+function toolStatusType(tool: any) {
+  const status = String(tool?.status || "").toLowerCase();
+  if (tool?.success === false || status.includes("fail") || status.includes("error")) return "danger";
+  if (status.includes("skip")) return "info";
+  return "success";
 }
 
 async function load() {
@@ -151,6 +247,14 @@ onMounted(load);
 .harness-block { margin-top: 20px; }
 .harness-block h3 { margin: 0 0 4px; color: #162235; }
 .harness-note { color: #667085; margin: 0 0 12px; font-size: 13px; }
+.flow-block { margin-top: 16px; padding: 14px; border: 1px solid #dce6f0; border-radius: 12px; background: #fbfdff; }
+.flow-block h3 { margin: 0 0 8px; color: #162235; }
+.flow-block ol { margin: 0; padding-left: 20px; color: #475467; line-height: 1.8; }
+.agent-evidence-block { display: grid; gap: 16px; }
+.tool-call-list { display: grid; gap: 12px; }
+.tool-call-list h3 { margin: 0; color: #162235; }
+.tool-call-card { border: 1px solid #dce6f0; border-radius: 12px; padding: 12px; background: #fbfdff; }
+.tool-call-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .verify-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; margin-bottom: 14px; }
 .exploit-block { display: grid; gap: 16px; }
 @media (max-width: 760px) { .verify-panel { grid-template-columns: 1fr; } .page-title-row { align-items: flex-start; flex-direction: column; } }

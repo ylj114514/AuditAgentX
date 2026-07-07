@@ -99,6 +99,9 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
             "call_path": evidence.get("call_path"),
             "harness": evidence.get("harness"),
             "poc_result": evidence.get("poc_result"),
+            "tool_calls": evidence.get("tool_calls"),
+            "static_evidence_chain": evidence.get("static_evidence_chain"),
+            "verification": evidence.get("verification"),
         }, ensure_ascii=False, default=str),
         logs=json.dumps(evidence.get("logs"), ensure_ascii=False, default=str),
     ))
@@ -175,12 +178,18 @@ def _decode_evidence(ev: Evidence) -> dict:
         call_path = poc.get("call_path")
         harness = poc.get("harness")
         poc_result = poc.get("poc_result")
+        tool_calls = poc.get("tool_calls")
+        static_evidence_chain = poc.get("static_evidence_chain")
+        verification = poc.get("verification")
     else:
         exploit = None
         runtime = None
         call_path = None
         harness = None
         poc_result = poc
+        tool_calls = None
+        static_evidence_chain = None
+        verification = None
     return {
         "source": _loads(ev.source),
         "sink": _loads(ev.sink),
@@ -190,5 +199,8 @@ def _decode_evidence(ev: Evidence) -> dict:
         "runtime": runtime,
         "harness": harness,
         "poc_result": poc_result,
+        "tool_calls": tool_calls or [],
+        "static_evidence_chain": static_evidence_chain or {},
+        "verification": verification or {},
         "logs": _loads(ev.logs),
     }

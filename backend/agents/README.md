@@ -13,6 +13,7 @@
 | **AnalysisAgent** (AuditAgent) | `audit_agent.py` | LLM 语义审计，补充工具漏报（含跨文件/逻辑漏洞） |
 | **VerifyAgent** | `verify_agent.py` | 独立复核：经 MCP+Skill 调本地工具核对，去误报（防幻觉） |
 | **ExploitAgent** | `exploit_agent.py` | 生成漏洞利用代码、触发位置、利用路径、验证方法 |
+| **DynamicAnalysisAgent** | `dynamic_analysis_agent.py` | 动态验证调度：识别启动方式 + 提取端点 + 策略映射，委托 HTTP/Harness 验证器执行（`plan()` 可单独展示决策；`run()` 委托 ExploitPipeline） |
 | **HarnessVerifier** | `../verifier/harness_verifier.py` | DeepAudit 式 Fuzzing Harness 动态验证 |
 | **ReportAgent / SummaryAgent** | `report_agent.py` | 结构化报告与执行摘要 |
 | `verification_tools.py` | — | VerifyAgent 的本地工具实现（读码上下文、启发式复核、SAST 重放） |

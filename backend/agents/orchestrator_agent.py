@@ -27,6 +27,7 @@ from backend.agents.verify_agent import VerifyAgent
 from backend.verifier.poc_runner import PocRunner
 from backend.verifier.evidence_collector import EvidenceCollector
 from backend.verifier.pipeline import ExploitPipeline
+from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
 from backend.verifier import exploit_validator as judge
 
 # ACP 通信协议
@@ -298,6 +299,8 @@ class OrchestratorAgent:
                 c["confidence"] = float(vr.get("confidence", c.get("confidence", 0.5)) or 0.5)
                 if vr.get("severity"):
                     c["severity"] = vr["severity"]
+                if vr.get("runtime_verification_status"):
+                    c["runtime_verification_status"] = vr["runtime_verification_status"]
                 c["_verify"] = vr
                 # ACP 记录：验证结果
                 self._acp_record(
@@ -341,15 +344,29 @@ class OrchestratorAgent:
                     "confirmed_count": sum(1 for r in results if r.get("status") == "confirmed"),
                 },
             )
-            ExploitPipeline(scan_id=self.scan.id).run(
-                results, enable_exploit=enable_exploit,
-                enable_dynamic=enable_dynamic, dynamic_target=dynamic_target,
-                enable_harness=enable_harness, code_root=code_root,
+            # 由 DynamicAnalysisAgent 统一调度动态验证（内部委托 ExploitPipeline）
+            dyn_agent = DynamicAnalysisAgent(scan_id=self.scan.id)
+            plan = dyn_agent.plan(results, code_root)
+            self._acp_record(
+                sender="dynamic_analysis_agent",
+                receiver="orchestrator_agent",
+                message_type=ACPMessageType.DYNAMIC_VERIFY_REQUEST,
+                intent="动态分析计划：启动方式识别 + 端点提取 + 策略映射",
+                payload_summary={
+                    "framework": plan.get("launch", {}).get("framework"),
+                    "endpoint_count": plan.get("endpoint_count", 0),
+                    "dynamic_applicable_count": plan.get("dynamic_applicable_count", 0),
+                },
+            )
+            dyn_agent.run(
+                results, code_root=code_root, enable_exploit=enable_exploit,
+                enable_dynamic=enable_dynamic, enable_harness=enable_harness,
+                dynamic_target=dynamic_target,
             )
             self._acp_record(
-                sender="exploit_agent",
+                sender="dynamic_analysis_agent",
                 receiver="orchestrator_agent",
-                message_type=ACPMessageType.EXPLOIT_GENERATE_RESULT,
+                message_type=ACPMessageType.DYNAMIC_VERIFY_RESULT,
                 intent="漏洞利用+动态验证流水线完成",
                 payload_summary={
                     "exploited": sum(1 for r in results if r.get("_exploit")),
@@ -398,6 +415,9 @@ class OrchestratorAgent:
                         "call_path": ev.get("call_path"),
                         "harness": ev.get("harness"),
                         "poc_result": ev.get("poc_result"),
+                        "tool_calls": ev.get("tool_calls"),
+                        "static_evidence_chain": ev.get("static_evidence_chain"),
+                        "verification": ev.get("verification"),
                     }, ensure_ascii=False, default=str),
                     logs=json.dumps(ev.get("logs"), ensure_ascii=False, default=str),
                 ))

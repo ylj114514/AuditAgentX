@@ -123,14 +123,47 @@
     <ul>
       <li>Source：<code>{{ f.evidence.source or "N/A" }}</code></li>
       <li>Sink：<code>{{ f.evidence.sink or "N/A" }}</code></li>
+      {% if f.evidence.call_path %}
+      <li>调用路径：
+        <ol>
+        {% for hop in f.evidence.call_path %}
+          <li>{{ hop.stage or "step" }}：{{ hop.detail or hop }}</li>
+        {% endfor %}
+        </ol>
+      </li>
+      {% endif %}
       {% if f.evidence.exploit %}
       <li>利用路径：{{ f.evidence.exploit.exploit_path or "N/A" }}</li>
       <li>触发位置：<code>{{ f.evidence.exploit.trigger_location or "N/A" }}</code></li>
+      <li>Payload：<code>{{ (f.evidence.exploit.payloads or []) | join(" / ") or "N/A" }}</code></li>
       {% endif %}
       {% if f.evidence.runtime %}
-      <li>动态验证：{{ "可复现" if f.evidence.runtime.reproducible else "未复现" }}</li>
+      <li>动态验证状态：{{ f.evidence.runtime.reproduction_status or ("可复现" if f.evidence.runtime.reproducible else "未复现") }}</li>
       <li>命中特征：<code>{{ f.evidence.runtime.matched_indicator or "N/A" }}</code></li>
       <li>响应状态：{{ f.evidence.runtime.response_status or "N/A" }}</li>
+      <li>请求：<code>{{ (f.evidence.runtime.request or {}).url or "N/A" }}</code></li>
+      <li>原因：{{ f.evidence.runtime.reason or "N/A" }}</li>
+      {% if f.evidence.runtime.evidence_flow %}
+      <li>动态证据流：
+        <ol>
+        {% for step in f.evidence.runtime.evidence_flow %}
+          <li>{{ step.stage }}：{{ step.detail }}</li>
+        {% endfor %}
+        </ol>
+      </li>
+      {% endif %}
+      {% endif %}
+      {% if f.evidence.harness %}
+      <li>Harness：{{ f.evidence.harness.verdict or "N/A" }}，触发={{ "是" if f.evidence.harness.dynamically_triggered else "否" }}</li>
+      {% endif %}
+      {% if f.evidence.tool_calls %}
+      <li>工具调用：
+        <ol>
+        {% for tc in f.evidence.tool_calls %}
+          <li>{{ tc.name or tc.tool_name }}：{{ tc.purpose or "" }}</li>
+        {% endfor %}
+        </ol>
+      </li>
       {% endif %}
     </ul>
   </div>

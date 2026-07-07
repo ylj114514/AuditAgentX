@@ -114,11 +114,14 @@ class VerifyAgent(BaseAgent):
         dynamic_result = tool_context.get("dynamic_result") or {}
         harness_result = tool_context.get("harness_result") or {}
         dynamic_verdict = dynamic_result.get("reproduction_status") or "not_executed"
+        if heuristic.get("runtime_verification_status") == "not_runtime_verifiable":
+            dynamic_verdict = "not_runtime_verifiable"
         if harness_result.get("triggered"):
             dynamic_verdict = "harness_confirmed"
         elif dynamic_verdict == "not_executed" and harness_result.get("executed"):
             dynamic_verdict = "harness_inconclusive"
         verdict["dynamic_verdict"] = dynamic_verdict
+        verdict["runtime_verification_status"] = dynamic_verdict
         verdict["_dynamic_result"] = dynamic_result
         verdict["_harness_result"] = harness_result
 
