@@ -1,0 +1,70 @@
+# AuditAgentX 自定义 Semgrep taint mode 规则
+# 用真正的 source→sink 污点追踪替代单行匹配，显著降低误报。
+# 用法：semgrep scan --config rules/semgrep/taint_injection.yaml <target>
+rules:
+  - id: auditagentx-python-sql-injection-taint
+    languages: [python]
+    severity: ERROR
+    message: "用户可控输入经数据流到达 SQL 执行 sink（污点分析），存在 SQL 注入风险"
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.args.get(...)
+      - pattern: request.form.get(...)
+      - pattern: request.values.get(...)
+      - pattern: input(...)
+    pattern-sanitizers:
+      - pattern: int(...)
+      - pattern: float(...)
+      - patterns:
+          - pattern: $CUR.execute($SQL, ...)
+    pattern-sinks:
+      - pattern: $CUR.execute(...)
+      - pattern: $CUR.executemany(...)
+      - pattern: $DB.query(...)
+
+  - id: auditagentx-python-command-injection-taint
+    languages: [python]
+    severity: ERROR
+    message: "用户可控输入经数据流到达系统命令执行 sink（污点分析），存在命令注入风险"
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.args.get(...)
+      - pattern: input(...)
+    pattern-sanitizers:
+      - pattern: shlex.quote(...)
+      - pattern: re.escape(...)
+    pattern-sinks:
+      - pattern: os.system(...)
+      - pattern: subprocess.call(...)
+      - pattern: subprocess.run(...)
+      - pattern: subprocess.Popen(...)
+      - pattern: os.popen(...)
+
+  - id: auditagentx-python-path-traversal-taint
+    languages: [python]
+    severity: WARNING
+    message: "用户可控输入经数据流到达文件读取 sink（污点分析），存在路径遍历风险"
+    metadata:
+      cwe: "CWE-22: Path Traversal"
+      category: security
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.args.get(...)
+    pattern-sanitizers:
+      - pattern: os.path.basename(...)
+      - pattern: werkzeug.utils.secure_filename(...)
+    pattern-sinks:
+      - pattern: open(...)
+      - pattern: open($PATH, ...)

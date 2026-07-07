@@ -11,11 +11,17 @@ class SemgrepScanner(BaseScanner):
     name = "semgrep"
     cli = "semgrep"
 
+    # 项目自定义 taint mode 规则目录
+    custom_rules_dir = Path(__file__).resolve().parent.parent.parent / "rules" / "semgrep"
+
     def run(self, target: Path) -> list[RawFinding]:
         if not self.available():
             return []
-        # 使用官方规则集 + 项目自定义规则目录
-        cmd = ["semgrep", "scan", "--config", "auto", "--json", "--quiet", str(target)]
+        # 官方规则集 auto + 项目自定义 taint 规则（source→sink 污点追踪，降误报）
+        cmd = ["semgrep", "scan", "--config", "auto"]
+        if self.custom_rules_dir.exists() and any(self.custom_rules_dir.glob("*.y*ml")):
+            cmd += ["--config", str(self.custom_rules_dir)]
+        cmd += ["--json", "--quiet", str(target)]
         proc = self._exec(cmd, timeout=900)
         findings: list[RawFinding] = []
         try:
