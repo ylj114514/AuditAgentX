@@ -29,6 +29,7 @@ from backend.skills.harness_tools import (
     build_template_harness,
     run_harness,
 )
+from backend.dynamic.symbol_resolver import resolve_symbol
 
 
 class AuditMCPServer:
@@ -172,6 +173,22 @@ class AuditMCPServer:
                     },
                 },
                 "handler": self._build_final_evidence,
+            },
+            "resolve_symbol": {
+                "name": "resolve_symbol",
+                "description": ("Vulnhuntr-style cross-file symbol resolver: find the definition "
+                                "of a function/class/variable by name across the project, so an "
+                                "agent can recursively expand the call chain from user input to sink."),
+                "input_schema": {
+                    "type": "object",
+                    "required": ["symbol"],
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "code_root": {"type": ["string", "null"]},
+                        "max_defs": {"type": "integer", "default": 3},
+                    },
+                },
+                "handler": self._resolve_symbol,
             },
         }
 
@@ -347,3 +364,13 @@ class AuditMCPServer:
         )
         evidence["_from_mcp"] = True
         return evidence
+
+    @staticmethod
+    def _resolve_symbol(arguments: dict[str, Any]) -> dict[str, Any]:
+        """跨文件符号解析：按名字找函数/类定义源码，供调用链递归补全。"""
+        code_root = arguments.get("code_root")
+        return resolve_symbol(
+            Path(code_root) if code_root else None,
+            arguments.get("symbol") or "",
+            max_defs=int(arguments.get("max_defs") or 3),
+        )

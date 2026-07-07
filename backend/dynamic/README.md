@@ -10,6 +10,18 @@
 | `strategy.py` | 漏洞类型 → 动态验证策略映射（http / harness / both / not_applicable），覆盖 30+ 漏洞类型 |
 | `launch_detector.py` | 自动识别项目启动方式（Flask/FastAPI/Django/Express/Spring/PHP/Docker），推断启动命令与端口 |
 | `endpoint_extractor.py` | 自动提取路由/端点（多框架正则），确定动态验证攻击面 |
+| `symbol_resolver.py` | **Vulnhuntr 式跨文件符号解析**：按名字找函数/类定义源码，供 AuditAgent 递归补全调用链 |
+
+## symbol_resolver.py（Vulnhuntr 式调用链补全）
+
+传统做法只给 LLM「命中文件的局部片段」，看不到跨文件调用，跨文件逻辑漏洞会漏。
+参照 [protectai/vulnhuntr](https://github.com/protectai/vulnhuntr)：从命中点出发，递归向其他文件
+索要被引用的函数/类定义，拼出「用户输入 → 跨文件传播 → sink」的完整链路。
+
+- `resolve_symbol(code_root, symbol)`：Python 用标准库 `ast` 精确索引定义，其他语言正则兜底；返回定义源码。
+- `extract_referenced_symbols(code_snippet)`：从片段抽取被调用符号名（过滤内置/关键字）。
+- `AuditAgent._expand_call_chain()`：广度优先递归补全（限深度/总量），结果作为 `cross_file_call_chain` 喂给 LLM。
+- 已封装为 MCP 工具 `resolve_symbol`，外部 agent 也可调用。**不引入 jedi 等第三方依赖，离线可用。**
 
 ## strategy.py：策略取值
 

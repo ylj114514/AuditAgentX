@@ -107,6 +107,15 @@ def main() -> None:
             "poc_result": poc_result,
         })["structuredContent"]
 
+    @mcp.tool()
+    def resolve_symbol(symbol: str, code_root: str | None = None, max_defs: int = 3) -> dict:
+        """跨文件符号解析：按名字找函数/类定义源码，供调用链递归补全。"""
+        return bridge.call_tool("resolve_symbol", {
+            "symbol": symbol,
+            "code_root": code_root,
+            "max_defs": max_defs,
+        })["structuredContent"]
+
     mcp.run()
 
 

@@ -10,7 +10,7 @@
 | **OrchestratorAgent** | `orchestrator_agent.py` | 总控调度，串联完整链路并落库进度 |
 | **RepoParserAgent** | `repo_parser_agent.py` | 仓库解析：语言/框架/依赖/入口/目录树 |
 | **ScannerAgent** (StaticScanAgent) | `static_scan_agent.py` | 静态扫描：Semgrep/Gitleaks/自定义规则等工具调用，产出候选漏洞 |
-| **AnalysisAgent** (AuditAgent) | `audit_agent.py` | LLM 语义审计，补充工具漏报（含跨文件/逻辑漏洞） |
+| **AnalysisAgent** (AuditAgent) | `audit_agent.py` | LLM 语义审计，补充工具漏报；**Vulnhuntr 式跨文件调用链补全**（`_expand_call_chain` 递归解析被引用符号，拼出用户输入→sink 完整路径，发现跨文件逻辑漏洞） |
 | **VerifyAgent** | `verify_agent.py` | 独立复核：经 MCP+Skill 调本地工具核对，去误报（防幻觉） |
 | **ExploitAgent** | `exploit_agent.py` | 生成漏洞利用代码、触发位置、利用路径、验证方法 |
 | **DynamicAnalysisAgent** | `dynamic_analysis_agent.py` | 动态验证调度：识别启动方式 + 提取端点 + 策略映射，委托 HTTP/Harness 验证器执行（`plan()` 可单独展示决策；`run()` 委托 ExploitPipeline） |
