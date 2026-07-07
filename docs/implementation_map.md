@@ -21,10 +21,20 @@ backend/acp/README.md       # 协议规范、字段说明、verdict 语义（重
 - ACP 接口：`VerifyAgent.run_acp()` / `ExploitAgent.run_acp()` / `ReportAgent.run_acp()`（保留原 `run()` 向后兼容）
 - `EvidenceCollector.build_from_acp(messages)`：从 ACP 消息列表重建证据链
 
+**模型落地（v2.1）**：`ACPVerification` / `ACPExploit` 不再是"定义了没人用"——
+`VerifyAgent.run_acp` / `ExploitAgent.run_acp` 现在用这两个 Pydantic 模型**实例化**再 `model_dump()`，
+获得字段校验与统一默认值；测试断言输出可被 `model_validate()` 反校验通过。
+
+**Agent × Skill × MCP 统一（v2.1）**：每个该走 Skill 的 Agent 都加载了对应 Skill——
+VerifyAgent→vulnerability-verification、HarnessVerifier→dynamic-exploitation（消灭孤儿 Skill，
+且经 MCP 调 extract_target_function / run_fuzzing_harness）、StaticScanAgent→static-scanning、
+ExploitAgent→exploit-generation。VerifyAgent 动态工具由 `run_acp` 从 ACP `context.options` 激活。
+
 ```text
-tests/test_acp_models.py    # ACPMessage 结构完整性测试（12 项）
-tests/test_acp_adapters.py  # finding 字段转换测试（8 项）
-tests/test_acp_agent_flow.py # Agent ACP 接口 + 动态裁决语义 + Trace 记录（14 项）
+tests/test_acp_models.py         # ACPMessage 结构完整性测试
+tests/test_acp_adapters.py       # finding 字段转换测试
+tests/test_acp_agent_flow.py     # Agent ACP 接口 + 动态裁决语义 + Trace 记录
+tests/test_acp_model_grounding.py # ACPVerification/ACPExploit 落地 + Agent×Skill×MCP 统一（5 项）
 ```
 
 ## 1. 代码仓库解析模块

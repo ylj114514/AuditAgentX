@@ -18,6 +18,8 @@ from pathlib import Path
 from backend.agents.base_agent import BaseAgent
 from backend.config import settings
 from backend.skills.harness_tools import extract_function, run_harness, build_template_harness
+from backend.mcp.audit_mcp_server import AuditMCPServer
+from backend.skills.loader import load_skill
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +28,23 @@ class HarnessVerifier(BaseAgent):
     name = "harness_verifier"
     prompt_file = "harness_agent_prompt.md"
 
+    def __init__(self, scan_id: "str | None" = None) -> None:
+        super().__init__(scan_id=scan_id)
+        # 经 MCP 工具边界执行「提取函数 / 运行 Harness」，并加载 dynamic-exploitation Skill
+        self.mcp = AuditMCPServer()
+        try:
+            self.skill = load_skill("dynamic-exploitation")
+        except Exception:  # noqa: BLE001
+            self.skill = {}
+        self._tool_calls: list[dict] = []
+
     def run(self, finding: dict, code_root: Path | None = None,
             *, max_retries: int | None = None) -> dict:
         max_retries = (max_retries if max_retries is not None
                        else int(getattr(settings, "harness_max_retries", 2)))
+        self._tool_calls = []
 
-        func = extract_function(
-            code_root, finding.get("file"),
-            finding.get("start_line") or finding.get("line"),
-        )
+        func = self._mcp_extract(finding, code_root)
         attempts: list[dict] = []
         last_exec: dict = {}
         harness_code = ""
@@ -48,7 +58,7 @@ class HarnessVerifier(BaseAgent):
                 attempts.append({"attempt": attempt + 1, "error": "no_harness_generated"})
                 break
 
-            last_exec = run_harness(harness_code)
+            last_exec = self._mcp_run(harness_code)
             attempts.append({
                 "attempt": attempt + 1,
                 "source": harness_source,
@@ -63,7 +73,42 @@ class HarnessVerifier(BaseAgent):
 
         verdict = self._verdict(harness_code, last_exec, attempts, func)
         verdict["harness_source"] = harness_source
+        verdict["skill"] = {
+            "name": self.skill.get("name"),
+            "version": self.skill.get("version"),
+            "workflow": self.skill.get("workflow", []),
+        }
+        verdict["tool_calls"] = self._tool_calls
         return verdict
+
+    # ---------- MCP 工具调用（经 AuditMCPServer 边界）----------
+    def _mcp_extract(self, finding: dict, code_root: Path | None) -> dict:
+        candidate = {
+            "file": finding.get("file"),
+            "start_line": finding.get("start_line") or finding.get("line"),
+            "line": finding.get("line"),
+        }
+        out = self.mcp.call_tool("extract_target_function", {
+            "candidate": candidate,
+            "code_root": str(code_root) if code_root else None,
+        })["structuredContent"]
+        self._tool_calls.append({
+            "name": "extract_target_function",
+            "purpose": "Extract vulnerable function via MCP for harness building.",
+            "success": bool(out.get("found")),
+        })
+        return out
+
+    def _mcp_run(self, harness_code: str) -> dict:
+        out = self.mcp.call_tool("run_fuzzing_harness", {
+            "harness_code": harness_code,
+        })["structuredContent"]
+        self._tool_calls.append({
+            "name": "run_fuzzing_harness",
+            "purpose": "Execute fuzzing harness in sandbox via MCP.",
+            "success": bool(out.get("triggered")),
+        })
+        return out
 
     # ---------- 内部 ----------
     def _generate(self, finding: dict, func: dict, previous: dict | None) -> dict:

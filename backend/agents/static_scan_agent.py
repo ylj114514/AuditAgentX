@@ -16,6 +16,12 @@ class StaticScanAgent:
 
     def __init__(self) -> None:
         self.tool_calls: list[dict] = []
+        # 加载 static-scanning Skill（声明扫描工具工作流，统一 Agent×Skill 结构）
+        try:
+            from backend.skills.loader import load_skill
+            self.skill = load_skill("static-scanning")
+        except Exception:  # noqa: BLE001
+            self.skill = {}
 
     def run(self, code_root: Path, enabled_tools: list[str]) -> list[RawFinding]:
         tools = list(dict.fromkeys(enabled_tools + ["custom"]))

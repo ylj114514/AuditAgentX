@@ -24,9 +24,18 @@ class VerifyAgent(BaseAgent):
     name = "verify_agent"
     prompt_file = "verify_agent_prompt.md"
 
-    def run(self, candidate: dict[str, Any], code_root: Path | None = None) -> dict[str, Any]:
-        """Review one candidate finding and return a normalized verdict."""
-        tool_context = self._build_mcp_skill_context(candidate, code_root)
+    def run(self, candidate: dict[str, Any], code_root: Path | None = None,
+            *, enable_dynamic: bool = False, enable_harness: bool = False,
+            base_url: str | None = None,
+            endpoints: list[str] | None = None) -> dict[str, Any]:
+        """Review one candidate finding and return a normalized verdict.
+
+        动态开关（默认关闭，向后兼容）：开启后经 vulnerability-verification Skill
+        额外调用 dynamic_http_verify / harness MCP 工具，产出 dynamic_verdict。
+        """
+        tool_context = self._build_mcp_skill_context(
+            candidate, code_root, enable_dynamic=enable_dynamic,
+            enable_harness=enable_harness, base_url=base_url, endpoints=endpoints)
         user_content = json.dumps({
             "candidate_finding": candidate,
             "tool_evidence": tool_context,
@@ -49,10 +58,16 @@ class VerifyAgent(BaseAgent):
         return [self.run(c, code_root=code_root) for c in candidates]
 
     @staticmethod
-    def _build_mcp_skill_context(candidate: dict[str, Any], code_root: Path | None) -> dict[str, Any]:
+    def _build_mcp_skill_context(candidate: dict[str, Any], code_root: Path | None,
+                                 *, enable_dynamic: bool = False, enable_harness: bool = False,
+                                 base_url: str | None = None,
+                                 endpoints: list[str] | None = None) -> dict[str, Any]:
         try:
             skill = load_skill("vulnerability-verification")
-            return AuditMCPClient().run_verification_skill(candidate, code_root, skill)
+            return AuditMCPClient().run_verification_skill(
+                candidate, code_root, skill,
+                base_url=base_url, endpoints=endpoints,
+                enable_dynamic=enable_dynamic, enable_harness=enable_harness)
         except Exception as exc:  # noqa: BLE001
             logger.exception("MCP+Skill verification failed, falling back to local tools: %s", exc)
             context = build_verification_context(candidate, code_root)
@@ -94,6 +109,18 @@ class VerifyAgent(BaseAgent):
                 "sast_replay": tool_context.get("sast_replay", {}),
             }
         verdict["tool_calls"] = tool_context.get("tools_used", [])
+
+        # 动态裁决：由 dynamic_http_verify / harness MCP 工具结果推导
+        dynamic_result = tool_context.get("dynamic_result") or {}
+        harness_result = tool_context.get("harness_result") or {}
+        dynamic_verdict = dynamic_result.get("reproduction_status") or "not_executed"
+        if harness_result.get("triggered"):
+            dynamic_verdict = "harness_confirmed"
+        elif dynamic_verdict == "not_executed" and harness_result.get("executed"):
+            dynamic_verdict = "harness_inconclusive"
+        verdict["dynamic_verdict"] = dynamic_verdict
+        verdict["_dynamic_result"] = dynamic_result
+        verdict["_harness_result"] = harness_result
 
         if not verdict.get("required_runtime_conditions"):
             verdict["required_runtime_conditions"] = _runtime_conditions(candidate, heuristic)
@@ -137,34 +164,47 @@ class VerifyAgent(BaseAgent):
                          acp_finding.get("extra", {}).get("code_root"))
         code_root = Path(code_root_str) if code_root_str else None
 
-        # 调用原有验证逻辑
-        vr = self.run(legacy, code_root=code_root)
+        # 从 ACP context.options 读取动态验证开关（真正激活 MCP 动态工具）
+        opts = request.context.options or {}
+        dyn_target = opts.get("dynamic_target") or {}
+        base_url = opts.get("base_url") or dyn_target.get("base_url")
+        endpoints = opts.get("endpoints") or dyn_target.get("endpoints")
+        enable_dynamic = bool(opts.get("enable_dynamic", False))
+        enable_harness = bool(opts.get("enable_harness", False))
 
-        # 将旧 is_valid / call_path 等映射为 ACP verification 结构
+        # 调用验证逻辑（按需激活动态/harness MCP 工具）
+        vr = self.run(legacy, code_root=code_root, enable_dynamic=enable_dynamic,
+                      enable_harness=enable_harness, base_url=base_url, endpoints=endpoints)
+
+        # 静态裁决 + 动态裁决 -> 综合裁决
         is_valid = vr.get("is_valid", True)
-        if is_valid is False:
-            static_verdict = "false_positive"
+        static_verdict = "false_positive" if is_valid is False else "confirmed"
+        dynamic_verdict = vr.get("dynamic_verdict", "not_executed")
+        state = ACPState.SUCCESS
+        if static_verdict == "false_positive":
             final_verdict = "false_positive"
-            state = ACPState.SUCCESS
             verdict_enum = ACPVerdict.FALSE_POSITIVE
-        else:
-            static_verdict = "confirmed"
+        elif dynamic_verdict in ("dynamic_confirmed", "harness_confirmed"):
             final_verdict = "confirmed"
-            state = ACPState.SUCCESS
+            verdict_enum = ACPVerdict.CONFIRMED
+        else:
+            final_verdict = "confirmed"
             verdict_enum = ACPVerdict.STATICALLY_VERIFIED
 
-        verification = {
-            "static_verdict": static_verdict,
-            "dynamic_verdict": "not_executed",   # 默认未配置动态目标
-            "final_verdict": final_verdict,
-            "source": vr.get("source"),
-            "sink": vr.get("sink"),
-            "call_path": vr.get("call_path") or [],
-            "evidence_chain": vr.get("evidence_chain") or {},
-            "false_positive_reason": vr.get("false_positive_reason"),
-            "recommended_poc_strategy": vr.get("recommended_poc_strategy"),
-            "confidence": float(vr.get("confidence") or 0.5),
-        }
+        # 用 ACPVerification 模型实例化（字段校验 + 默认值统一），再序列化为 dict
+        from backend.acp.models import ACPVerification
+        verification = ACPVerification(
+            static_verdict=static_verdict,
+            dynamic_verdict=dynamic_verdict,
+            final_verdict=final_verdict,
+            source=_as_text(vr.get("source")),
+            sink=_as_text(vr.get("sink")),
+            call_path=vr.get("call_path") or [],
+            evidence_chain=vr.get("evidence_chain") or {},
+            false_positive_reason=vr.get("false_positive_reason"),
+            recommended_poc_strategy=_as_text(vr.get("recommended_poc_strategy")),
+            confidence=float(vr.get("confidence") or 0.5),
+        ).model_dump()
 
         # 构建 tool_calls 列表
         tool_calls = [
@@ -191,6 +231,13 @@ class VerifyAgent(BaseAgent):
             verdict=verdict_enum,
             confidence=verification["confidence"],
         )
+
+
+def _as_text(value: Any) -> "str | None":
+    """把 source/sink 等值统一成字符串（兼容 dict/None），供 ACPVerification 字段使用。"""
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
 
 
 def _bounded_float(value: Any, *, default: float) -> float:
