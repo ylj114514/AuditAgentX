@@ -1,6 +1,27 @@
 # AuditAgentX-ACP 通信协议规范
 
-AuditAgentX-ACP 是本项目内部多 Agent 通信的统一消息协议，按北邮 ACP（Agent Communication Protocol）字段思想设计。所有 Agent 间的请求/响应均使用 ACPMessage 结构，确保字段接口一致、可追踪、可重建证据链。
+AuditAgentX-ACP 是本项目多 Agent 通信的统一消息协议，按北邮 ACP（Agent Communication Protocol）字段思想设计。所有 Agent 间的请求/响应均使用 ACPMessage 结构，确保字段接口一致、可追踪、可重建证据链。
+
+## ACP 的三层应用（不止是"消息格式定义"）
+
+1. **统一消息模型**（`models.py`）：header/context/payload/tools/artifacts/status 统一结构。
+2. **通信链追踪与可视化**（`trace.py` + 编排器）：每个审计阶段生成一条 ACP 消息并落盘到
+   `data/scans/{scan_id}/agent_messages/`，前端「Agent 通信流」页面回放展示。
+3. **消息驱动通信 + 跨系统协作**（`dispatcher.py` + `api/routes_acp.py`）：
+   ACPDispatcher 按 `message_type` 把请求消息路由到对应 Agent 的 `run_acp()`，返回回复消息；
+   并经 `POST /api/acp/message` 对外暴露——**外部系统的 Agent 可用标准 ACP 消息驱动本系统的
+   verify / exploit / report**，实现跨系统 Agent 协作（配合 MCP 工具通道，本系统对外同时提供
+   「MCP 工具」与「ACP 消息」两种标准协作接口）。
+
+### 对外通信端点
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/acp/message-types` | 能力发现：列出本系统可受理的 ACP 请求消息类型 |
+| `POST /api/acp/message` | 接收一条 ACPMessage → 分发 → 返回回复 ACPMessage；带 task_id 时往返消息记入该 scan 通信流 |
+
+外部 Agent 发 `verify.request` / `exploit.generate.request` / `report.request`，
+本系统返回对应 `*.result` 回复消息（`in_reply_to` 关联原消息，可追溯）。
 
 ## 消息结构
 

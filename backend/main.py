@@ -16,7 +16,7 @@ from backend.config import settings
 from backend.database import init_db
 from backend.api import (
     routes_projects, routes_scans, routes_findings, routes_reports, routes_agents,
-    routes_analytics,
+    routes_analytics, routes_acp,
 )
 
 logging.basicConfig(
@@ -43,6 +43,7 @@ app.include_router(routes_findings.router)
 app.include_router(routes_reports.router)
 app.include_router(routes_agents.router)
 app.include_router(routes_analytics.router)
+app.include_router(routes_acp.router)
 
 
 @app.on_event("startup")
