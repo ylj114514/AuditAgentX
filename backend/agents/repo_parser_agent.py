@@ -30,3 +30,32 @@ class RepoParserAgent:
             "tree": tree,
             "_files": [str(f) for f in files],  # 供后续扫描/审计使用
         }
+
+    def run_acp(self, request: "ACPMessage") -> "ACPMessage":  # noqa: F821
+        """ACP 接口：parse.request → parse.result。
+
+        输入 payload.code_root（缺省回退 context.code_root）；
+        输出 payload.metadata 为完整元信息结构（languages/frameworks/dependencies/
+        entrypoints/file_count/loc），payload._files 保留文件清单供后续阶段复用。
+        """
+        from backend.acp.factory import make_reply
+        from backend.acp.models import ACPMessageType, ACPState
+
+        code_root_str = request.payload.get("code_root") or request.context.code_root
+        if not code_root_str:
+            return make_reply(
+                request, sender=self.name,
+                message_type=ACPMessageType.PARSE_RESULT,
+                intent="缺少 code_root，无法解析仓库",
+                state=ACPState.FAILED, error="missing code_root",
+            )
+        metadata = self.run(Path(code_root_str))
+        # 标准元信息（去掉 _ 前缀的内部字段），文件清单单列，避免污染 metadata
+        public_meta = {k: v for k, v in metadata.items() if not k.startswith("_")}
+        return make_reply(
+            request, sender=self.name,
+            message_type=ACPMessageType.PARSE_RESULT,
+            intent=f"仓库解析完成：{metadata.get('file_count', 0)} 个文件",
+            payload={"metadata": public_meta, "_files": metadata.get("_files", [])},
+            state=ACPState.SUCCESS,
+        )

@@ -146,7 +146,7 @@ class ACPVerification(BaseModel):
     """VerifyAgent 输出的核查结果（Payload 内部）。"""
     static_verdict: str = "uncertain"      # confirmed | false_positive | uncertain
     dynamic_verdict: str = "not_executed"  # dynamic_confirmed|not_reproduced|not_executed|...
-    final_verdict: str = "needs_review"    # confirmed | false_positive | needs_review
+    final_verdict: str = "needs_review"    # statically_verified|dynamic_confirmed|harness_confirmed|false_positive|needs_review
     source: str | None = None
     sink: str | None = None
     call_path: list[dict[str, Any]] = Field(default_factory=list)

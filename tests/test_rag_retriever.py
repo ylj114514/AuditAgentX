@@ -56,6 +56,38 @@ def test_mcp_verification_skill_includes_knowledge_tools():
     assert context["playbook_result"]["top_result"]["id"] == "PLAYBOOK-SQLI"
 
 
+def test_expanded_playbook_and_remediation_coverage():
+    """补厚后的知识库：高频漏洞类型都能同时命中 playbook 与 remediation（按 CWE 对齐）。"""
+    retriever = SecurityKnowledgeRetriever()
+    # (candidate type, 期望 CWE, 期望 playbook id, 期望 remediation id)
+    cases = [
+        ("Path Traversal", "CWE-22", "PLAYBOOK-PATH-TRAVERSAL", "FIX-PATH-TRAVERSAL"),
+        ("XSS", "CWE-79", "PLAYBOOK-XSS", "FIX-XSS"),
+        ("SSRF", "CWE-918", "PLAYBOOK-SSRF", "FIX-SSRF"),
+        ("Insecure Deserialization", "CWE-502", "PLAYBOOK-DESERIALIZATION", "FIX-DESERIALIZATION"),
+        ("Server-Side Template Injection", "CWE-1336", "PLAYBOOK-SSTI", "FIX-SSTI"),
+        ("XXE", "CWE-611", "PLAYBOOK-XXE", "FIX-XXE"),
+        ("IDOR", "CWE-639", "PLAYBOOK-IDOR", "FIX-IDOR"),
+        ("Hardcoded Secret", "CWE-798", "PLAYBOOK-HARDCODED-SECRET", "FIX-HARDCODED-SECRET"),
+    ]
+    for vuln_type, cwe, playbook_id, fix_id in cases:
+        candidate = {"type": vuln_type}
+        assert retriever.retrieve(candidate=candidate)["top_result"]["cwe_id"] == cwe, vuln_type
+        pb = retriever.retrieve_playbook(candidate)["top_result"]
+        assert pb["id"] == playbook_id, vuln_type
+        assert pb["source_type"] == "verification_playbook"
+        fix = retriever.retrieve_remediation(candidate)["top_result"]
+        assert fix["id"] == fix_id, vuln_type
+        assert fix["remediation"], vuln_type
+
+
+def test_chinese_alias_matches_playbook():
+    """中文别名也能命中对应知识（检索鲁棒性）。"""
+    retriever = SecurityKnowledgeRetriever()
+    assert retriever.retrieve_playbook({"type": "反序列化"})["top_result"]["id"] == "PLAYBOOK-DESERIALIZATION"
+    assert retriever.retrieve_remediation({"type": "目录穿越"})["top_result"]["id"] == "FIX-PATH-TRAVERSAL"
+
+
 def test_evidence_collector_preserves_knowledge_evidence():
     verify_result = {
         "source": "request.args['id']",

@@ -53,6 +53,37 @@ class AuditAgent(BaseAgent):
             return result
         return []
 
+    def run_acp(self, request: "ACPMessage") -> "ACPMessage":  # noqa: F821
+        """ACP 接口：audit.request → audit.result。
+
+        输入 payload.metadata + payload.raw_findings + payload.code_root；
+        输出 payload.findings 为统一 ACPFinding 列表，payload.legacy_findings
+        保留 AuditAgent.run() 的原始候选 dict，供 Orchestrator/DB 兼容层使用。
+        """
+        from backend.acp.factory import make_reply
+        from backend.acp.models import ACPMessageType, ACPState
+        from backend.acp.adapters import audit_finding_to_acp
+        from backend.scanners.base import RawFinding
+
+        metadata = request.payload.get("metadata") or {}
+        code_root_str = request.payload.get("code_root") or request.context.code_root
+        # raw_findings 可能是 ACPFinding dict 或原 RawFinding dict；还原成 RawFinding 供 run() 使用
+        raw_in = request.payload.get("raw_findings") or []
+        raw_findings = [_to_raw_finding(item) for item in raw_in]
+        raw_findings = [rf for rf in raw_findings if rf is not None]
+
+        code_root = Path(code_root_str) if code_root_str else Path(".")
+        llm_findings = self.run(metadata, raw_findings, code_root)
+        acp_findings = [audit_finding_to_acp(lf) for lf in llm_findings]
+        return make_reply(
+            request, sender=self.name,
+            message_type=ACPMessageType.AUDIT_RESULT,
+            intent=f"LLM 语义审计完成，补充 {len(acp_findings)} 条",
+            payload={"findings": acp_findings, "legacy_findings": llm_findings},
+            state=ACPState.SUCCESS,
+            confidence=_avg_confidence(llm_findings),
+        )
+
     @staticmethod
     def _retrieve_knowledge(raw_findings: list[RawFinding], *, max_types: int = 8) -> list[dict]:
         """按静态扫描命中的漏洞类型去重检索知识库，返回精简的知识条目列表。"""
@@ -138,3 +169,42 @@ class AuditAgent(BaseAgent):
                 "code": "\n".join(lines[start:end]),
             })
         return snippets
+
+
+def _to_raw_finding(item: dict):
+    """把 ACPFinding dict 或 RawFinding dict 还原为 RawFinding（供 AuditAgent.run 使用）。"""
+    from backend.scanners.base import RawFinding
+    if not isinstance(item, dict):
+        return None
+    # ACPFinding 结构（含 location/code/source）
+    if "location" in item or "code" in item:
+        loc = item.get("location") or {}
+        code = item.get("code") or {}
+        src = item.get("source") or {}
+        return RawFinding(
+            type=item.get("type") or "", file=loc.get("file") or "",
+            line=loc.get("start_line") or 0, severity=item.get("severity", "medium"),
+            source=src.get("tool") or src.get("agent") or "", code_snippet=code.get("snippet", ""),
+            message=item.get("description", ""), rule_id=src.get("rule_id", ""),
+            extra=item.get("extra") or {},
+        )
+    # 原 RawFinding dict（扁平字段）
+    return RawFinding(
+        type=item.get("type") or "", file=item.get("file") or "",
+        line=item.get("line") or 0, severity=item.get("severity", "medium"),
+        source=item.get("source") or "", code_snippet=item.get("code_snippet", ""),
+        message=item.get("message", ""), rule_id=item.get("rule_id", ""),
+        extra=item.get("extra") or {},
+    )
+
+
+def _avg_confidence(findings: list[dict]) -> float | None:
+    values = []
+    for finding in findings:
+        try:
+            values.append(float(finding.get("confidence")))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if not values:
+        return None
+    return max(0.0, min(sum(values) / len(values), 1.0))

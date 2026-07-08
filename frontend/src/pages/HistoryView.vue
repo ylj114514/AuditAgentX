@@ -19,7 +19,9 @@
         <el-table-column prop="projectId" label="项目 ID" min-width="160" />
         <el-table-column prop="scanId" label="Scan ID" min-width="190" />
         <el-table-column prop="target" label="目标" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="status" label="状态" width="110" />
+        <el-table-column label="状态" width="120">
+          <template #default="scope"><el-tag :type="statusType(scope.row.status)">{{ scope.row.status || "unknown" }}</el-tag></template>
+        </el-table-column>
         <el-table-column prop="findingCount" label="漏洞" width="80" />
         <el-table-column prop="verifiedCount" label="已验证" width="90" />
         <el-table-column prop="updatedAt" label="更新时间" min-width="170">
@@ -54,6 +56,13 @@ async function clearAll() {
   refresh();
 }
 function formatTime(value: string) { return value ? new Date(value).toLocaleString() : "-"; }
+function statusType(status?: string) {
+  const value = String(status || "").toLowerCase();
+  if (value === "failed") return "danger";
+  if (value === "done" || value === "finished") return "success";
+  if (value === "running") return "warning";
+  return "info";
+}
 
 onMounted(refresh);
 </script>
@@ -65,6 +74,6 @@ onMounted(refresh);
 .page-title-row p { margin: 6px 0 0; color: #667085; }
 .eyebrow { margin: 0; color: #2f80ed; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .title-actions { display: flex; gap: 10px; }
-.panel-card { border-radius: 16px; }
+.panel-card { border-radius: 18px; overflow: hidden; }
 @media (max-width: 720px) { .page-title-row { align-items: flex-start; flex-direction: column; } }
 </style>

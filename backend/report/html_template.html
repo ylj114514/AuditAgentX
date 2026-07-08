@@ -183,6 +183,14 @@
         </ol>
       </li>
       {% endif %}
+      {% if f.evidence.verification %}
+      <li>验证裁决：静态={{ f.evidence.verification.static_verdict or "N/A" }}；动态={{ f.evidence.verification.dynamic_verdict or "N/A" }}；最终={{ f.evidence.verification.final_verdict or "N/A" }}</li>
+      {% if f.evidence.verification.mcp_server %}<li>MCP Server：<code>{{ f.evidence.verification.mcp_server }}</code></li>{% endif %}
+      {% if f.evidence.verification.skill %}<li>Skill：<code>{{ f.evidence.verification.skill.name or f.evidence.verification.skill }}</code></li>{% endif %}
+      {% endif %}
+      {% if f.evidence.logs %}
+      <li>证据链日志：{{ f.evidence.logs | join("；") }}</li>
+      {% endif %}
     </ul>
   </div>
   {% endif %}

@@ -117,6 +117,7 @@ def test_verify_agent_run_acp_returns_verify_result(monkeypatch, tmp_path: Path)
     assert vinfo["static_verdict"] in ("confirmed", "false_positive", "uncertain")
     assert "dynamic_verdict" in vinfo
     assert "final_verdict" in vinfo
+    assert vinfo["final_verdict"] == "statically_verified"
     assert "source" in vinfo
     assert "call_path" in vinfo
     assert reply.status.confidence is not None
@@ -534,3 +535,153 @@ def test_mcp_server_exposes_new_tools():
     # 原有工具仍然保留
     assert "read_code_context" in tool_names
     assert "run_sast_replay" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# 11. RepoParserAgent.run_acp() 输出 parse.result
+# ---------------------------------------------------------------------------
+
+def test_repo_parser_run_acp_returns_parse_result(tmp_path: Path):
+    from backend.agents.repo_parser_agent import RepoParserAgent
+
+    (tmp_path / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    req = make_message(
+        sender="orchestrator", receiver="repo_parser_agent",
+        message_type=ACPMessageType.PARSE_REQUEST,
+        payload={"code_root": str(tmp_path)},
+    )
+    reply = RepoParserAgent().run_acp(req)
+    assert reply.header.message_type == ACPMessageType.PARSE_RESULT
+    assert reply.header.sender == "repo_parser_agent"
+    assert reply.header.in_reply_to == req.header.message_id
+    meta = reply.payload["metadata"]
+    assert meta["file_count"] >= 1
+    # metadata 是完整结构，不是只有 summary
+    for key in ("languages", "frameworks", "dependencies", "entrypoints", "loc"):
+        assert key in meta
+
+
+def test_repo_parser_run_acp_missing_code_root_fails():
+    from backend.agents.repo_parser_agent import RepoParserAgent
+
+    req = make_message(
+        sender="orchestrator", receiver="repo_parser_agent",
+        message_type=ACPMessageType.PARSE_REQUEST, payload={},
+    )
+    reply = RepoParserAgent().run_acp(req)
+    assert reply.status.state == ACPState.FAILED
+
+
+# ---------------------------------------------------------------------------
+# 12. DynamicAnalysisAgent.run_acp() 输出 dynamic.verify.result（裁决同步）
+# ---------------------------------------------------------------------------
+
+def test_dynamic_analysis_run_acp_not_executed_is_consistent():
+    """全部动态开关关闭：dynamic_verdict=not_executed，且不得与 runtime 冲突。"""
+    from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
+
+    req = make_message(
+        sender="orchestrator", receiver="dynamic_analysis_agent",
+        message_type=ACPMessageType.DYNAMIC_VERIFY_REQUEST,
+        context=ACPContext(scan_id="s-dyn"),
+        payload={
+            "finding": {
+                "type": "SQL Injection", "severity": "high",
+                "location": {"file": "db.py", "start_line": 10},
+                "code": {"snippet": "cursor.execute(q + uid)"},
+            },
+            "verification": {"static_verdict": "confirmed", "source": "uid", "sink": "cursor.execute"},
+            "enable_exploit": False, "enable_dynamic": False, "enable_harness": False,
+        },
+    )
+    reply = DynamicAnalysisAgent().run_acp(req)
+    assert reply.header.message_type == ACPMessageType.DYNAMIC_VERIFY_RESULT
+    vinfo = reply.payload["verification"]
+    assert vinfo["dynamic_verdict"] == "not_executed"
+    assert vinfo["final_verdict"] == "statically_verified"
+    # runtime 为空即未执行——与 dynamic_verdict=not_executed 一致（验收标准四）
+    assert not reply.payload["runtime"].get("reproduction_status") \
+        or reply.payload["runtime"]["reproduction_status"] == "not_executed"
+
+
+# ---------------------------------------------------------------------------
+# 13. Orchestrator 主流程确实通过 _dispatch_acp() 调度（消息驱动，非旁路记录）
+# ---------------------------------------------------------------------------
+
+def test_orchestrator_main_flow_is_message_driven(tmp_path, monkeypatch):
+    """主流程经 _dispatch_acp 调度：trace 中应有成对的 parse/static_scan request+reply 完整消息。"""
+    from unittest.mock import MagicMock
+    from backend.agents.orchestrator_agent import OrchestratorAgent
+    from backend.config import settings
+
+    scan_id = "dispatch-test-001"
+    project = MagicMock()
+    project.id = "proj-d"
+    project.source_type = "local"
+    project.url = None
+    project.local_path = str(tmp_path)
+    project.branch = "main"
+    project.status = "pending"
+    project.language_summary = ""
+    project.metadata_json = "{}"
+
+    scan = MagicMock()
+    scan.id = scan_id
+    scan.project = project
+    scan.config_json = json.dumps({
+        "enabled_tools": ["custom"], "enabled_agents": [],
+        "options": {"enable_exploit": True},
+    })
+    scan.status = "pending"
+    scan.started_at = None
+    scan.finished_at = None
+    scan.progress = 0
+    scan.current_stage = ""
+
+    db = MagicMock()
+
+    monkeypatch.setattr(
+        "backend.agents.orchestrator_agent.prepare_workspace", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(
+        "backend.agents.orchestrator_agent.RepoParserAgent.run",
+        lambda self, code_root: {"languages": ["Python"], "frameworks": [],
+                                 "dependencies": [], "entrypoints": [],
+                                 "file_count": 1, "loc": 1, "tree": {}, "_files": []},
+    )
+    monkeypatch.setattr(
+        "backend.agents.orchestrator_agent.StaticScanAgent.run",
+        lambda self, code_root, tools: [],
+    )
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path), raising=False)
+
+    # 记录 _dispatch_acp 被调用的 message_type
+    dispatched: list[str] = []
+    original = OrchestratorAgent._dispatch_acp
+
+    def _spy(self, request):
+        dispatched.append(request.header.message_type.value
+                          if hasattr(request.header.message_type, "value")
+                          else str(request.header.message_type))
+        return original(self, request)
+
+    monkeypatch.setattr(OrchestratorAgent, "_dispatch_acp", _spy)
+
+    orch = OrchestratorAgent(db=db, scan=scan)
+    msg_dir = tmp_path / "scans" / scan_id / "agent_messages"
+    orch.tracer.base_dir = msg_dir
+    orch.run()
+
+    # 主流程确实经 _dispatch_acp 发出了 parse.request 与 static_scan.request
+    assert "parse.request" in dispatched
+    assert "static_scan.request" in dispatched
+    assert "dynamic.verify.request" in dispatched
+
+    # trace 落盘的是完整 request+reply：应同时存在 request 与 result 两侧消息
+    all_msgs = [json.loads(fp.read_text(encoding="utf-8")) for fp in msg_dir.glob("*.json")]
+    types = [m["header"]["message_type"] for m in all_msgs]
+    assert "parse.request" in types and "parse.result" in types
+    assert "static_scan.request" in types and "static_scan.result" in types
+    assert "dynamic.verify.request" in types and "dynamic.verify.result" in types
+    # 完整结构：每条消息都含 header/context/payload/status（非仅 payload_summary）
+    for m in all_msgs:
+        assert {"header", "context", "payload", "status"} <= set(m.keys())

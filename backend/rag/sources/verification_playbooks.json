@@ -53,6 +53,222 @@
       "remediation": ["Replace shell commands with library calls.", "Use argument arrays and shell=False."],
       "references": ["https://cwe.mitre.org/data/definitions/78.html"],
       "tags": ["verification", "command"]
+    },
+    {
+      "id": "PLAYBOOK-PATH-TRAVERSAL",
+      "source_type": "verification_playbook",
+      "title": "Path Traversal Verification Playbook",
+      "summary": "Verify path traversal by confirming attacker-controlled input reaches a filesystem API without canonicalization or a base-directory allowlist.",
+      "cwe_id": "CWE-22",
+      "owasp": ["A01:2021 Broken Access Control", "A05:2021 Security Misconfiguration"],
+      "vuln_types": ["Path Traversal", "Directory Traversal", "LFI", "RFI"],
+      "aliases": ["directory traversal", "file inclusion", "目录穿越", "路径穿越", "任意文件读取"],
+      "sources": ["request.args", "request.form", "req.query", "req.params", "$_GET"],
+      "sinks": ["open", "os.path.join", "send_file", "sendFile", "fs.readFile", "File", "include", "require"],
+      "verification_checks": [
+        "Confirm the user-controlled value is concatenated or joined into a filesystem path.",
+        "Check whether the code canonicalizes the path (realpath/abspath) and enforces an allowlisted base directory.",
+        "If a local target runs, send ../ or encoded ..%2f payloads for a known file (app config, /etc/passwd) and look for file contents in the response.",
+        "If no target exists, record dynamic_verdict=not_executed instead of not_reproduced."
+      ],
+      "false_positive_signals": [
+        "The resolved path is validated to stay under an allowlisted base directory.",
+        "The filename is a fixed server-side constant or comes from a strict allowlist.",
+        "The framework normalizes and rejects traversal sequences before use."
+      ],
+      "dynamic_strategy": "http_or_harness",
+      "remediation": ["Canonicalize the path and confirm it stays under an allowlisted base directory.", "Reject traversal sequences and use safe file APIs."],
+      "references": ["https://cwe.mitre.org/data/definitions/22.html"],
+      "tags": ["verification", "filesystem"]
+    },
+    {
+      "id": "PLAYBOOK-XSS",
+      "source_type": "verification_playbook",
+      "title": "Cross-Site Scripting (XSS) Verification Playbook",
+      "summary": "Verify XSS by confirming untrusted input reaches an HTML/JS sink without contextual output encoding.",
+      "cwe_id": "CWE-79",
+      "owasp": ["A03:2021 Injection"],
+      "vuln_types": ["XSS", "Cross-Site Scripting", "Reflected XSS", "Stored XSS", "DOM XSS"],
+      "aliases": ["cross site scripting", "跨站脚本", "反射型XSS", "存储型XSS"],
+      "sources": ["request.args", "request.form", "req.query", "location.hash", "document.URL"],
+      "sinks": ["innerHTML", "document.write", "dangerouslySetInnerHTML", "render_template_string", "|safe", "echo", "print", "Markup"],
+      "verification_checks": [
+        "Confirm untrusted input is written into an HTML, attribute, JS, or URL context.",
+        "Check whether the value is contextually encoded/escaped or passed through a sanitizer (e.g. DOMPurify, autoescape).",
+        "If a local target runs, submit a benign marker payload such as <svg onload=... > or \"'><b>xss</b> and confirm it renders unescaped.",
+        "Distinguish reflected vs stored vs DOM sinks; for DOM XSS trace the client-side sink."
+      ],
+      "false_positive_signals": [
+        "Template auto-escaping is enabled and the value is not marked safe.",
+        "Output is passed through a vetted HTML sanitizer or strict encoder.",
+        "The value is placed in a non-executing context (e.g. text node with escaping)."
+      ],
+      "dynamic_strategy": "http",
+      "remediation": ["Apply context-aware output encoding.", "Keep template auto-escaping on and avoid safe/raw markers on untrusted data."],
+      "references": ["https://cwe.mitre.org/data/definitions/79.html"],
+      "tags": ["verification", "web", "xss"]
+    },
+    {
+      "id": "PLAYBOOK-SSRF",
+      "source_type": "verification_playbook",
+      "title": "Server-Side Request Forgery (SSRF) Verification Playbook",
+      "summary": "Verify SSRF by confirming attacker-controlled input dictates the destination of a server-side outbound request without an allowlist.",
+      "cwe_id": "CWE-918",
+      "owasp": ["A10:2021 Server-Side Request Forgery"],
+      "vuln_types": ["SSRF", "Server-Side Request Forgery"],
+      "aliases": ["server-side request forgery", "服务端请求伪造"],
+      "sources": ["request.args", "request.json", "req.body", "url", "callback", "webhook"],
+      "sinks": ["requests.get", "requests.post", "urllib.request.urlopen", "httpx.get", "axios.get", "fetch", "curl_exec", "URLConnection"],
+      "verification_checks": [
+        "Confirm the user-controlled value becomes the host/URL of an outbound request.",
+        "Check for an allowlist of schemes/hosts and blocking of internal ranges and cloud metadata endpoints.",
+        "In an authorized sandbox only, point the target at a controlled local collaborator or 169.254.169.254 and observe whether the server initiates the request.",
+        "Never probe third-party or production metadata endpoints."
+      ],
+      "false_positive_signals": [
+        "The destination host/scheme is restricted by a strict allowlist.",
+        "The URL is a fixed server-side constant, not user-controlled.",
+        "Internal IP ranges and metadata IPs are explicitly blocked."
+      ],
+      "dynamic_strategy": "http",
+      "remediation": ["Enforce a scheme/host allowlist and block internal ranges and metadata IPs.", "Resolve and validate the target host before requesting."],
+      "references": ["https://cwe.mitre.org/data/definitions/918.html"],
+      "tags": ["verification", "ssrf", "network"]
+    },
+    {
+      "id": "PLAYBOOK-DESERIALIZATION",
+      "source_type": "verification_playbook",
+      "title": "Insecure Deserialization Verification Playbook",
+      "summary": "Verify insecure deserialization by confirming untrusted data reaches an unsafe deserializer that can instantiate arbitrary objects, ideally via a function-level harness.",
+      "cwe_id": "CWE-502",
+      "owasp": ["A08:2021 Software and Data Integrity Failures"],
+      "vuln_types": ["Insecure Deserialization", "Deserialization"],
+      "aliases": ["unsafe deserialization", "object injection", "反序列化", "对象注入"],
+      "sources": ["request.data", "request.body", "cookie", "$_POST", "req.body"],
+      "sinks": ["pickle.loads", "cPickle.loads", "yaml.load", "unserialize", "ObjectInputStream.readObject", "marshal.loads"],
+      "verification_checks": [
+        "Confirm untrusted input is passed to a deserialization sink.",
+        "Confirm the deserializer can instantiate arbitrary classes or invoke __reduce__/readObject gadgets.",
+        "Confirm no integrity check (HMAC/signature) protects the serialized blob.",
+        "Prefer a function-level harness that feeds a crafted-but-harmless payload rather than a full RCE chain."
+      ],
+      "false_positive_signals": [
+        "Only json.loads or yaml.safe_load is used on the untrusted data.",
+        "The serialized blob is signed and verified before deserialization.",
+        "The input is a trusted, application-generated constant."
+      ],
+      "dynamic_strategy": "harness",
+      "remediation": ["Prefer safe formats (JSON) and safe loaders (yaml.safe_load).", "If unavoidable, sign+verify payloads and restrict allowed classes."],
+      "references": ["https://cwe.mitre.org/data/definitions/502.html"],
+      "tags": ["verification", "deserialization", "rce"]
+    },
+    {
+      "id": "PLAYBOOK-SSTI",
+      "source_type": "verification_playbook",
+      "title": "Server-Side Template Injection (SSTI) Verification Playbook",
+      "summary": "Verify SSTI by confirming untrusted input is compiled as part of a server-side template rather than passed as template data.",
+      "cwe_id": "CWE-1336",
+      "owasp": ["A03:2021 Injection"],
+      "vuln_types": ["Server-Side Template Injection", "SSTI", "Template Injection"],
+      "aliases": ["server-side template injection", "template injection", "模板注入", "服务端模板注入"],
+      "sources": ["request.args", "request.form", "req.query", "name", "message"],
+      "sinks": ["render_template_string", "Template", "from_string", "Environment.from_string", "Jinja2", "Twig", "Velocity"],
+      "verification_checks": [
+        "Confirm user input is concatenated into the template string itself, not just passed as a rendering variable.",
+        "Send a benign arithmetic marker such as {{7*191}} or ${7*191} and check whether it evaluates to 1337 in the response.",
+        "Identify the engine (Jinja2/Twig/Freemarker) to select the correct evaluation marker.",
+        "If no target exists, record dynamic_verdict=not_executed."
+      ],
+      "false_positive_signals": [
+        "User input is passed only as a bound template variable, not compiled as template source.",
+        "The engine sandbox blocks attribute access and arithmetic evaluation.",
+        "Output is static and the marker is not evaluated."
+      ],
+      "dynamic_strategy": "http_or_harness",
+      "remediation": ["Never build templates from user input; pass data as bound variables.", "Use a sandboxed template environment where feasible."],
+      "references": ["https://cwe.mitre.org/data/definitions/1336.html"],
+      "tags": ["verification", "template", "injection"]
+    },
+    {
+      "id": "PLAYBOOK-XXE",
+      "source_type": "verification_playbook",
+      "title": "XML External Entity (XXE) Verification Playbook",
+      "summary": "Verify XXE by confirming an XML parser processes untrusted input with external entity resolution enabled.",
+      "cwe_id": "CWE-611",
+      "owasp": ["A05:2021 Security Misconfiguration"],
+      "vuln_types": ["XXE", "XML External Entity"],
+      "aliases": ["xml external entity", "xml外部实体注入", "外部实体注入"],
+      "sources": ["request.data", "request.body", "req.body", "xml"],
+      "sinks": ["etree.parse", "lxml.etree", "DocumentBuilder", "SAXParser", "xml.dom.minidom.parse", "XMLReader"],
+      "verification_checks": [
+        "Confirm untrusted XML is parsed and external/parameter entities are not disabled.",
+        "In an authorized sandbox, submit a benign entity referencing a local file marker and check for reflection or an out-of-band callback.",
+        "Check parser configuration for resolve_entities/DTD/external-general-entities flags.",
+        "Prefer harmless local-file or collaborator markers over sensitive files."
+      ],
+      "false_positive_signals": [
+        "The parser disables DTDs and external entity resolution.",
+        "A hardened/safe parser configuration (e.g. defusedxml) is used.",
+        "Input is not XML or is schema-validated without entity expansion."
+      ],
+      "dynamic_strategy": "http_or_harness",
+      "remediation": ["Disable DTDs and external entity resolution (e.g. defusedxml).", "Prefer non-XML formats or schema validation without entity expansion."],
+      "references": ["https://cwe.mitre.org/data/definitions/611.html"],
+      "tags": ["verification", "xml", "xxe"]
+    },
+    {
+      "id": "PLAYBOOK-IDOR",
+      "source_type": "verification_playbook",
+      "title": "IDOR / Broken Access Control Verification Playbook",
+      "summary": "Verify IDOR by confirming an object is fetched by a user-supplied identifier without an ownership or authorization check.",
+      "cwe_id": "CWE-639",
+      "owasp": ["A01:2021 Broken Access Control"],
+      "vuln_types": ["IDOR", "Broken Access Control", "Auth Bypass", "Mass Assignment"],
+      "aliases": ["insecure direct object reference", "broken object level authorization", "bola", "越权", "水平越权", "垂直越权"],
+      "sources": ["request.args", "req.params", "id", "user_id", "order_id", "account"],
+      "sinks": ["get_object_or_404", "findById", "objects.get", "query by id", "Model.find"],
+      "verification_checks": [
+        "Confirm the object is retrieved using a client-supplied identifier.",
+        "Confirm there is no ownership/role check tying the current session to the requested object.",
+        "In an authorized test, authenticate as user A and request an identifier owned by user B; a successful read/write confirms IDOR.",
+        "For mass assignment, confirm unexpected privileged fields (role/is_admin) are bindable from the request body."
+      ],
+      "false_positive_signals": [
+        "An ownership or role check gates the object access.",
+        "Identifiers are unguessable capability tokens scoped to the session.",
+        "The framework enforces per-record authorization policies."
+      ],
+      "dynamic_strategy": "http",
+      "remediation": ["Enforce per-object ownership/authorization checks server-side.", "Avoid exposing sequential IDs and bind only allowlisted fields."],
+      "references": ["https://cwe.mitre.org/data/definitions/639.html"],
+      "tags": ["verification", "access-control", "idor"]
+    },
+    {
+      "id": "PLAYBOOK-HARDCODED-SECRET",
+      "source_type": "verification_playbook",
+      "title": "Hardcoded Secret Verification Playbook",
+      "summary": "Hardcoded secrets are a static finding with no runtime trigger; verification is manual triage of authenticity and impact rather than dynamic reproduction.",
+      "cwe_id": "CWE-798",
+      "owasp": ["A07:2021 Identification and Authentication Failures", "A05:2021 Security Misconfiguration"],
+      "vuln_types": ["Hardcoded Secret", "Hardcoded Credential"],
+      "aliases": ["hardcoded credential", "hardcoded password", "硬编码密钥", "硬编码凭证", "明文密钥"],
+      "sources": ["source code literal"],
+      "sinks": ["password =", "api_key =", "secret =", "token =", "AWS_SECRET", "private_key"],
+      "verification_checks": [
+        "Confirm the literal is a real credential/key rather than a placeholder, example, or test fixture.",
+        "Determine whether the secret is reachable by runtime code and what system it authenticates to.",
+        "Check version-control history to see if the secret was ever pushed to a shared/remote repository.",
+        "Record dynamic_verdict=not_runtime_verifiable; this class is confirmed by manual review, not dynamic reproduction."
+      ],
+      "false_positive_signals": [
+        "The value is an obvious placeholder (CHANGEME, xxxx, example).",
+        "The literal lives only in tests/fixtures and is not used in production.",
+        "The value is a public/non-secret identifier."
+      ],
+      "dynamic_strategy": "not_applicable_manual_review",
+      "remediation": ["Move secrets to environment variables or a secrets manager.", "Rotate any exposed secret and purge it from VCS history."],
+      "references": ["https://cwe.mitre.org/data/definitions/798.html"],
+      "tags": ["verification", "secret", "static"]
     }
   ]
 }

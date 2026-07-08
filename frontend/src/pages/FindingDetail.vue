@@ -6,17 +6,21 @@
         <h1>{{ detail?.type || "漏洞详情" }}</h1>
         <p v-if="detail">{{ detail.file }}:{{ detail.start_line }} · {{ detail.severity }}</p>
       </div>
-      <el-button @click="router.back()">返回</el-button>
+      <div class="title-actions">
+        <el-button :disabled="!evidence" @click="showEvidenceDialog = true">查看证据链</el-button>
+        <el-button type="primary" plain :disabled="!evidence" @click="exportEvidence">导出证据链</el-button>
+        <el-button @click="router.back()">返回</el-button>
+      </div>
     </div>
 
     <el-card v-if="detail" shadow="never" class="panel-card">
       <el-descriptions :column="3" border>
         <el-descriptions-item label="类型">{{ detail.type }}</el-descriptions-item>
-        <el-descriptions-item label="严重级">{{ detail.severity }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ detail.verification.status }}</el-descriptions-item>
+        <el-descriptions-item label="严重级"><el-tag :type="severityType(detail.severity)">{{ detail.severity || "unknown" }}</el-tag></el-descriptions-item>
+        <el-descriptions-item label="状态"><el-tag :type="findingStatusType(detail.verification.status)">{{ detail.verification.status || "unknown" }}</el-tag></el-descriptions-item>
         <el-descriptions-item label="文件位置">{{ detail.file }}:{{ detail.start_line }}</el-descriptions-item>
-        <el-descriptions-item label="置信度">{{ detail.verification.confidence }}</el-descriptions-item>
-        <el-descriptions-item label="已验证">{{ detail.verification.verified ? "是" : "否" }}</el-descriptions-item>
+        <el-descriptions-item label="置信度">{{ formatConfidence(detail.verification.confidence) }}</el-descriptions-item>
+        <el-descriptions-item label="已验证"><el-tag :type="detail.verification.verified ? 'success' : 'info'">{{ detail.verification.verified ? "是" : "否" }}</el-tag></el-descriptions-item>
       </el-descriptions>
     </el-card>
 
@@ -29,7 +33,7 @@
             <el-descriptions-item label="Source">{{ detail.source || evidence?.source || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="Sink">{{ detail.sink || evidence?.sink || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="数据流" :span="2">
-              <pre class="mini-pre">{{ JSON.stringify(detail.data_flow?.length ? detail.data_flow : evidence?.data_flow, null, 2) }}</pre>
+              <pre class="mini-pre">{{ displayDataFlow }}</pre>
             </el-descriptions-item>
             <el-descriptions-item label="修复建议" :span="2">{{ detail.fix_suggestion || "建议结合漏洞类型进行输入校验、参数化查询或最小权限加固。" }}</el-descriptions-item>
           </el-descriptions>
@@ -196,6 +200,15 @@
         </el-tab-pane>
       </el-tabs>
     </el-card>
+
+    <el-dialog v-model="showEvidenceDialog" title="漏洞证据链 JSON" width="78%" class="evidence-dialog">
+      <p class="dialog-note">该内容来自当前漏洞的 evidence 接口，可用于答辩展示或随报告归档。</p>
+      <pre class="code-block evidence-json"><code>{{ evidenceJson }}</code></pre>
+      <template #footer>
+        <el-button @click="copyEvidence">复制 JSON</el-button>
+        <el-button type="primary" @click="exportEvidence">导出 JSON</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -210,8 +223,16 @@ const router = useRouter();
 const activeTab = ref("static");
 const detail = ref<any>(null);
 const evidence = ref<any>(null);
+const showEvidenceDialog = ref(false);
 const verifying = ref(false);
 const verifyForm = reactive({ base_url: "http://127.0.0.1:8080", endpoints: "/user", timeout: 10 });
+
+const evidenceJson = computed(() => safeStringify({ finding: detail.value, evidence: evidence.value }));
+const displayDataFlow = computed(() => {
+  const value = detail.value?.data_flow?.length ? detail.value.data_flow : evidence.value?.data_flow;
+  if (!value || (Array.isArray(value) && value.length === 0)) return "暂无结构化数据流";
+  return typeof value === "string" ? value : safeStringify(value);
+});
 
 const hasStaticEvidenceChain = computed(() => {
   const chain = evidence.value?.static_evidence_chain;
@@ -279,6 +300,53 @@ function toolStatusType(tool: any) {
   return "success";
 }
 
+function severityType(severity: string) {
+  const s = String(severity || "").toLowerCase();
+  if (s === "critical" || s === "high") return "danger";
+  if (s === "medium") return "warning";
+  return "success";
+}
+
+function findingStatusType(status?: string) {
+  const value = String(status || "").toLowerCase();
+  if (value.includes("false")) return "info";
+  if (value.includes("confirm") || value.includes("verified")) return "success";
+  if (value.includes("candidate")) return "warning";
+  return "info";
+}
+
+function formatConfidence(value: any) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return num <= 1 ? `${Math.round(num * 100)}%` : String(num);
+}
+
+function safeStringify(value: any) {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
+async function copyEvidence() {
+  await navigator.clipboard?.writeText(evidenceJson.value);
+  ElMessage.success("证据链 JSON 已复制");
+}
+
+function exportEvidence() {
+  if (!evidence.value) return;
+  const id = route.params.id as string;
+  const blob = new Blob([evidenceJson.value], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${id || "finding"}_evidence_chain.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  ElMessage.success("证据链 JSON 已导出");
+}
+
 async function load() {
   const id = route.params.id as string;
   detail.value = (await FindingApi.detail(id)).data;
@@ -307,18 +375,19 @@ onMounted(load);
 .page-title-row { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
 .page-title-row h1 { margin: 0; color: #162235; }
 .page-title-row p { margin: 6px 0 0; color: #667085; }
+.title-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .eyebrow { margin: 0; color: #2f80ed; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.panel-card { border-radius: 16px; }
+.panel-card { border-radius: 18px; overflow: hidden; }
 .tab-intro { margin-bottom: 16px; }
 .tab-intro h2 { margin: 0; }
 .tab-intro p { color: #667085; margin: 6px 0 0; }
-.code-block { background: #101828; color: #d7e3f1; padding: 16px; border-radius: 12px; overflow: auto; }
-.mini-pre { margin: 0; padding: 10px; background: #f6f8fa; border-radius: 8px; }
+.code-block { background: #0b1220; color: #d7e3f1; padding: 16px; border-radius: 14px; overflow: auto; border: 1px solid rgba(255,255,255,.08); max-height: 520px; }
+.mini-pre { margin: 0; padding: 12px; background: #f5f8fc; border: 1px solid #e4ebf3; border-radius: 10px; overflow: auto; max-height: 360px; }
 .evidence-desc { margin-top: 16px; }
 .harness-block { margin-top: 20px; }
 .harness-block h3 { margin: 0 0 4px; color: #162235; }
 .harness-note { color: #667085; margin: 0 0 12px; font-size: 13px; }
-.flow-block { margin-top: 16px; padding: 14px; border: 1px solid #dce6f0; border-radius: 12px; background: #fbfdff; }
+.flow-block { margin-top: 16px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: linear-gradient(180deg, #fff, #fbfdff); }
 .flow-block h3 { margin: 0 0 8px; color: #162235; }
 .flow-block ol { margin: 0; padding-left: 20px; color: #475467; line-height: 1.8; }
 .agent-evidence-block { display: grid; gap: 16px; }
@@ -327,9 +396,11 @@ onMounted(load);
 .fix-flow { border-color: #10b981; background: #f0fdf4; }
 .tool-call-list { display: grid; gap: 12px; }
 .tool-call-list h3 { margin: 0; color: #162235; }
-.tool-call-card { border: 1px solid #dce6f0; border-radius: 12px; padding: 12px; background: #fbfdff; }
+.tool-call-card { border: 1px solid #dce6f0; border-radius: 14px; padding: 14px; background: linear-gradient(180deg, #fff, #fbfdff); box-shadow: 0 8px 22px rgba(16,32,51,.04); }
 .tool-call-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .verify-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; margin-bottom: 14px; }
 .exploit-block { display: grid; gap: 16px; }
-@media (max-width: 760px) { .verify-panel { grid-template-columns: 1fr; } .page-title-row { align-items: flex-start; flex-direction: column; } }
+.dialog-note { margin: 0 0 12px; color: #667085; }
+.evidence-json { min-height: 360px; }
+@media (max-width: 760px) { .verify-panel { grid-template-columns: 1fr; } .page-title-row { align-items: flex-start; flex-direction: column; } .title-actions { width: 100%; justify-content: flex-start; } }
 </style>

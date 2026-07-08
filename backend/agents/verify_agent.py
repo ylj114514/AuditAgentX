@@ -199,11 +199,14 @@ class VerifyAgent(BaseAgent):
         if static_verdict == "false_positive":
             final_verdict = "false_positive"
             verdict_enum = ACPVerdict.FALSE_POSITIVE
-        elif dynamic_verdict in ("dynamic_confirmed", "harness_confirmed"):
-            final_verdict = "confirmed"
-            verdict_enum = ACPVerdict.CONFIRMED
+        elif dynamic_verdict == "dynamic_confirmed":
+            final_verdict = "dynamic_confirmed"
+            verdict_enum = ACPVerdict.DYNAMIC_CONFIRMED
+        elif dynamic_verdict == "harness_confirmed":
+            final_verdict = "harness_confirmed"
+            verdict_enum = ACPVerdict.HARNESS_CONFIRMED
         else:
-            final_verdict = "confirmed"
+            final_verdict = "statically_verified"
             verdict_enum = ACPVerdict.STATICALLY_VERIFIED
 
         # 用 ACPVerification 模型实例化（字段校验 + 默认值统一），再序列化为 dict

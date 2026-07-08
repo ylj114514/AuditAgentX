@@ -115,6 +115,10 @@
 {% for tc in f.evidence.tool_calls %}
   {{ loop.index }}. {{ tc.name or tc.tool_name }}：{{ tc.purpose or "" }}
 {% endfor %}
+{% endif %}{% if f.evidence.verification %}- 验证裁决：静态={{ f.evidence.verification.static_verdict or "N/A" }}；动态={{ f.evidence.verification.dynamic_verdict or "N/A" }}；最终={{ f.evidence.verification.final_verdict or "N/A" }}
+{% if f.evidence.verification.mcp_server %}- MCP Server：`{{ f.evidence.verification.mcp_server }}`
+{% endif %}{% if f.evidence.verification.skill %}- Skill：`{{ f.evidence.verification.skill.name or f.evidence.verification.skill }}`
+{% endif %}{% endif %}{% if f.evidence.logs %}- 证据链日志：{{ f.evidence.logs | join("；") }}
 {% endif %}
 {% endif %}
 

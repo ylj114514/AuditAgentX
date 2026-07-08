@@ -26,8 +26,12 @@ class ACPDispatcher:
 
     def supported_request_types(self) -> list[str]:
         return [
+            ACPMessageType.PARSE_REQUEST.value,
+            ACPMessageType.STATIC_SCAN_REQUEST.value,
+            ACPMessageType.AUDIT_REQUEST.value,
             ACPMessageType.VERIFY_REQUEST.value,
             ACPMessageType.EXPLOIT_GENERATE_REQUEST.value,
+            ACPMessageType.DYNAMIC_VERIFY_REQUEST.value,
             ACPMessageType.REPORT_REQUEST.value,
         ]
 
@@ -37,12 +41,25 @@ class ACPDispatcher:
         mtype_val = mtype.value if hasattr(mtype, "value") else str(mtype)
 
         try:
+            # 解析 / 静态扫描：对应 Agent 不接受 scan_id（无 LLM trace 需求）
+            if mtype_val == ACPMessageType.PARSE_REQUEST.value:
+                from backend.agents.repo_parser_agent import RepoParserAgent
+                return RepoParserAgent().run_acp(request)
+            if mtype_val == ACPMessageType.STATIC_SCAN_REQUEST.value:
+                from backend.agents.static_scan_agent import StaticScanAgent
+                return StaticScanAgent().run_acp(request)
+            if mtype_val == ACPMessageType.AUDIT_REQUEST.value:
+                from backend.agents.audit_agent import AuditAgent
+                return AuditAgent(scan_id=self.scan_id).run_acp(request)
             if mtype_val == ACPMessageType.VERIFY_REQUEST.value:
                 from backend.agents.verify_agent import VerifyAgent
                 return VerifyAgent(scan_id=self.scan_id).run_acp(request)
             if mtype_val == ACPMessageType.EXPLOIT_GENERATE_REQUEST.value:
                 from backend.agents.exploit_agent import ExploitAgent
                 return ExploitAgent(scan_id=self.scan_id).run_acp(request)
+            if mtype_val == ACPMessageType.DYNAMIC_VERIFY_REQUEST.value:
+                from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
+                return DynamicAnalysisAgent(scan_id=self.scan_id).run_acp(request)
             if mtype_val == ACPMessageType.REPORT_REQUEST.value:
                 from backend.agents.report_agent import ReportAgent
                 return ReportAgent(scan_id=self.scan_id).run_acp(request)

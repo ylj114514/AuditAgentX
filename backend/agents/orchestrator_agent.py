@@ -32,10 +32,27 @@ from backend.verifier import exploit_validator as judge
 
 # ACP 通信协议
 from backend.acp.factory import make_message
-from backend.acp.models import ACPContext, ACPMessageType, ACPState, ACPVerdict
+from backend.acp.models import (
+    ACPContext, ACPMessage, ACPMessageType, ACPState, ACPVerdict,
+)
+from backend.acp.dispatcher import ACPDispatcher
+from backend.acp.adapters import (
+    legacy_finding_to_acp, acp_to_legacy_finding,
+)
 from backend.acp.trace import ACPTracer
+from backend.scanners.base import RawFinding
 
 logger = logging.getLogger(__name__)
+
+_RAW_FINDING_FIELDS = {
+    "type", "file", "line", "severity", "source",
+    "code_snippet", "message", "rule_id", "extra",
+}
+
+
+def _raw_finding_from_dict(d: dict) -> RawFinding:
+    """从 static_scan.result 的 _raw dict 重建 RawFinding（供 legacy 下游沿用）。"""
+    return RawFinding(**{k: v for k, v in d.items() if k in _RAW_FINDING_FIELDS})
 
 
 class OrchestratorAgent:
@@ -98,6 +115,42 @@ class OrchestratorAgent:
         except Exception as exc:  # noqa: BLE001
             logger.warning("ACP trace 保存失败（不影响主流程）: %s", exc)
 
+    # ---------- ACP 消息驱动调度 ----------
+    def _make_request(
+        self,
+        *,
+        receiver: str,
+        message_type: ACPMessageType | str,
+        intent: str,
+        payload: dict,
+        context: ACPContext | None = None,
+    ) -> ACPMessage:
+        """构造一条以 orchestrator_agent 为发送方的 ACP 请求消息（默认共享 scan 级 context）。"""
+        return make_message(
+            sender="orchestrator_agent",
+            receiver=receiver,
+            message_type=message_type,
+            intent=intent,
+            task_id=self.scan.id,
+            context=context or self._acp_context,
+            payload=payload,
+        )
+
+    def _dispatch_acp(self, request: ACPMessage) -> ACPMessage:
+        """把请求消息真正分发给目标 Agent，落盘完整 request/reply，返回回复消息。
+
+        这是「ACP 作为内部调度协议」的核心：Agent 间通信一律走这里，
+        而非直接调用各 Agent 的 run()。request 与 reply 都是完整 ACPMessage，
+        被 tracer 完整保存（非仅 payload_summary）。
+        """
+        self.tracer.save(request)
+        reply = ACPDispatcher(scan_id=self.scan.id).dispatch(request)
+        self.tracer.save(reply)
+        if reply.status.state == ACPState.FAILED:
+            raise RuntimeError(reply.error or reply.status.detail or
+                               f"ACP dispatch failed: {request.header.message_type}")
+        return reply
+
     # ---------- 主流程 ----------
     def run(self) -> None:
         try:
@@ -158,14 +211,8 @@ class OrchestratorAgent:
 
     # ---------- 各阶段 ----------
     def _prepare(self) -> Path:
+        # clone/准备工作区属基础设施步骤（非 Agent 通信）；真正的 parse.request 在 _parse 中经 _dispatch_acp 发出
         self._stage("RepoParserAgent:clone", 5)
-        self._acp_record(
-            sender="orchestrator_agent",
-            receiver="repo_parser_agent",
-            message_type=ACPMessageType.PARSE_REQUEST,
-            intent="克隆/准备代码仓库工作区",
-            payload_summary={"project_id": self.project.id, "source_type": self.project.source_type},
-        )
         return prepare_workspace(
             self.project.id, self.project.source_type, self.project.url,
             self.project.local_path, self.project.branch,
@@ -173,7 +220,18 @@ class OrchestratorAgent:
 
     def _parse(self, code_root: Path) -> dict:
         self._stage("RepoParserAgent:parse", 15)
-        metadata = RepoParserAgent().run(code_root)
+        # ACP 消息驱动：orchestrator --parse.request--> RepoParserAgent.run_acp
+        req = self._make_request(
+            receiver="repo_parser_agent",
+            message_type=ACPMessageType.PARSE_REQUEST,
+            intent="解析代码仓库元信息",
+            payload={"code_root": str(code_root)},
+        )
+        reply = self._dispatch_acp(req)
+        metadata = dict(reply.payload.get("metadata") or {})
+        # 还原文件清单（run_acp 单列在 _files），供需要的下游复用
+        if reply.payload.get("_files"):
+            metadata["_files"] = reply.payload["_files"]
         # 回写项目元信息
         self.project.language_summary = ", ".join(metadata.get("languages", []))
         self.project.metadata_json = json.dumps(
@@ -181,39 +239,22 @@ class OrchestratorAgent:
         )
         self.project.status = "parsed"
         self.db.commit()
-        # ACP 记录：解析结果
-        self._acp_record(
-            sender="repo_parser_agent",
-            receiver="orchestrator_agent",
-            message_type=ACPMessageType.PARSE_RESULT,
-            intent="代码仓库解析完成",
-            payload_summary={
-                "languages": metadata.get("languages", []),
-                "file_count": metadata.get("file_count", 0),
-                "frameworks": metadata.get("frameworks", []),
-            },
-        )
         return metadata
 
     def _static_scan(self, code_root: Path) -> list:
         self._stage("StaticScanAgent", 35)
         tools = self.config.get("enabled_tools", ["semgrep", "gitleaks"])
-        self._acp_record(
-            sender="orchestrator_agent",
+        # ACP 消息驱动：orchestrator --static_scan.request--> StaticScanAgent.run_acp
+        req = self._make_request(
             receiver="static_scan_agent",
             message_type=ACPMessageType.STATIC_SCAN_REQUEST,
             intent=f"启动静态扫描，工具: {tools}",
-            payload_summary={"enabled_tools": tools},
+            payload={"code_root": str(code_root), "enabled_tools": tools},
         )
-        raw = StaticScanAgent().run(code_root, tools)
-        self._acp_record(
-            sender="static_scan_agent",
-            receiver="orchestrator_agent",
-            message_type=ACPMessageType.STATIC_SCAN_RESULT,
-            intent="静态扫描完成",
-            payload_summary={"raw_finding_count": len(raw)},
-        )
-        return raw
+        reply = self._dispatch_acp(req)
+        # run_acp 在 payload.raw_findings 中保留原始 RawFinding dict；_raw 仅作旧别名
+        raw_dicts = reply.payload.get("raw_findings") or reply.payload.get("_raw") or []
+        return [_raw_finding_from_dict(d) for d in raw_dicts]
 
     def _audit(self, metadata: dict, raw: list, code_root: Path) -> list[dict]:
         self._stage("AuditAgent", 55)
@@ -229,36 +270,38 @@ class OrchestratorAgent:
                 "status": "candidate", "message": rf.message,
             })
 
-        # 2) LLM 语义审计补充（可发现工具漏报）
+        # 2) LLM 语义审计补充（可发现工具漏报）——ACP 消息驱动
         if "audit" in agents_enabled:
-            self._acp_record(
-                sender="orchestrator_agent",
+            req = self._make_request(
                 receiver="audit_agent",
                 message_type=ACPMessageType.AUDIT_REQUEST,
                 intent="LLM 语义审计，补充工具漏报",
-                payload_summary={"raw_count": len(raw), "candidate_count": len(candidates)},
+                payload={
+                    "metadata": {k: v for k, v in metadata.items() if k != "_files"},
+                    "raw_findings": [rf.to_dict() for rf in raw],
+                    "code_root": str(code_root),
+                },
             )
-            llm_findings = AuditAgent(scan_id=self.scan.id).run(metadata, raw, code_root)
-            for lf in llm_findings:
+            reply = self._dispatch_acp(req)
+            # 优先使用 legacy_findings 保持 AuditAgent.run() 原始输出兼容；缺省再从 ACPFinding 转回 legacy。
+            legacy_findings = reply.payload.get("legacy_findings")
+            if legacy_findings is None:
+                legacy_findings = [acp_to_legacy_finding(acp_f)
+                                   for acp_f in (reply.payload.get("findings") or [])]
+            for idx, legacy in enumerate(legacy_findings):
+                acp_f = (reply.payload.get("findings") or [{}])[idx] if idx < len(reply.payload.get("findings") or []) else {}
                 candidates.append({
-                    "type": lf.get("vulnerability_type"),
-                    "severity": lf.get("severity", "medium"),
-                    "file": lf.get("file_path"),
-                    "start_line": lf.get("start_line"),
-                    "line": lf.get("start_line"),
-                    "end_line": lf.get("end_line"),
-                    "code_snippet": lf.get("vulnerable_code"),
-                    "confidence": float(lf.get("confidence", 0.6) or 0.6),
+                    "type": legacy.get("vulnerability_type") or legacy.get("type"),
+                    "severity": legacy.get("severity", "medium"),
+                    "file": legacy.get("file_path") or legacy.get("file"),
+                    "start_line": legacy.get("start_line") or legacy.get("line"),
+                    "line": legacy.get("start_line") or legacy.get("line"),
+                    "end_line": legacy.get("end_line"),
+                    "code_snippet": legacy.get("vulnerable_code") or legacy.get("code_snippet"),
+                    "confidence": float(legacy.get("confidence", 0.6) or 0.6),
                     "source": "audit_agent", "verified": False, "status": "candidate",
-                    "detail": lf,
+                    "detail": legacy if legacy else (acp_f.get("extra") or acp_f),
                 })
-            self._acp_record(
-                sender="audit_agent",
-                receiver="orchestrator_agent",
-                message_type=ACPMessageType.AUDIT_RESULT,
-                intent="LLM 审计完成",
-                payload_summary={"llm_finding_count": len(llm_findings), "total_candidates": len(candidates)},
-            )
 
         return judge.deduplicate(candidates)
 
@@ -273,49 +316,44 @@ class OrchestratorAgent:
         enable_harness = opts.get("enable_harness", False) or "harness" in agents_enabled
         dynamic_target = opts.get("dynamic_target")
 
-        verify_agent = VerifyAgent(scan_id=self.scan.id)
         poc_runner = PocRunner(scan_id=self.scan.id) if use_poc else None
 
-        # 1) 独立验证（降低误报）
+        # 验证阶段专用 context：只做静态验证，动态验证放到后续专门阶段执行
+        verify_ctx = ACPContext(
+            project_id=self.project.id, scan_id=self.scan.id,
+            code_root=str(code_root) if code_root else None,
+            enabled_tools=self._acp_context.enabled_tools,
+            enabled_agents=self._acp_context.enabled_agents,
+            options={},
+        )
+
+        # 1) 独立验证（降低误报）——ACP 消息驱动：orchestrator --verify.request--> VerifyAgent.run_acp
         results: list[dict] = []
         for c in candidates:
             if "verify" in agents_enabled:
-                # ACP 记录：验证请求
-                self._acp_record(
-                    sender="orchestrator_agent",
+                acp_finding = legacy_finding_to_acp(c)
+                # code_root 通过 finding.extra 冗余传递，兼容 verify_agent 两条读取路径
+                acp_finding.setdefault("extra", {})
+                if code_root is not None:
+                    acp_finding["extra"]["code_root"] = str(code_root)
+                req = self._make_request(
                     receiver="verify_agent",
                     message_type=ACPMessageType.VERIFY_REQUEST,
                     intent=f"验证候选漏洞: {c.get('type')} @ {c.get('file')}",
-                    payload_summary={
-                        "type": c.get("type"),
-                        "file": c.get("file"),
-                        "line": c.get("start_line") or c.get("line"),
-                    },
+                    payload={"finding": acp_finding, "code_root": str(code_root) if code_root else None},
+                    context=verify_ctx,
                 )
-                vr = verify_agent.run(c, code_root=code_root)
-                is_valid = vr.get("is_valid", True)
+                reply = self._dispatch_acp(req)
+                vinfo = reply.payload.get("verification") or {}
+                is_valid = vinfo.get("static_verdict") != "false_positive"
                 c["verified"] = bool(is_valid)
                 c["status"] = "confirmed" if is_valid else "false_positive"
-                c["confidence"] = float(vr.get("confidence", c.get("confidence", 0.5)) or 0.5)
-                if vr.get("severity"):
-                    c["severity"] = vr["severity"]
-                if vr.get("runtime_verification_status"):
-                    c["runtime_verification_status"] = vr["runtime_verification_status"]
-                c["_verify"] = vr
-                # ACP 记录：验证结果
-                self._acp_record(
-                    sender="verify_agent",
-                    receiver="orchestrator_agent",
-                    message_type=ACPMessageType.VERIFY_RESULT,
-                    intent="验证完成",
-                    payload_summary={
-                        "is_valid": is_valid,
-                        "status": c["status"],
-                        "confidence": c["confidence"],
-                    },
-                    verdict=ACPVerdict.STATICALLY_VERIFIED if is_valid else ACPVerdict.FALSE_POSITIVE,
-                    confidence=c["confidence"],
-                )
+                conf = reply.status.confidence
+                c["confidence"] = float(conf if conf is not None else c.get("confidence", 0.5) or 0.5)
+                if vinfo.get("dynamic_verdict"):
+                    c["runtime_verification_status"] = vinfo["dynamic_verdict"]
+                # 保留 verification（含 source/sink/call_path/裁决）供利用与证据链复用
+                c["_verify"] = {**vinfo, "knowledge": reply.payload.get("knowledge") or {}}
             else:
                 c["status"] = "confirmed"
 
@@ -332,48 +370,34 @@ class OrchestratorAgent:
         # 2) 漏洞自动利用 + 动态验证（PDF 模块③；含 DeepAudit 式 Fuzzing Harness）
         if enable_exploit or enable_dynamic or enable_harness:
             self._stage("ExploitAgent/DynamicVerify", 88)
-            self._acp_record(
-                sender="orchestrator_agent",
-                receiver="exploit_agent",
-                message_type=ACPMessageType.EXPLOIT_GENERATE_REQUEST,
-                intent="启动漏洞利用+动态验证流水线",
-                payload_summary={
+            dynamic_ctx = ACPContext(
+                project_id=self.project.id, scan_id=self.scan.id,
+                code_root=str(code_root) if code_root else None,
+                enabled_tools=self._acp_context.enabled_tools,
+                enabled_agents=self._acp_context.enabled_agents,
+                options={
                     "enable_exploit": enable_exploit,
                     "enable_dynamic": enable_dynamic,
                     "enable_harness": enable_harness,
-                    "confirmed_count": sum(1 for r in results if r.get("status") == "confirmed"),
+                    "dynamic_target": dynamic_target,
                 },
             )
-            # 由 DynamicAnalysisAgent 统一调度动态验证（内部委托 ExploitPipeline）
-            dyn_agent = DynamicAnalysisAgent(scan_id=self.scan.id)
-            plan = dyn_agent.plan(results, code_root)
-            self._acp_record(
-                sender="dynamic_analysis_agent",
-                receiver="orchestrator_agent",
+            req = self._make_request(
+                receiver="dynamic_analysis_agent",
                 message_type=ACPMessageType.DYNAMIC_VERIFY_REQUEST,
-                intent="动态分析计划：启动方式识别 + 端点提取 + 策略映射",
-                payload_summary={
-                    "framework": plan.get("launch", {}).get("framework"),
-                    "endpoint_count": plan.get("endpoint_count", 0),
-                    "dynamic_applicable_count": plan.get("dynamic_applicable_count", 0),
+                intent="漏洞利用+动态验证流水线",
+                payload={
+                    "findings": results,
+                    "code_root": str(code_root) if code_root else None,
+                    "enable_exploit": enable_exploit,
+                    "enable_dynamic": enable_dynamic,
+                    "enable_harness": enable_harness,
+                    "dynamic_target": dynamic_target,
                 },
+                context=dynamic_ctx,
             )
-            dyn_agent.run(
-                results, code_root=code_root, enable_exploit=enable_exploit,
-                enable_dynamic=enable_dynamic, enable_harness=enable_harness,
-                dynamic_target=dynamic_target,
-            )
-            self._acp_record(
-                sender="dynamic_analysis_agent",
-                receiver="orchestrator_agent",
-                message_type=ACPMessageType.DYNAMIC_VERIFY_RESULT,
-                intent="漏洞利用+动态验证流水线完成",
-                payload_summary={
-                    "exploited": sum(1 for r in results if r.get("_exploit")),
-                    "dynamic_verified": sum(1 for r in results if r.get("dynamically_verified")),
-                },
-                verdict=ACPVerdict.EXPLOIT_GENERATED,
-            )
+            reply = self._dispatch_acp(req)
+            results = reply.payload.get("findings") or results
         else:
             # 未启用利用模块时，用 PoC 证据兜底证据链
             for c in results:

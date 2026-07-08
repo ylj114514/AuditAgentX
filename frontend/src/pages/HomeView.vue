@@ -5,7 +5,7 @@
         <p class="eyebrow">AuditAgentX</p>
         <h1>开源项目智能安全审计与验证系统</h1>
         <p class="hero-text">
-          将仓库解析、静态扫描、LLM 智能体复核和证据链报告串成一条可查看的审计流程。
+          将仓库解析、静态扫描、LLM 多智能体复核、MCP+Skills 工具调用和证据链报告串成一条可查看的审计流程。
         </p>
         <div class="hero-actions">
           <el-button type="primary" size="large" @click="router.push('/projects/new')">新建审计项目</el-button>
@@ -15,8 +15,8 @@
       </div>
       <div class="hero-metrics" aria-label="系统模块概览">
         <div class="metric-card"><strong>4</strong><span>核心模块</span></div>
-        <div class="metric-card"><strong>3</strong><span>分析标签页</span></div>
-        <div class="metric-card"><strong>50</strong><span>本地历史上限</span></div>
+        <div class="metric-card"><strong>MCP</strong><span>工具调用证据</span></div>
+        <div class="metric-card"><strong>RAG</strong><span>知识增强报告</span></div>
       </div>
     </div>
 
@@ -29,7 +29,7 @@
       <button class="quick-card" @click="router.push('/scans')">
         <span>02</span>
         <h2>静态分析</h2>
-        <p>查看静态扫描、智能体复核和漏洞证据链，便于演示审计流程。</p>
+        <p>查看静态扫描、智能体复核、MCP 工具调用和漏洞证据链，便于演示审计流程。</p>
       </button>
       <button class="quick-card" @click="router.push('/history')">
         <span>03</span>
@@ -54,8 +54,13 @@
       <el-table v-else :data="history.slice(0, 5)" stripe>
         <el-table-column prop="projectName" label="项目" min-width="160" />
         <el-table-column prop="scanId" label="Scan ID" min-width="180" />
-        <el-table-column prop="status" label="状态" width="110" />
+        <el-table-column label="状态" width="120">
+          <template #default="scope"><el-tag :type="statusType(scope.row.status)">{{ scope.row.status || "unknown" }}</el-tag></template>
+        </el-table-column>
         <el-table-column prop="findingCount" label="漏洞数" width="90" />
+        <el-table-column label="已验证" width="90">
+          <template #default="scope">{{ scope.row.verifiedCount ?? 0 }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="120">
           <template #default="scope">
             <el-button type="primary" link @click="openScan(scope.row.scanId)">查看</el-button>
@@ -82,6 +87,14 @@ function openScan(scanId: string) {
   router.push({ path: "/scans", query: { scanId } });
 }
 
+function statusType(status?: string) {
+  const value = String(status || "").toLowerCase();
+  if (value === "failed") return "danger";
+  if (value === "done" || value === "finished") return "success";
+  if (value === "running") return "warning";
+  return "info";
+}
+
 onMounted(() => {
   refresh();
   window.addEventListener("audit-history-updated", refresh);
@@ -92,22 +105,24 @@ onUnmounted(() => window.removeEventListener("audit-history-updated", refresh));
 
 <style scoped>
 .home-shell { display: flex; flex-direction: column; gap: 24px; }
-.hero-panel { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; padding: 34px; background: #102033; color: #fff; border-radius: 18px; }
+.hero-panel { position: relative; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; padding: 36px; background: linear-gradient(135deg, #0b1728 0%, #102f4f 54%, #164b78 100%); color: #fff; border-radius: 22px; box-shadow: var(--ax-shadow); }
+.hero-panel::after { content: ""; position: absolute; inset: auto -90px -120px auto; width: 360px; height: 360px; border-radius: 999px; background: rgba(143, 211, 255, .16); filter: blur(4px); }
+.hero-copy, .hero-metrics { position: relative; z-index: 1; }
 .eyebrow { margin: 0 0 10px; color: #8fd3ff; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); line-height: 1.1; }
 .hero-text { max-width: 720px; color: #d8e6f3; font-size: 16px; line-height: 1.8; }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
 .hero-metrics { display: grid; gap: 12px; }
-.metric-card { padding: 20px; border: 1px solid rgba(255,255,255,.18); border-radius: 14px; background: rgba(255,255,255,.08); }
+.metric-card { padding: 20px; border: 1px solid rgba(255,255,255,.18); border-radius: 16px; background: rgba(255,255,255,.09); backdrop-filter: blur(8px); }
 .metric-card strong { display: block; font-size: 34px; }
 .metric-card span { color: #d8e6f3; }
 .quick-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-.quick-card { text-align: left; padding: 20px; border: 1px solid #d9e2ec; background: #fff; border-radius: 16px; cursor: pointer; transition: transform .16s ease, border-color .16s ease; }
-.quick-card:hover { transform: translateY(-2px); border-color: #2f80ed; }
+.quick-card { text-align: left; padding: 22px; border: 1px solid #d9e2ec; background: linear-gradient(180deg, #fff, #f9fbff); border-radius: 18px; cursor: pointer; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+.quick-card:hover { transform: translateY(-3px); border-color: #2f80ed; box-shadow: var(--ax-shadow); }
 .quick-card span { color: #2f80ed; font-weight: 800; }
 .quick-card h2 { margin: 12px 0 8px; font-size: 18px; color: #162235; }
 .quick-card p { margin: 0; color: #667085; line-height: 1.7; }
-.history-card { border-radius: 16px; }
+.history-card { border-radius: 18px; }
 .card-header { display: flex; align-items: center; justify-content: space-between; }
 @media (max-width: 980px) { .hero-panel { grid-template-columns: 1fr; } .quick-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .hero-panel { padding: 24px; } .quick-grid { grid-template-columns: 1fr; } }

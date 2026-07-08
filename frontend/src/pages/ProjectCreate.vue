@@ -48,16 +48,16 @@
       <el-card class="panel-card config-card" shadow="never">
         <template #header>扫描模式</template>
         <div class="mode-list">
-          <div :class="['mode-row', scanMode === 'quick' && 'mode-active']" @click="scanMode = 'quick'">
-            <div><b>Quick 快速扫描</b><p>仅静态扫描（Semgrep / Gitleaks / 污点规则），不调用 LLM，不动态验证。</p></div>
+          <div :class="['mode-row', scanMode === 'quick' && 'mode-active']" role="button" tabindex="0" @click="scanMode = 'quick'" @keyup.enter="scanMode = 'quick'">
+            <div><span class="mode-kicker">Quick</span><b>快速扫描</b><p>仅静态扫描（Semgrep / Gitleaks / 污点规则），不调用 LLM，不动态验证。</p></div>
             <el-radio :model-value="scanMode" value="quick" />
           </div>
-          <div :class="['mode-row', scanMode === 'standard' && 'mode-active']" @click="scanMode = 'standard'">
-            <div><b>Standard 标准智能体审计</b><p>含 Quick + AuditAgent 语义审计 + VerifyAgent 复核去误报 + source→sink 证据链 + 报告。不主动发起动态请求。</p></div>
+          <div :class="['mode-row', scanMode === 'standard' && 'mode-active']" role="button" tabindex="0" @click="scanMode = 'standard'" @keyup.enter="scanMode = 'standard'">
+            <div><span class="mode-kicker">Standard</span><b>标准智能体审计</b><p>含 Quick + AuditAgent 语义审计 + VerifyAgent 复核去误报 + source→sink 证据链 + 报告。不主动发起动态请求。</p></div>
             <el-radio :model-value="scanMode" value="standard" />
           </div>
-          <div :class="['mode-row', scanMode === 'deep' && 'mode-active']" @click="scanMode = 'deep'">
-            <div><b>Deep Docker 沙箱验证</b><p>含 Standard + 在 Docker 沙箱中尝试启动 GitHub 项目，对本地容器服务执行授权动态验证 + Harness 验证。</p></div>
+          <div :class="['mode-row', scanMode === 'deep' && 'mode-active']" role="button" tabindex="0" @click="scanMode = 'deep'" @keyup.enter="scanMode = 'deep'">
+            <div><span class="mode-kicker">Deep Docker</span><b>沙箱验证</b><p>含 Standard + 在 Docker 沙箱中尝试启动 GitHub 项目，对本地容器服务执行授权动态验证 + Harness 验证。</p></div>
             <el-radio :model-value="scanMode" value="deep" />
           </div>
         </div>
@@ -232,10 +232,10 @@ async function submit() {
 .page-title-row h1 { margin: 0; color: #162235; }
 .page-title-row p { margin: 6px 0 0; color: #667085; }
 .eyebrow { margin: 0; color: #2f80ed; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.create-grid { display: grid; grid-template-columns: 420px minmax(0, 1fr); gap: 18px; align-items: start; }
-.panel-card { border-radius: 16px; }
-.config-card { order: 1; }
-.target-card { order: 2; }
+.create-grid { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.panel-card { border-radius: 18px; }
+.target-card { order: 1; }
+.config-card { order: 2; }
 .local-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; width: 100%; }
 .hidden-file-input { display: none; }
 .upload-hint { margin: 8px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
@@ -243,9 +243,11 @@ async function submit() {
 .switch-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid #e4ebf3; border-radius: 12px; background: #fbfdff; }
 .switch-row p { margin: 4px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
 .mode-list { display: flex; flex-direction: column; gap: 12px; }
-.mode-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px; border: 1px solid #e4ebf3; border-radius: 12px; background: #fbfdff; cursor: pointer; transition: all .15s; }
-.mode-row:hover { border-color: #2f80ed; }
-.mode-active { border-color: #2f80ed; background: #eef5ff; }
+.mode-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px; border: 1px solid #e4ebf3; border-radius: 16px; background: linear-gradient(180deg, #fff, #fbfdff); cursor: pointer; transition: all .15s; outline: none; }
+.mode-row:hover, .mode-row:focus-visible { border-color: #2f80ed; box-shadow: 0 10px 24px rgba(47,128,237,.1); }
+.mode-active { border-color: #2f80ed; background: linear-gradient(180deg, #eef6ff, #fff); box-shadow: inset 4px 0 0 #2f80ed, 0 14px 30px rgba(47,128,237,.12); }
+.mode-kicker { display: inline-flex; margin-bottom: 5px; color: #2f80ed; font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.mode-row b { display: block; color: #162235; }
 .mode-row p { margin: 4px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
 .deep-hint { color: #98a2b3; font-size: 13px; margin: 0 0 8px; }
 .deep-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

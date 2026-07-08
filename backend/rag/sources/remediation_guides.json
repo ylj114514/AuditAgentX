@@ -41,6 +41,174 @@
       ],
       "references": ["https://cwe.mitre.org/data/definitions/78.html"],
       "tags": ["fix", "command"]
+    },
+    {
+      "id": "FIX-PATH-TRAVERSAL",
+      "source_type": "remediation_guide",
+      "title": "Path Traversal Remediation Guide",
+      "summary": "Canonicalize user-influenced paths and confine them to an allowlisted base directory.",
+      "cwe_id": "CWE-22",
+      "owasp": ["A01:2021 Broken Access Control"],
+      "vuln_types": ["Path Traversal", "Directory Traversal", "LFI", "RFI"],
+      "aliases": ["directory traversal", "file inclusion", "目录穿越", "路径穿越"],
+      "sinks": ["open", "os.path.join", "send_file", "fs.readFile", "include"],
+      "verification_checks": ["Confirm the fix resolves the path and rejects anything outside the allowlisted base directory."],
+      "false_positive_signals": ["Path is already canonicalized and confined to a safe base directory."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Resolve to an absolute/real path and verify it is a descendant of an allowlisted base directory.",
+        "Map user input to an internal identifier or allowlist instead of using raw filenames.",
+        "Reject or strip traversal sequences and null bytes before filesystem access."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/22.html"],
+      "tags": ["fix", "filesystem"]
+    },
+    {
+      "id": "FIX-XSS",
+      "source_type": "remediation_guide",
+      "title": "Cross-Site Scripting (XSS) Remediation Guide",
+      "summary": "Apply context-aware output encoding and keep template auto-escaping enabled for all untrusted data.",
+      "cwe_id": "CWE-79",
+      "owasp": ["A03:2021 Injection"],
+      "vuln_types": ["XSS", "Cross-Site Scripting", "Reflected XSS", "Stored XSS", "DOM XSS"],
+      "aliases": ["cross site scripting", "跨站脚本"],
+      "sinks": ["innerHTML", "document.write", "dangerouslySetInnerHTML", "render_template_string", "|safe"],
+      "verification_checks": ["Confirm the fix contextually encodes the value or routes it through a vetted sanitizer."],
+      "false_positive_signals": ["Auto-escaping is enabled and the value is not marked safe/raw."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Use context-aware output encoding (HTML, attribute, JS, URL) at the sink.",
+        "Keep framework auto-escaping on and avoid safe/raw/Markup on untrusted data.",
+        "For rich HTML, sanitize with a vetted allowlist library (e.g. DOMPurify); add a strict Content-Security-Policy as defense in depth."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/79.html"],
+      "tags": ["fix", "web", "xss"]
+    },
+    {
+      "id": "FIX-SSRF",
+      "source_type": "remediation_guide",
+      "title": "SSRF Remediation Guide",
+      "summary": "Constrain server-side outbound requests with a scheme/host allowlist and block internal and metadata destinations.",
+      "cwe_id": "CWE-918",
+      "owasp": ["A10:2021 Server-Side Request Forgery"],
+      "vuln_types": ["SSRF", "Server-Side Request Forgery"],
+      "aliases": ["server-side request forgery", "服务端请求伪造"],
+      "sinks": ["requests.get", "urllib.request.urlopen", "httpx.get", "axios.get", "fetch"],
+      "verification_checks": ["Confirm the fix validates the resolved host against an allowlist and blocks internal ranges."],
+      "false_positive_signals": ["Destination is restricted by a strict scheme/host allowlist."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Allowlist permitted schemes and destination hosts; deny by default.",
+        "Resolve the hostname and reject private/link-local/loopback ranges and cloud metadata IPs (169.254.169.254).",
+        "Disable unneeded redirects and require egress through a controlled proxy."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/918.html"],
+      "tags": ["fix", "ssrf", "network"]
+    },
+    {
+      "id": "FIX-DESERIALIZATION",
+      "source_type": "remediation_guide",
+      "title": "Insecure Deserialization Remediation Guide",
+      "summary": "Avoid deserializing untrusted data with unsafe formats; prefer data-only formats and integrity protection.",
+      "cwe_id": "CWE-502",
+      "owasp": ["A08:2021 Software and Data Integrity Failures"],
+      "vuln_types": ["Insecure Deserialization", "Deserialization"],
+      "aliases": ["unsafe deserialization", "object injection", "反序列化", "对象注入"],
+      "sinks": ["pickle.loads", "yaml.load", "unserialize", "ObjectInputStream.readObject", "marshal.loads"],
+      "verification_checks": ["Confirm the fix replaces the unsafe loader or adds signature verification and class restrictions."],
+      "false_positive_signals": ["Only safe loaders (json.loads, yaml.safe_load) are used on untrusted data."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Use safe, data-only formats (JSON) and safe loaders (yaml.safe_load).",
+        "Never deserialize untrusted data with pickle/unserialize/ObjectInputStream.",
+        "If unavoidable, sign and verify payloads (HMAC) and restrict deserialization to an allowlist of classes."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/502.html"],
+      "tags": ["fix", "deserialization"]
+    },
+    {
+      "id": "FIX-SSTI",
+      "source_type": "remediation_guide",
+      "title": "Server-Side Template Injection Remediation Guide",
+      "summary": "Never compile templates from user input; pass untrusted data as bound variables and sandbox the engine.",
+      "cwe_id": "CWE-1336",
+      "owasp": ["A03:2021 Injection"],
+      "vuln_types": ["Server-Side Template Injection", "SSTI", "Template Injection"],
+      "aliases": ["template injection", "模板注入", "服务端模板注入"],
+      "sinks": ["render_template_string", "Template", "from_string", "Environment.from_string"],
+      "verification_checks": ["Confirm user input is no longer concatenated into template source and is passed as data only."],
+      "false_positive_signals": ["Input is bound as a template variable, never compiled as template source."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Render fixed templates and pass user data only as bound context variables.",
+        "Do not build template strings from user input via from_string/render_template_string.",
+        "Where dynamic templates are required, use a sandboxed engine and restrict attribute access."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/1336.html"],
+      "tags": ["fix", "template", "injection"]
+    },
+    {
+      "id": "FIX-XXE",
+      "source_type": "remediation_guide",
+      "title": "XXE Remediation Guide",
+      "summary": "Disable DTD processing and external entity resolution on all XML parsers handling untrusted input.",
+      "cwe_id": "CWE-611",
+      "owasp": ["A05:2021 Security Misconfiguration"],
+      "vuln_types": ["XXE", "XML External Entity"],
+      "aliases": ["xml external entity", "xml外部实体注入"],
+      "sinks": ["etree.parse", "lxml.etree", "DocumentBuilder", "SAXParser", "xml.dom.minidom.parse"],
+      "verification_checks": ["Confirm the fix disables DTDs/external entities or switches to a hardened parser."],
+      "false_positive_signals": ["Parser already disables DTDs and external entity resolution (e.g. defusedxml)."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Disable DTD processing and external general/parameter entities on the parser.",
+        "Use a hardened parser or library such as defusedxml.",
+        "Prefer non-XML formats or schema validation without entity expansion where possible."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/611.html"],
+      "tags": ["fix", "xml", "xxe"]
+    },
+    {
+      "id": "FIX-IDOR",
+      "source_type": "remediation_guide",
+      "title": "IDOR / Broken Access Control Remediation Guide",
+      "summary": "Enforce per-object ownership and authorization checks server-side for every request that references an identifier.",
+      "cwe_id": "CWE-639",
+      "owasp": ["A01:2021 Broken Access Control"],
+      "vuln_types": ["IDOR", "Broken Access Control", "Auth Bypass", "Mass Assignment"],
+      "aliases": ["insecure direct object reference", "broken object level authorization", "越权", "水平越权"],
+      "sinks": ["get_object_or_404", "findById", "objects.get", "Model.find"],
+      "verification_checks": ["Confirm the fix ties each object access to the authenticated principal's permissions."],
+      "false_positive_signals": ["An ownership/role check already gates the object access."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Perform per-object authorization on the server using the session identity, not client-supplied IDs.",
+        "Prefer unguessable, session-scoped references over sequential identifiers.",
+        "For mass assignment, bind only an explicit allowlist of fields and never trust role/is_admin from the request."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/639.html"],
+      "tags": ["fix", "access-control", "idor"]
+    },
+    {
+      "id": "FIX-HARDCODED-SECRET",
+      "source_type": "remediation_guide",
+      "title": "Hardcoded Secret Remediation Guide",
+      "summary": "Externalize secrets to a secrets manager or environment configuration, rotate exposed values, and purge them from version control.",
+      "cwe_id": "CWE-798",
+      "owasp": ["A07:2021 Identification and Authentication Failures", "A05:2021 Security Misconfiguration"],
+      "vuln_types": ["Hardcoded Secret", "Hardcoded Credential"],
+      "aliases": ["hardcoded credential", "hardcoded password", "硬编码密钥", "硬编码凭证"],
+      "sinks": ["password =", "api_key =", "secret =", "token =", "private_key"],
+      "verification_checks": ["Confirm the secret is removed from source, loaded from a secure store, and rotated."],
+      "false_positive_signals": ["The value is a placeholder or non-secret public identifier."],
+      "dynamic_strategy": "not_applicable",
+      "remediation": [
+        "Load secrets from environment variables or a dedicated secrets manager (Vault, KMS, cloud secret store).",
+        "Rotate any secret that was committed, and revoke the exposed credential.",
+        "Purge the secret from VCS history and add pre-commit secret scanning to prevent recurrence."
+      ],
+      "references": ["https://cwe.mitre.org/data/definitions/798.html"],
+      "tags": ["fix", "secret", "static"]
     }
   ]
 }

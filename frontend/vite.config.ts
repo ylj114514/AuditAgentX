@@ -1,13 +1,15 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
+const apiTarget = process.env.VITE_API_PROXY_TARGET || "http://localhost:8000";
+
 export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
     proxy: {
       // 将 /api 代理到 FastAPI 后端
-      "/api": { target: "http://localhost:8000", changeOrigin: true },
+      "/api": { target: apiTarget, changeOrigin: true },
     },
   },
 });

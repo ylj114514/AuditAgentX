@@ -8,7 +8,11 @@
       </div>
     </div>
 
-    <el-card shadow="never" class="panel-card">
+    <el-card shadow="never" class="panel-card report-card">
+      <div class="report-hint">
+        <b>报告内容</b>
+        <p>导出的报告会汇总漏洞列表、风险等级、证据链、动态验证状态和修复建议。</p>
+      </div>
       <el-form label-position="top">
         <el-form-item label="Scan ID">
           <el-input v-model="scanId" placeholder="输入 scan_id" />
@@ -70,6 +74,10 @@ onMounted(() => {
 .page-title-row h1 { margin: 0; color: #162235; }
 .page-title-row p { margin: 6px 0 0; color: #667085; }
 .eyebrow { margin: 0; color: #2f80ed; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.panel-card { max-width: 720px; border-radius: 16px; }
+.panel-card { max-width: 760px; border-radius: 18px; }
+.report-card { background: linear-gradient(180deg, #fff, #f8fbff); }
+.report-hint { margin-bottom: 18px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: #fbfdff; }
+.report-hint b { color: #162235; }
+.report-hint p { margin: 6px 0 0; color: #667085; line-height: 1.7; }
 .msg { margin-top: 16px; }
 </style>
