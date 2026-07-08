@@ -11,6 +11,7 @@ from pathlib import Path
 from backend.agents.base_agent import BaseAgent
 from backend.scanners.base import RawFinding
 from backend.dynamic.symbol_resolver import resolve_symbol, extract_referenced_symbols
+from backend.rag.retriever import SecurityKnowledgeRetriever
 
 
 class AuditAgent(BaseAgent):
@@ -29,6 +30,10 @@ class AuditAgent(BaseAgent):
         if expand_call_chain:
             call_chain_context = self._expand_call_chain(hot_files, code_root)
 
+        # RAG 知识增强（DeepAudit 式）：按静态扫描命中的漏洞类型检索 CWE/OWASP 知识，
+        # 作为参考喂给 LLM，帮助更准判断"这段代码属于哪类已知漏洞"
+        security_knowledge = self._retrieve_knowledge(raw_findings)
+
         user_content = json.dumps({
             "project_metadata": {
                 "languages": metadata.get("languages", []),
@@ -38,6 +43,7 @@ class AuditAgent(BaseAgent):
             "static_findings": [f.to_dict() for f in raw_findings[:100]],
             "code_snippets": hot_files,
             "cross_file_call_chain": call_chain_context,
+            "security_knowledge": security_knowledge,
         }, ensure_ascii=False)
 
         result = self._call(user_content)
@@ -46,6 +52,30 @@ class AuditAgent(BaseAgent):
         if isinstance(result, list):
             return result
         return []
+
+    @staticmethod
+    def _retrieve_knowledge(raw_findings: list[RawFinding], *, max_types: int = 8) -> list[dict]:
+        """按静态扫描命中的漏洞类型去重检索知识库，返回精简的知识条目列表。"""
+        retriever = SecurityKnowledgeRetriever()
+        seen: set[str] = set()
+        knowledge: list[dict] = []
+        for f in raw_findings:
+            vt = (f.type or "").strip()
+            if not vt or vt.lower() in seen or len(knowledge) >= max_types:
+                continue
+            seen.add(vt.lower())
+            out = retriever.retrieve(candidate={"type": vt, "code_snippet": f.code_snippet})
+            top = out.get("top_result")
+            if top:
+                knowledge.append({
+                    "for_type": vt,
+                    "cwe_id": top.get("cwe_id"),
+                    "title": top.get("title"),
+                    "owasp": top.get("owasp"),
+                    "verification_checks": top.get("verification_checks"),
+                    "false_positive_signals": top.get("false_positive_signals"),
+                })
+        return knowledge
 
     @staticmethod
     def _expand_call_chain(hot_files: list[dict], code_root: Path,

@@ -20,6 +20,10 @@
 要求：
 语言专业、清晰、适合课程实验报告。
 
+输入里的 `remediation_knowledge` 是按漏洞类型从 CWE/OWASP 知识库检索的**标准修复建议**。
+撰写"修复建议"与结论时请引用这些标准措施（含 CWE 编号），使建议具体、专业、可落地，
+而非泛泛而谈。
+
 请严格输出 JSON，字段：
 - executive_summary   （执行摘要，200~400 字）
 - overall_risk        （critical | high | medium | low）

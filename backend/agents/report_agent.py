@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from backend.agents.base_agent import BaseAgent
+from backend.rag.retriever import SecurityKnowledgeRetriever
 
 
 class ReportAgent(BaseAgent):
@@ -18,9 +19,12 @@ class ReportAgent(BaseAgent):
     prompt_file = "report_agent_prompt.md"
 
     def run(self, metadata: dict, findings_summary: dict) -> dict:
+        # RAG 知识增强：为报告涉及的漏洞类型检索标准修复建议（引用 CWE/OWASP，而非泛泛而谈）
+        remediation_knowledge = self._retrieve_remediation(findings_summary)
         user_content = json.dumps({
             "project_metadata": metadata,
             "findings_summary": findings_summary,
+            "remediation_knowledge": remediation_knowledge,
         }, ensure_ascii=False)
         result = self._call(user_content)
         if not isinstance(result, dict):
@@ -31,6 +35,35 @@ class ReportAgent(BaseAgent):
                 "conclusion": "",
             }
         return result
+
+    @staticmethod
+    def _retrieve_remediation(findings_summary: dict, *, max_types: int = 10) -> list[dict]:
+        """按报告涉及的漏洞类型检索标准修复建议（供 LLM 引用 CWE/OWASP）。"""
+        # 从 findings_summary 里尽力提取漏洞类型列表
+        types: list[str] = []
+        for key in ("types", "top_vulnerability_types", "vuln_types"):
+            val = findings_summary.get(key)
+            if isinstance(val, list):
+                for it in val:
+                    types.append(it.get("type") if isinstance(it, dict) else str(it))
+        for f in findings_summary.get("findings", []) or []:
+            if isinstance(f, dict) and f.get("type"):
+                types.append(f["type"])
+
+        retriever = SecurityKnowledgeRetriever()
+        seen: set[str] = set()
+        out: list[dict] = []
+        for vt in types:
+            vt = (vt or "").strip()
+            if not vt or vt.lower() in seen or len(out) >= max_types:
+                continue
+            seen.add(vt.lower())
+            res = retriever.retrieve(candidate={"type": vt})
+            top = res.get("top_result")
+            if top and top.get("remediation"):
+                out.append({"for_type": vt, "cwe_id": top.get("cwe_id"),
+                            "owasp": top.get("owasp"), "remediation": top.get("remediation")})
+        return out
 
     def run_acp(self, request: "ACPMessage") -> "ACPMessage":  # noqa: F821
         """ACP 接口：输入 report.request，输出 report.result。

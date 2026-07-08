@@ -23,6 +23,15 @@
 - 一个片段单看安全、但结合被调用函数的实现才暴露漏洞时，务必据此识别（这类跨文件逻辑漏洞是传统工具最易漏报的）。
 - 在 `data_flow` 字段里体现完整的跨文件传播路径（含 file/line）。
 
+## 安全知识增强（RAG）
+
+输入里的 `security_knowledge` 是按命中漏洞类型从 CWE/OWASP 知识库检索出的参考，
+含每类漏洞的 `verification_checks`（判定要点）与 `false_positive_signals`（误报信号）。
+请据此提升判定准确性：
+- 用 `verification_checks` 核对漏洞是否真正成立（source 可控、到达 sink、无有效净化）。
+- 命中 `false_positive_signals`（如参数化查询、类型转换、占位符密钥）时，降低 confidence 或不报。
+- 在输出里尽量给出对应的 `cwe_id`。
+
 请严格输出 JSON，不要输出额外解释。
 
 输出为一个对象，包含 findings 数组，数组中每个元素字段：
