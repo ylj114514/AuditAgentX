@@ -128,6 +128,30 @@ CASES: list[dict] = [
         "app.get('/p', (req, res) => {\n"
         "  child_process.exec('ls ' + req.query.dir);\n"
         "});\n"},
+
+    # ---- 跨函数污点（窗口级追不到，考验 AST 跨函数分析）----
+    {"name": "interproc_sqli_vuln.py", "type": "sqli", "vuln": True, "code":
+        "def handler(request, cur):\n"
+        "    uid = request.args.get('id')\n"
+        "    return run_query(uid, cur)\n"
+        "\n"
+        "def run_query(x, cur):\n"
+        "    return cur.execute('SELECT * FROM users WHERE id=' + x)\n"},
+    {"name": "interproc_sqli_safe.py", "type": "sqli", "vuln": False, "code":
+        "def handler(request, cur):\n"
+        "    uid = request.args.get('id')\n"
+        "    return run_query(uid, cur)\n"
+        "\n"
+        "def run_query(x, cur):\n"
+        "    return cur.execute('SELECT * FROM users WHERE id=?', (x,))\n"},
+    {"name": "interproc_cmdi_vuln.py", "type": "cmdi", "vuln": True, "code":
+        "import os\n"
+        "def handler(request):\n"
+        "    host = request.args.get('host')\n"
+        "    do_ping(host)\n"
+        "\n"
+        "def do_ping(h):\n"
+        "    os.system('ping -c 1 ' + h)\n"},
 ]
 
 

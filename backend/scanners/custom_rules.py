@@ -12,12 +12,16 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from backend.scanners.base import BaseScanner, RawFinding
 from backend.repository.language_detector import scan_files
 from backend.scanners import taint_rules as tr
+from backend.scanners.interproc_taint import analyze_python_interproc
+
+logger = logging.getLogger(__name__)
 
 # 赋值语句：捕获被赋值的变量名。可选类型/声明前缀，兼容：
 #   PHP `$q =`、Python/JS `q =`、Java/C# `String q =`、JS `const q =` / `let q =`、Go `q :=`
@@ -39,12 +43,18 @@ class CustomRuleScanner(BaseScanner):
         findings: list[RawFinding] = []
         for f in scan_files(target):
             try:
-                lines = f.read_text(encoding="utf-8", errors="ignore").splitlines()
+                text = f.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             rel = (f.relative_to(target).as_posix()
                    if target in f.parents or target == f.parent else f.name)
-            findings.extend(self._scan_file(rel, lines))
+            findings.extend(self._scan_file(rel, text.splitlines()))
+            # Python 文件额外做 AST 级跨函数（1-hop）污点分析，捕获窗口级追不到的跨函数链路
+            if f.suffix.lower() == ".py":
+                try:
+                    findings.extend(analyze_python_interproc(rel, text))
+                except Exception as e:  # noqa: BLE001  单文件分析失败不影响整体
+                    logger.debug("跨函数污点分析失败 %s: %s", rel, e)
         return findings
 
     def _scan_file(self, rel: str, lines: list[str]) -> list[RawFinding]:

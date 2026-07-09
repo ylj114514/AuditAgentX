@@ -105,6 +105,30 @@ def test_xss_rule_not_flagging_stdout_print_in_c_cli():
     assert any(f.type == "XSS" for f in php), "PHP echo XSS 应检出"
 
 
+def test_interproc_cross_function_taint():
+    """AST 级跨函数污点：用户输入经函数传参到另一函数内的 sink，应被检出；参数化/无输入不误报。"""
+    from backend.scanners.interproc_taint import analyze_python_interproc
+
+    vuln = ("def handler(request, cur):\n"
+            "    uid = request.args.get('id')\n"
+            "    return run_query(uid, cur)\n\n"
+            "def run_query(x, cur):\n"
+            "    return cur.execute('SELECT * FROM u WHERE id=' + x)\n")
+    r = analyze_python_interproc("t.py", vuln)
+    assert any(f.type == "SQL Injection" for f in r), "跨函数 SQLi 漏检"
+    assert r[0].extra["analysis"] == "interproc-taint"
+    assert r[0].extra["caller"] == "handler" and r[0].extra["callee"] == "run_query"
+
+    # 参数化：不应报
+    safe = vuln.replace("'SELECT * FROM u WHERE id=' + x", "'SELECT * FROM u WHERE id=?', (x,)")
+    assert analyze_python_interproc("t.py", safe) == []
+
+    # 无用户输入（常量入参）：不应报
+    const = ("def handler(cur):\n    return run_query('42', cur)\n\n"
+             "def run_query(x, cur):\n    return cur.execute('SELECT * FROM u WHERE id=' + x)\n")
+    assert analyze_python_interproc("t.py", const) == []
+
+
 def test_static_sql_not_flagged():
     """静态字面量 SQL（无拼接）不应被报为注入。"""
     scanner = CustomRuleScanner()
