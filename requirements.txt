@@ -21,6 +21,9 @@ docker>=7.0.0
 
 # 代码解析
 pygments==2.18.0
+# Java 函数级污点分析（AST 解析，纯 Python；缺失时 java_taint 优雅降级）
+javalang==0.13.0
+
 # tree-sitter 可选（高级语法解析）
 # tree-sitter==0.23.0
 

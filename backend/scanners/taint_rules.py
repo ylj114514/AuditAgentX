@@ -23,6 +23,8 @@ SOURCE_PATTERNS = [
     re.compile(r"r\.(URL\.Query|FormValue|PostFormValue|Form|Header\.Get)|"
                r"\bc\.(Query|Param|PostForm|DefaultQuery)\b|mux\.Vars|ps\.ByName", re.I),  # Go(net/http/gin/mux)
     re.compile(r"cookies\s*\[|request\.(parameters|env)\b|params\.require|params\.permit", re.I),  # Ruby(Rails 补充)
+    re.compile(r"Request\.(QueryString|Form|Params|Cookies|Headers|Body|RawUrl|Files)|"
+               r"Request\s*\[", re.I),                                          # C#/ASP.NET
 ]
 
 # 净化器（sanitizer）：出现则大幅降低可利用性
@@ -43,9 +45,11 @@ SANITIZER_PATTERNS = [
 # require_source=False：硬编码密钥/不安全反序列化等本身即问题
 TAINT_SINKS: list[tuple[str, str, re.Pattern, bool]] = [
     ("SQL Injection", "high", re.compile(
-        r"(cursor\.execute|\.execute|\.query|db\.query|mysqli_query|->query|"
+        r"((cursor\.execute|\.execute|\.query|db\.query|mysqli_query|->query|"
         r"executeQuery|createStatement|"
-        r"db\.(Query|Exec|QueryRow)|\.Raw\s*\(|find_by_sql|\.where)\s*\(", re.I), True),  # +Go(database/sql/gorm) +Ruby(ActiveRecord)
+        r"db\.(Query|Exec|QueryRow)|\.Raw|find_by_sql|\.where|"
+        r"Execute(?:Reader|NonQuery|Scalar)|new\s+SqlCommand)\s*\(|"
+        r"CommandText\s*=)", re.I), True),  # +Go(database/sql/gorm) +Ruby(ActiveRecord) +C#(ADO.NET)
     ("Command Injection", "high", re.compile(
         r"(os\.system|subprocess\.(call|run|Popen|check_output)|commands\.getoutput|"
         r"shell_exec|passthru|proc_open|popen|exec|eval|Runtime\.getRuntime\(\)\.exec|"
@@ -68,7 +72,10 @@ TAINT_SINKS: list[tuple[str, str, re.Pattern, bool]] = [
         # 把普通标准输出大量误报成 XSS）；echo 加词边界，只当 PHP/模板输出看待。
         r"(innerHTML|document\.write|render_template_string|\|\s*safe|"
         r"dangerouslySetInnerHTML|\becho\b|"
-        r"\.html_safe|raw\s*\(|template\.HTML\s*\()\s*", re.I), True),  # +Ruby(html_safe/raw) +Go(template.HTML)
+        r"\.html_safe|raw\s*\(|template\.HTML\s*\(|"
+        r"res\.(?:send|write|end)\s*\(|"                                         # Node/Express 响应写出
+        r"\bw\.Write\s*\(|fmt\.Fprint(?:f|ln)?\s*\(\s*w\b|"                       # Go http.ResponseWriter
+        r"Response\.Write\s*\(|HttpContext[^;\n]*Response|<%=)\s*", re.I), True),  # C#/ASP.NET
     ("Insecure Deserialization", "high", re.compile(
         r"(pickle\.loads|cPickle\.loads|yaml\.load\s*\((?!.*Loader)|unserialize|"
         r"ObjectInputStream|readObject|marshal\.loads|__reduce__|"
@@ -76,8 +83,31 @@ TAINT_SINKS: list[tuple[str, str, re.Pattern, bool]] = [
     ("Hardcoded Secret", "high", re.compile(
         r"""(password|passwd|secret|api[_-]?key|token|access[_-]?key|private[_-]?key)"""
         r"""\s*[=:]\s*['"][^'"]{6,}['"]""", re.I), False),
-    ("Weak Cryptography", "low", re.compile(
-        r"(md5|sha1|DES|RC4|ECB)\s*\(", re.I), False),
+    # 弱哈希（CWE-328）：Java MessageDigest/DigestUtils + PHP/JS/Python/Ruby 直接哈希函数
+    ("Weak Hash", "medium", re.compile(
+        r"""(MessageDigest\.getInstance\s*\(\s*"(?:MD2|MD4|MD5|SHA-?1)"|"""
+        r"""DigestUtils\.(?:md5|sha1|getMd5|getSha1|md5Hex|sha1Hex)|"""
+        r"""\bmd5\s*\(|\bsha1\s*\(|hashlib\.(?:md5|sha1)\s*\(|"""
+        r"""crypto\.createHash\s*\(\s*['"](?:md5|sha1)['"]|"""
+        r"""Digest::(?:MD5|SHA1)\b|md5\.New\s*\(|sha1\.New\s*\()""", re.I), False),
+    # 弱加密算法（CWE-327）：Java Cipher/KeyGenerator 弱算法(DES/RC4/ECB) + 其它语言
+    ("Weak Cryptography", "medium", re.compile(
+        r"""((?:Cipher|KeyGenerator|SecretKeyFactory)\.getInstance\s*\(\s*"""
+        r""""(?:DES|DESede|RC2|RC4|Blowfish|ARCFOUR)(?:[/"]|$)|"""              # Java 弱 cipher（前缀）
+        r"""(?:Cipher|SecretKeyFactory)\.getInstance\s*\(\s*"[^"]*ECB[^"]*"|"""  # 任意含 ECB 模式
+        r"""\bDES\b\s*\(|\bRC4\b\s*\(|mcrypt_encrypt|createCipheriv\s*\(\s*['"](?:des|rc4)|"""
+        r"""crypto/des|crypto/rc4)""", re.I), False),
+    # 不安全 Cookie（CWE-614）：显式关闭 Secure 标志，Cookie 可经明文 HTTP 泄露
+    ("Insecure Cookie", "low", re.compile(
+        r"""(setSecure\s*\(\s*false\s*\)|"""                                     # Java: cookie.setSecure(false)
+        r"""SESSION_COOKIE_SECURE\s*[=:]\s*False|"""                             # Django/Flask 配置
+        r"""cookie[^;\n]*secure\s*[:=]\s*false)""", re.I), False),               # JS/通用 secure:false
+    # 弱随机（CWE-330）：安全敏感场景用非加密级 RNG；显式排除 SecureRandom
+    ("Weak Randomness", "medium", re.compile(
+        r"""(new\s+(?:java\.util\.)?Random\b|"""                                 # Java new Random()
+        r"""\bMath\.random\s*\(|"""                                              # Java/JS Math.random()
+        r"""\bmt_rand\s*\(|\brand\s*\(\s*\)|\bmt_srand\s*\(|"""                   # PHP
+        r"""math/rand|\brandom\.(?:random|randint|randrange|choice)\s*\()""", re.I), False),
 ]
 
 # 硬编码密钥的占位值（是则判为疑似误报）

@@ -129,6 +129,86 @@ def test_interproc_cross_function_taint():
     assert analyze_python_interproc("t.py", const) == []
 
 
+def test_java_function_level_taint():
+    """Java 函数级污点(javalang)：源在顶部、经中间变量拼接到底部 sink（正则窗口够不着）应检出；
+    安全用例用 `bar = 三元 ? 常量 : param` 打断污点，不应误报。"""
+    from backend.scanners.java_taint import analyze_java, available
+    if not available():
+        import pytest
+        pytest.skip("javalang 未安装")
+
+    vuln = (
+        "public class T {\n"
+        "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
+        "    String param = request.getParameter(\"id\");\n"
+        "    String sql = \"SELECT * FROM users WHERE id='\" + param + \"'\";\n"
+        "    java.sql.Statement st = conn.createStatement();\n"
+        "    st.executeQuery(sql);\n"
+        "  }\n"
+        "}\n")
+    r = analyze_java("T.java", vuln)
+    assert any(f.type == "SQL Injection" for f in r), "Java 函数级多跳 SQLi 漏检"
+    assert r[0].extra["analysis"] == "java-taint"
+
+    # 三元打断污点：bar 取字面量分支，param 分支视为断链 -> 不报
+    safe = (
+        "public class T {\n"
+        "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
+        "    String param = request.getParameter(\"id\");\n"
+        "    String bar = cond ? \"safe_constant\" : param;\n"
+        "    String sql = \"SELECT * FROM users WHERE id='\" + bar + \"'\";\n"
+        "    conn.createStatement().executeQuery(sql);\n"
+        "  }\n"
+        "}\n")
+    assert not any(f.type == "SQL Injection" for f in analyze_java("T.java", safe)), \
+        "三元打断污点的安全用例不应误报"
+
+
+def test_java_weak_crypto_hash_random_literal():
+    """Java 弱加密/弱哈希/弱随机（require_source=False，字面量匹配）应检出；安全算法不报。"""
+    scanner = CustomRuleScanner()
+    weak = scanner._scan_file("C.java", [
+        'javax.crypto.Cipher.getInstance("DES/CBC/PKCS5Padding");',
+        'java.security.MessageDigest.getInstance("MD5");',
+        'float r = new java.util.Random().nextFloat();',
+    ])
+    types = {f.type for f in weak}
+    assert "Weak Cryptography" in types, "Java 弱加密(DES)漏检"
+    assert "Weak Hash" in types, "Java 弱哈希(MD5)漏检"
+    assert "Weak Randomness" in types, "Java 弱随机(new Random)漏检"
+
+    safe = scanner._scan_file("S.java", [
+        'javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");',
+        'java.security.MessageDigest.getInstance("SHA-256");',
+        'int x = new java.security.SecureRandom().nextInt();',
+    ])
+    safe_types = {f.type for f in safe}
+    assert not (safe_types & {"Weak Cryptography", "Weak Hash", "Weak Randomness"}), \
+        f"安全算法被误报: {safe_types}"
+
+
+def test_multilang_weak_primitives_and_xss():
+    """跨语言平移：PHP/JS/Go/Ruby/Python/C# 的弱哈希/弱随机/不安全Cookie/服务端XSS 覆盖。"""
+    scanner = CustomRuleScanner()
+
+    def types(name, lines):
+        return {f.type for f in scanner._scan_file(name, lines)
+                if (f.extra or {}).get("confidence", 1.0) >= 0.5}
+
+    assert "Weak Hash" in types("a.php", ["$h = md5($pw);"])
+    assert "Weak Hash" in types("b.go", ["h := md5.New()"])
+    assert "Weak Randomness" in types("c.php", ["$t = mt_rand();"])
+    assert "Insecure Cookie" in types("d.py", ["SESSION_COOKIE_SECURE = False"])
+    # 服务端 XSS：Node / C#（源 + 拼接）
+    assert "XSS" in types("e.js", ['app.get("/p",(req,res)=>{res.send("<h1>"+req.query.n);});'])
+    assert "XSS" in types("f.cs", ['string n = Request.QueryString["n"];', 'Response.Write("<p>"+n);'])
+    # C# ADO.NET SQLi（CommandText 拼接）
+    assert "SQL Injection" in types(
+        "g.cs", ['string id = Request["id"];', 'cmd.CommandText = "SELECT * FROM u WHERE id=" + id;'])
+    # 安全写法不误报
+    assert "Weak Hash" not in types("safe.js", ["crypto.createHash('sha256').update(x)"])
+
+
 def test_static_sql_not_flagged():
     """静态字面量 SQL（无拼接）不应被报为注入。"""
     scanner = CustomRuleScanner()

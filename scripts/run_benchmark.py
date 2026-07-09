@@ -45,6 +45,14 @@ def _norm_type(t: str) -> str:
         return "xss"
     if "deserial" in t or "pickle" in t:
         return "deserialize"
+    if "weak hash" in t or "hash" in t:
+        return "weakhash"
+    if "weak crypto" in t or "cryptograph" in t or "cipher" in t:
+        return "weakcrypto"
+    if "weak random" in t or "random" in t:
+        return "weakrand"
+    if "cookie" in t:
+        return "cookie"
     if "secret" in t or "credential" in t or "hardcoded" in t or "key" in t:
         return "secret"
     if "ssrf" in t:
@@ -152,6 +160,39 @@ CASES: list[dict] = [
         "\n"
         "def do_ping(h):\n"
         "    os.system('ping -c 1 ' + h)\n"},
+
+    # ---- Java 函数级污点（源在顶、经中间变量拼接到底部 sink，考验 AST 污点）----
+    {"name": "java_sqli_vuln.java", "type": "sqli", "vuln": True, "code":
+        "public class T {\n"
+        "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
+        "    String param = request.getParameter(\"id\");\n"
+        "    String sql = \"SELECT * FROM users WHERE id='\" + param + \"'\";\n"
+        "    conn.createStatement().executeQuery(sql);\n"
+        "  }\n}\n"},
+    {"name": "java_sqli_safe.java", "type": "sqli", "vuln": False, "code":
+        "public class T {\n"
+        "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
+        "    String param = request.getParameter(\"id\");\n"
+        "    String bar = cond ? \"safe_constant\" : param;\n"
+        "    String sql = \"SELECT * FROM users WHERE id='\" + bar + \"'\";\n"
+        "    conn.createStatement().executeQuery(sql);\n"
+        "  }\n}\n"},
+
+    # ---- Java 弱加密 / 弱随机（字面量匹配，无需污点）----
+    {"name": "java_crypto_vuln.java", "type": "weakcrypto", "vuln": True, "code":
+        "class C { void f() { javax.crypto.Cipher.getInstance(\"DES/CBC/PKCS5Padding\"); } }\n"},
+    {"name": "java_crypto_safe.java", "type": "weakcrypto", "vuln": False, "code":
+        "class C { void f() { javax.crypto.Cipher.getInstance(\"AES/GCM/NoPadding\"); } }\n"},
+    {"name": "java_rand_vuln.java", "type": "weakrand", "vuln": True, "code":
+        "class R { float f() { return new java.util.Random().nextFloat(); } }\n"},
+    {"name": "java_rand_safe.java", "type": "weakrand", "vuln": False, "code":
+        "class R { int f() { return new java.security.SecureRandom().nextInt(); } }\n"},
+
+    # ---- 跨语言弱哈希（PHP / Go）----
+    {"name": "php_md5_vuln.php", "type": "weakhash", "vuln": True, "code":
+        "<?php\n$h = md5($password);\n"},
+    {"name": "go_md5_vuln.go", "type": "weakhash", "vuln": True, "code":
+        "package main\nimport \"crypto/md5\"\nfunc f() { h := md5.New(); _ = h }\n"},
 ]
 
 

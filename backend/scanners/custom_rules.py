@@ -20,6 +20,7 @@ from backend.scanners.base import BaseScanner, RawFinding
 from backend.repository.language_detector import scan_files
 from backend.scanners import taint_rules as tr
 from backend.scanners.interproc_taint import analyze_python_interproc
+from backend.scanners.java_taint import analyze_java
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ class CustomRuleScanner(BaseScanner):
 
     def run(self, target: Path) -> list[RawFinding]:
         findings: list[RawFinding] = []
+        # 跨文件常量解析：先扫 .properties，得到「值为弱算法」的配置键（如 hashAlg1=MD5）。
+        # 供后面识别 MessageDigest.getInstance(props.getProperty("hashAlg1")) 这类间接弱哈希/弱加密。
+        weak_hash_keys, weak_crypto_keys = self._scan_weak_property_keys(target)
         for f in scan_files(target):
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
@@ -48,19 +52,83 @@ class CustomRuleScanner(BaseScanner):
                 continue
             rel = (f.relative_to(target).as_posix()
                    if target in f.parents or target == f.parent else f.name)
-            findings.extend(self._scan_file(rel, text.splitlines()))
+            lines = text.splitlines()
+            suffix = f.suffix.lower()
+            # Java 注入类污点由更精确的 AST 分析(java_taint)负责；正则窗口只保留非注入类
+            # （弱加密/弱哈希/弱随机/密钥等字面量规则），避免粗糙窗口对 Java 引入 AST 已避免的误报。
+            findings.extend(self._scan_file(rel, lines, skip_injection=(suffix == ".java")))
             # Python 文件额外做 AST 级跨函数（1-hop）污点分析，捕获窗口级追不到的跨函数链路
-            if f.suffix.lower() == ".py":
+            if suffix == ".py":
                 try:
                     findings.extend(analyze_python_interproc(rel, text))
                 except Exception as e:  # noqa: BLE001  单文件分析失败不影响整体
                     logger.debug("跨函数污点分析失败 %s: %s", rel, e)
+            # Java 文件做 AST 级函数内多跳污点分析（javalang），捕获正则窗口够不着的链路
+            elif suffix == ".java":
+                try:
+                    findings.extend(analyze_java(rel, text))
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("Java 污点分析失败 %s: %s", rel, e)
+                if weak_hash_keys or weak_crypto_keys:
+                    findings.extend(self._scan_indirect_weak_algo(
+                        rel, lines, weak_hash_keys, weak_crypto_keys))
         return findings
 
-    def _scan_file(self, rel: str, lines: list[str]) -> list[RawFinding]:
+    # 配置值里的弱哈希 / 弱加密算法
+    _WEAK_HASH_VAL = re.compile(r"^\s*(MD2|MD4|MD5|SHA-?1)\b", re.I)
+    _WEAK_CRYPTO_VAL = re.compile(r"\b(DES|DESede|RC2|RC4|Blowfish|ARCFOUR)\b|ECB", re.I)
+    _GETPROP_RE = re.compile(r"""getProperty\s*\(\s*["']([^"']+)["']""")
+
+    def _scan_weak_property_keys(self, target: Path) -> tuple[set[str], set[str]]:
+        """扫 .properties 文件，返回 (值为弱哈希的键集合, 值为弱加密的键集合)。"""
+        weak_hash: set[str] = set()
+        weak_crypto: set[str] = set()
+        if not target.is_dir():
+            return weak_hash, weak_crypto
+        for pf in target.rglob("*.properties"):
+            try:
+                for line in pf.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith(("#", "!")) or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key, val = key.strip(), val.strip()
+                    if self._WEAK_HASH_VAL.match(val):
+                        weak_hash.add(key)
+                    elif self._WEAK_CRYPTO_VAL.search(val):
+                        weak_crypto.add(key)
+            except OSError:
+                continue
+        return weak_hash, weak_crypto
+
+    def _scan_indirect_weak_algo(self, rel, lines, weak_hash_keys, weak_crypto_keys):
+        """识别经 getProperty(弱算法键) 间接构造的弱哈希/弱加密（跨文件常量解析）。"""
+        out: list[RawFinding] = []
+        has_digest = any("MessageDigest" in ln for ln in lines)
+        has_cipher = any(("Cipher" in ln or "KeyGenerator" in ln) for ln in lines)
+        for idx, line in enumerate(lines, start=1):
+            m = self._GETPROP_RE.search(line)
+            if not m:
+                continue
+            key = m.group(1)
+            if key in weak_hash_keys and has_digest:
+                out.append(self._make(rel, idx, line, "Weak Hash", "medium",
+                                      confidence=0.7, source_line=None, sanitized=False,
+                                      note=f"MessageDigest 算法取自弱配置 {key}（跨文件常量解析）"))
+            elif key in weak_crypto_keys and has_cipher:
+                out.append(self._make(rel, idx, line, "Weak Cryptography", "medium",
+                                      confidence=0.7, source_line=None, sanitized=False,
+                                      note=f"Cipher 算法取自弱配置 {key}（跨文件常量解析）"))
+        return out
+
+    def _scan_file(self, rel: str, lines: list[str],
+                   skip_injection: bool = False) -> list[RawFinding]:
         out: list[RawFinding] = []
         for idx, line in enumerate(lines, start=1):
             for vuln_type, base_sev, sink_re, require_source in tr.TAINT_SINKS:
+                # skip_injection：注入类(require_source)交由更精确的 AST 污点分析处理
+                if skip_injection and require_source:
+                    continue
                 if not sink_re.search(line):
                     continue
                 finding = self._evaluate(rel, lines, idx, line, vuln_type,

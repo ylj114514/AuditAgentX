@@ -20,8 +20,10 @@ class SemgrepScanner(BaseScanner):
     def run(self, target: Path) -> list[RawFinding]:
         if not self.available():
             return []
-        # 官方规则集 auto + 项目自定义 taint 规则（source→sink 污点追踪，降误报）
-        cmd = ["semgrep", "scan", "--config", "auto"]
+        # 官方规则集 auto + 语言专项规则包 + 项目自定义 taint 规则（source→sink 污点追踪，降误报）。
+        # p/java：Semgrep 官方 Java 安全规则（含 taint mode 跨方法），显著增强对 Java Web
+        # 特定类别（XSS/弱加密/弱随机/LDAP/XPath/Trust Boundary）的覆盖，弥补正则窗口短板。
+        cmd = ["semgrep", "scan", "--config", "auto", "--config", "p/java"]
         if self.custom_rules_dir.exists() and any(self.custom_rules_dir.glob("*.y*ml")):
             cmd += ["--config", str(self.custom_rules_dir)]
         # --no-git-ignore：不受 .gitignore 影响，vendored/被忽略但存在的代码也扫
