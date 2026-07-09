@@ -39,7 +39,9 @@ class DynamicAnalysisAgent:
         endpoints = extract_endpoints(code_root)
         per_finding = []
         for f in findings:
-            if f.get("status") != "confirmed":
+            # 与 ExploitPipeline 候选口径一致：confirmed 全量 + needs_review（动态可验证者）。
+            # 只跳过 false_positive 等明确非候选状态，避免 plan 低估 deep 模式的验证范围。
+            if f.get("status") not in ("confirmed", "needs_review"):
                 continue
             strat = resolve_strategy(f.get("type"))
             per_finding.append({
@@ -63,11 +65,14 @@ class DynamicAnalysisAgent:
     # ------------------------------------------------------------------ #
     def run(self, findings: list[dict], *, code_root: Path | None = None,
             enable_exploit: bool = True, enable_dynamic: bool = False,
-            enable_harness: bool = True, dynamic_target: dict | None = None) -> list[dict]:
-        """对已确认漏洞执行动态验证。返回同一 findings 列表（就地附加证据）。
+            enable_harness: bool = True, dynamic_target: dict | None = None,
+            max_candidates: int | None = None) -> list[dict]:
+        """对候选漏洞执行动态验证。返回同一 findings 列表（就地附加证据）。
 
+        - 候选 = confirmed（全量）+ needs_review 中动态可验证者（受预算上限约束）。
         - enable_dynamic=True 且未显式给 dynamic_target 时，尝试用启动识别结果自动补全靶场启动方式。
         - enable_harness 默认 True：函数级 Harness 验证无需靶场，默认开启。
+        - max_candidates 为 None 时用 settings.max_dynamic_candidates。
         """
         # 若要 HTTP 动态但没给靶场，尝试用 launch_detector 自动补全启动方式
         if enable_dynamic and not dynamic_target and code_root is not None:
@@ -77,6 +82,7 @@ class DynamicAnalysisAgent:
             findings, enable_exploit=enable_exploit,
             enable_dynamic=enable_dynamic, dynamic_target=dynamic_target,
             enable_harness=enable_harness, code_root=code_root,
+            max_candidates=max_candidates,
         )
 
     # ------------------------------------------------------------------ #
@@ -110,10 +116,12 @@ class DynamicAnalysisAgent:
         # 内部继续复用 ExploitPipeline，不把底层工具 ACP 化。
         if isinstance(request.payload.get("findings"), list):
             legacy_findings = [dict(item) for item in request.payload.get("findings") or []]
+            max_candidates = request.payload.get("max_dynamic_candidates") or opts.get("max_dynamic_candidates")
             results = self.run(
                 legacy_findings, code_root=code_root, enable_exploit=enable_exploit,
                 enable_dynamic=enable_dynamic, enable_harness=enable_harness,
                 dynamic_target=dynamic_target,
+                max_candidates=int(max_candidates) if max_candidates else None,
             )
             summary = _dynamic_summary(results, code_root)
             verdict_enum = (ACPVerdict.DYNAMIC_CONFIRMED

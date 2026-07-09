@@ -459,7 +459,10 @@ class OrchestratorAgent:
                     )
                     c = _mark_verify_failed(c, exc)
             else:
-                c["status"] = "confirmed"
+                # quick 模式（未启用 verify）：已检出但未经任何验证，语义为 unverified。
+                # 不能标 confirmed——那会让「未验证」冒充「已确认」，也让 quick 与 deep 失去区分。
+                c["verified"] = False
+                c["status"] = "unverified"
             return idx, c
 
         # 1) 独立验证（降低误报）——ACP 消息驱动：orchestrator --verify.request--> VerifyAgent.run_acp

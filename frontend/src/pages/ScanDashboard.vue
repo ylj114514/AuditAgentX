@@ -819,6 +819,7 @@ function statusTagType(status?: string) {
 function findingStatusType(status?: string) {
   const value = String(status || "").toLowerCase();
   if (value.includes("false")) return "info";
+  if (value === "unverified") return "info";           // 检出未验证：中性
   if (value.includes("review")) return "warning";      // needs_review 待人工复核
   if (value.includes("confirm") || value.includes("verified")) return "success";
   if (value.includes("candidate")) return "warning";
@@ -828,6 +829,7 @@ function findingStatusType(status?: string) {
 function findingStatusLabel(status?: string) {
   const map: Record<string, string> = {
     confirmed: "已确认",
+    unverified: "检出未验证",
     needs_review: "需人工复核",
     false_positive: "误报排除",
     candidate: "候选",

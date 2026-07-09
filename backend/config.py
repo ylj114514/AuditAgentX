@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     max_verify_candidates: int = 50
     dynamic_exploit_workers: int = 4
     dynamic_harness_workers: int = 4
+    # 动态验证候选上限：confirmed 全部纳入，剩余预算用于填充 needs_review 中
+    # 「动态可验证」的候选，避免超大项目对全部漏洞逐条跑动态验证。
+    max_dynamic_candidates: int = 20
 
     # ---- 数据库 ----
     database_url: str = "sqlite:///./data/auditagentx.db"

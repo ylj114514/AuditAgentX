@@ -418,19 +418,31 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
     dynamic_verdict = verify_result.get("dynamic_verdict") or runtime.get("reproduction_status") or "not_executed"
     final_verdict = verify_result.get("final_verdict")
 
-    if runtime.get("reproduction_status") == "dynamic_confirmed" or runtime.get("reproducible"):
+    harness_verdict = harness.get("verdict")
+    http_reproduced = (runtime.get("reproduction_status") == "dynamic_confirmed"
+                       or runtime.get("reproducible"))
+    harness_target = harness_verdict == "target_confirmed" or harness.get("dynamically_triggered")
+
+    if http_reproduced:
         dynamic_verdict = "dynamic_confirmed"
         final_verdict = "dynamic_confirmed"
-    elif harness.get("dynamically_triggered"):
+        dynamic_method = "http_dynamic"
+    elif harness_target:
         dynamic_verdict = "harness_confirmed"
         final_verdict = "dynamic_confirmed"
-    elif not final_verdict:
-        if static_verdict == "false_positive":
-            final_verdict = "false_positive"
-        elif static_verdict in ("confirmed", "statically_verified"):
-            final_verdict = "statically_verified"
-        else:
-            final_verdict = "needs_review"
+        dynamic_method = "target_harness"
+    else:
+        dynamic_method = None
+        if not final_verdict:
+            if static_verdict == "false_positive":
+                final_verdict = "false_positive"
+            elif static_verdict in ("confirmed", "statically_verified"):
+                final_verdict = "statically_verified"
+            else:
+                final_verdict = "needs_review"
+
+    # 是否经运行时证据（HTTP 复现 / 目标函数级 Harness）动态确认——供报告如实展示。
+    dynamically_verified = bool(http_reproduced or harness_target)
 
     return {
         "mcp_server": verify_result.get("mcp_server"),
@@ -439,6 +451,13 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
         "dynamic_verdict": dynamic_verdict,
         "final_verdict": final_verdict,
         "false_positive_reason": verify_result.get("false_positive_reason"),
+        # 动态验证透出：报告/前端可据此展示「经动态确认」标记与方法
+        "dynamically_verified": dynamically_verified,
+        "dynamic_method": dynamic_method,
+        "runtime_verification_status": runtime.get("reproduction_status"),
+        "harness_verdict": harness_verdict,
+        "harness_dynamically_triggered": bool(harness.get("dynamically_triggered")),
+        "function_mechanism_verified": bool(harness.get("function_mechanism_verified")),
     }
 
 

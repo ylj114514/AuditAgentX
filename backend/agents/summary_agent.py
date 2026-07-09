@@ -178,10 +178,19 @@ class SummaryAgent(BaseAgent):
         harness_source = Counter()
         target_confirmed = 0
         mechanism_confirmed = 0
+        dynamically_verified = 0   # 经运行时证据（HTTP 复现或目标函数级 Harness）确认
+        http_reproduced = 0        # 仅 HTTP 可复现
+        status_counts = Counter()
 
         for f in findings:
+            status_counts[f.get("status") or "unknown"] += 1
             evidence = f.get("evidence") or {}
+            verification = evidence.get("verification") or {}
+            if verification.get("dynamically_verified"):
+                dynamically_verified += 1
             runtime = evidence.get("runtime") or {}
+            if runtime.get("reproducible"):
+                http_reproduced += 1
             if runtime:
                 status = runtime.get("reproduction_status") or (
                     "dynamic_confirmed" if runtime.get("reproducible") else "not_executed"
@@ -220,6 +229,9 @@ class SummaryAgent(BaseAgent):
             "harness_source_counts": dict(harness_source.most_common()),
             "harness_target_confirmed": target_confirmed,
             "harness_mechanism_confirmed": mechanism_confirmed,
+            "dynamically_verified": dynamically_verified,
+            "http_reproduced": http_reproduced,
+            "status_counts": dict(status_counts.most_common()),
         }
 
     @staticmethod
@@ -247,6 +259,7 @@ class SummaryAgent(BaseAgent):
         return (
             f"本次扫描模式为 {mode}，动态开关：{switches}。"
             f"动态验证阶段对 {ctx['dynamic_total']} 条漏洞保存了 runtime 证据，其中 {ctx['reproduced']} 条具备 HTTP 可复现结果；"
+            f"经运行时证据动态确认（HTTP 复现或目标函数级 Harness）共 {bd.get('dynamically_verified', 0)} 条；"
             f"runtime 状态分布为 {runtime_counts}；Harness 裁决分布为 {harness_counts}。"
             f"其中目标函数级 Harness 确认 {bd.get('harness_target_confirmed', 0)} 条，"
             f"模板机理级确认 {bd.get('harness_mechanism_confirmed', 0)} 条。"

@@ -22,7 +22,7 @@ from backend.verifier.evidence_collector import EvidenceCollector
 from backend.verifier import exploit_templates as tpl
 from backend.verifier import app_runner
 from backend.dynamic.endpoint_extractor import candidate_endpoints
-from backend.dynamic.strategy import HTTP, BOTH, NOT_APPLICABLE, resolve_strategy
+from backend.dynamic.strategy import HTTP, BOTH, NOT_APPLICABLE, resolve_strategy, is_dynamic_applicable
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,10 @@ def _parallel_map(items: list, fn: Callable[[Any], Any], workers: int, *,
             results[futures[fut]] = fut.result()
     return results
 
-_DYNAMIC_SEVERITIES = {"critical", "high"}
+# HTTP 动态验证的严重级门槛：critical/high/medium 均可（low 多为噪声，排除）。
+# 注意：此门槛只约束 HTTP 探测；函数级 Harness 不受此限（走 is_dynamic_applicable），
+# 因此 Docker/靶场不可用时，medium 的 needs_review 仍可由 Harness 定性。
+_DYNAMIC_SEVERITIES = {"critical", "high", "medium"}
 @contextmanager
 def _resolve_target(dynamic_target: dict, code_root: Path | None = None):
     """根据配置解析目标，统一 yield (base_url, endpoints, sandbox_metadata)。
@@ -112,13 +115,41 @@ class ExploitPipeline:
         # 并发度：利用生成与 Harness 并行；HTTP 探测因共享靶场固定串行
         self._exploit_workers = int(getattr(settings, "dynamic_exploit_workers", 4))
         self._harness_workers = int(getattr(settings, "dynamic_harness_workers", 4))
+        self._max_candidates = int(getattr(settings, "max_dynamic_candidates", 20))
+
+    @staticmethod
+    def _select_candidates(findings: list[dict], max_candidates: int) -> list[dict]:
+        """挑选动态验证候选：confirmed 全量优先，needs_review 中「动态可验证」的次之。
+
+        逻辑要点（修复 deep≈quick 的核心）：
+          - 不再只取 status==confirmed。deep 模式经 VerifyAgent 静态复核后，绝大多数
+            finding 被保守降级为 needs_review——它们恰恰是最该用运行时证据来定性的对象。
+          - needs_review 仅纳入 is_dynamic_applicable 为真的类型（排除硬编码密钥/弱加密等
+            static-only 类型，这些没有运行时触发点，动态验证无意义）。
+          - 预算上限：confirmed 全部保留，剩余名额（max_candidates - len(confirmed)）用于
+            needs_review，避免超大项目对全部漏洞逐条跑动态验证。max_candidates<=0 表示不限。
+        """
+        confirmed = [f for f in findings if f.get("status") == "confirmed"]
+        needs_review = [
+            f for f in findings
+            if f.get("status") == "needs_review" and is_dynamic_applicable(f.get("type"))
+        ]
+        if max_candidates and max_candidates > 0:
+            remaining = max(0, max_candidates - len(confirmed))
+            return confirmed + needs_review[:remaining]
+        return confirmed + needs_review
 
     def run(self, findings: list[dict], *, enable_exploit: bool = True,
             enable_dynamic: bool = False, dynamic_target: dict | None = None,
-            enable_harness: bool = False, code_root: Path | None = None) -> list[dict]:
-        """就地为每条确认漏洞附加利用方案 + 动态验证 + 证据链，返回同一列表。"""
-        confirmed = [f for f in findings if f.get("status") == "confirmed"]
-        if not confirmed:
+            enable_harness: bool = False, code_root: Path | None = None,
+            max_candidates: int | None = None) -> list[dict]:
+        """就地为候选漏洞附加利用方案 + 动态验证 + 证据链，返回同一列表。
+
+        候选 = confirmed（全量）+ needs_review 中动态可验证者（受预算上限约束）。
+        """
+        budget = self._max_candidates if max_candidates is None else int(max_candidates)
+        candidates = self._select_candidates(findings, budget)
+        if not candidates:
             return findings
 
         # 动态验证目标只启动一次，复用给所有漏洞
@@ -147,14 +178,14 @@ class ExploitPipeline:
 
             # ---- 阶段 A：利用生成（并行，纯 LLM、逐条独立、不碰共享靶场）----
             exploits = _parallel_map(
-                confirmed, lambda f: self._gen_exploit(f, enable_exploit),
+                candidates, lambda f: self._gen_exploit(f, enable_exploit),
                 self._exploit_workers, default=None)
             exploits = [e if e else {} for e in exploits]  # 每条独立 dict，避免别名共享
 
             # ---- 阶段 B：HTTP 动态探测（串行，共享同一靶场，避免有状态载荷互相污染）----
-            dyn_results: list = [None] * len(confirmed)
+            dyn_results: list = [None] * len(candidates)
             if enable_dynamic:
-                for i, f in enumerate(confirmed):
+                for i, f in enumerate(candidates):
                     dyn_results[i] = self._http_verify(
                         f, exploits[i], base_url, endpoints,
                         sandbox_meta, sandbox_fail_status, auto_endpoints)
@@ -162,13 +193,13 @@ class ExploitPipeline:
             # ---- 阶段 C：Fuzzing Harness（并行，函数级独立，每任务独立实例避免共享态竞争）----
             if enable_harness and code_root is not None:
                 harness_results = _parallel_map(
-                    confirmed, lambda f: self._run_harness(f, code_root),
+                    candidates, lambda f: self._run_harness(f, code_root),
                     self._harness_workers, default=None)
             else:
-                harness_results = [None] * len(confirmed)
+                harness_results = [None] * len(candidates)
 
             # ---- 汇总（串行）：裁决 + 证据链回填到每条 finding ----
-            for i, f in enumerate(confirmed):
+            for i, f in enumerate(candidates):
                 self._assemble(f, exploits[i], dyn_results[i], harness_results[i], sandbox_meta)
         return findings
 
@@ -217,12 +248,14 @@ class ExploitPipeline:
 
     def _assemble(self, f: dict, exploit: dict, dyn_result, harness_result, sandbox_meta) -> None:
         """汇总阶段：把 HTTP / Harness 结果落到 finding，套用裁决与回退，构建证据链。"""
-        # HTTP 复现裁决
+        # HTTP 复现裁决：可复现 -> 升级为 confirmed（needs_review 借运行时证据定性）
         if dyn_result is not None:
             if dyn_result.get("reproducible"):
                 f["confidence"] = max(f.get("confidence", 0.5), 0.98)
                 f["verified"] = True
                 f["dynamically_verified"] = True
+                f["dynamic_method"] = "http_dynamic"
+                f["status"] = "confirmed"  # 运行时可复现 -> 确认
             f["runtime_verification_status"] = dyn_result.get("reproduction_status")
 
         # Harness 裁决：严格区分「真实目标函数确认」与「模板机理确认」
@@ -233,6 +266,7 @@ class ExploitPipeline:
             f["verified"] = True
             f["dynamically_verified"] = True
             f["dynamic_method"] = "target_harness"
+            f["status"] = "confirmed"  # 目标函数级 Harness 触发 -> 确认
             f["runtime_verification_status"] = "harness_target_confirmed"
             if dyn_result is not None and not dyn_result.get("reproducible"):
                 dyn_result["harness_confirmed"] = True
@@ -241,10 +275,11 @@ class ExploitPipeline:
                 dyn_result.setdefault("logs", []).append(
                     "回退：目标函数级 Harness 已复现漏洞，见 harness 证据")
         elif hv == "mechanism_confirmed":
-            # 模板 Harness 只证明「漏洞类型机理」，不等价真实可利用 -> 不标记完全动态确认
+            # 模板 Harness 只证明「漏洞类型机理」，不等价真实可利用 -> 不标记完全动态确认，
+            # 也不升级 status（维持 needs_review/原状）。机理级贡献的置信度上限 0.75。
             f["function_mechanism_verified"] = True
-            f["confidence"] = max(f.get("confidence", 0.5),
-                                  float(harness_result.get("confidence") or 0.75))
+            mech_conf = min(float(harness_result.get("confidence") or 0.75), 0.75)
+            f["confidence"] = max(f.get("confidence", 0.5), mech_conf)
             f["runtime_verification_status"] = "harness_mechanism_confirmed"
             if dyn_result is not None and not dyn_result.get("reproducible"):
                 dyn_result.setdefault("logs", []).append(
@@ -277,7 +312,7 @@ def _should_run_dynamic_verify(finding: dict, exploit: dict,
 
     severity = str(finding.get("severity") or "low").lower()
     if severity not in _DYNAMIC_SEVERITIES:
-        return False, "not_runtime_verifiable", "仅对 High/Critical 高危漏洞执行 HTTP 动态验证"
+        return False, "not_runtime_verifiable", "仅对 Medium/High/Critical 漏洞执行 HTTP 动态验证（Low 级排除）"
 
     if not endpoints:
         return False, "not_runtime_verifiable", "未提供明确 endpoint，避免对无入口漏洞进行猜测式动态验证"

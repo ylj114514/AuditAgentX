@@ -33,6 +33,8 @@
 | Sandbox 状态分布 | {% for k, v in (summary.dynamic_breakdown.sandbox_status_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %} |
 | Harness 裁决分布 | {% for k, v in (summary.dynamic_breakdown.harness_verdict_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %} |
 | Harness 确认级别 | 目标函数级 {{ summary.dynamic_breakdown.harness_target_confirmed or 0 }} 条；模板机理级 {{ summary.dynamic_breakdown.harness_mechanism_confirmed or 0 }} 条 |
+| 经动态确认 | 运行时确认 {{ summary.dynamic_breakdown.dynamically_verified or 0 }} 条（其中 HTTP 可复现 {{ summary.dynamic_breakdown.http_reproduced or 0 }} 条） |
+| 状态分布 | {% for k, v in (summary.dynamic_breakdown.status_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %} |
 | 未复现/未执行原因 | {% for k, v in (summary.dynamic_breakdown.runtime_reason_counts or {}).items() %}{{ k }}（{{ v }}）{% if not loop.last %}；{% endif %}{% else %}无{% endfor %} |
 
 > 说明：Deep 模式的价值不只看“HTTP 可复现条数”，还应同时查看沙箱状态、runtime 状态和 Harness 裁决。`mechanism_confirmed` 仅代表模板机理确认，不等同真实目标函数复现。
@@ -153,6 +155,7 @@
   {{ loop.index }}. {{ tc.name or tc.tool_name }}：{{ tc.purpose or "" }}
 {% endfor %}
 {% endif %}{% if f.evidence.verification %}- 验证裁决：静态={{ f.evidence.verification.static_verdict or "N/A" }}；动态={{ f.evidence.verification.dynamic_verdict or "N/A" }}；最终={{ f.evidence.verification.final_verdict or "N/A" }}
+- 动态确认：{{ "是" if f.evidence.verification.dynamically_verified else "否" }}{% if f.evidence.verification.dynamic_method %}（方法：{{ f.evidence.verification.dynamic_method }}）{% endif %}{% if f.evidence.verification.runtime_verification_status %}；运行时状态：{{ f.evidence.verification.runtime_verification_status }}{% endif %}
 {% if f.evidence.verification.mcp_server %}- MCP Server：`{{ f.evidence.verification.mcp_server }}`
 {% endif %}{% if f.evidence.verification.skill %}- Skill：`{{ f.evidence.verification.skill.name or f.evidence.verification.skill }}`
 {% endif %}{% endif %}{% if f.evidence.logs %}- 证据链日志：{{ f.evidence.logs | join("；") }}
