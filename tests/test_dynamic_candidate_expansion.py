@@ -101,6 +101,21 @@ def test_assemble_http_reproducible_upgrades_needs_review():
     assert ver["final_verdict"] == "dynamic_confirmed"
 
 
+def test_existing_exploit_is_reused_without_second_agent_call():
+    pipe = _pipeline()
+    pipe.exploit_agent = SimpleNamespace(
+        run=lambda _finding: (_ for _ in ()).throw(AssertionError("must reuse existing exploit"))
+    )
+    existing = {"payloads": ["target-specific"], "success_indicators": ["owned-marker"]}
+    finding = {"type": "SQL Injection", "_exploit": existing}
+
+    result = pipe._gen_exploit(finding, enable_exploit=True)
+
+    assert result["payloads"] == ["target-specific"]
+    assert result["success_indicators"] == ["owned-marker"]
+    assert result is not existing
+
+
 def test_assemble_target_harness_upgrades_needs_review():
     pipe = _pipeline()
     f = {"type": "Command Injection", "status": "needs_review", "confidence": 0.5}
@@ -118,6 +133,24 @@ def test_assemble_target_harness_upgrades_needs_review():
     ver = f["_evidence"]["verification"]
     assert ver["dynamically_verified"] is True
     assert ver["dynamic_method"] == "target_harness"
+
+
+def test_blocked_harness_does_not_erase_independent_http_confirmation():
+    pipe = _pipeline()
+    f = {"type": "SQL Injection", "status": "needs_review", "confidence": 0.5}
+    dyn_result = {"reproducible": True, "reproduction_status": "dynamic_confirmed", "records": []}
+    harness = {"verdict": "target_confirmed", "dynamically_triggered": True,
+               "function_extracted": False, "target_function_called": False,
+               "verification_level": "template_mechanism", "entrypoint_reachable": False,
+               "harness_source": "template"}
+
+    pipe._assemble(f, {}, dyn_result, harness, None)
+
+    assert f["status"] == "confirmed"
+    assert f["dynamically_verified"] is True
+    assert f["dynamic_method"] == "http_dynamic"
+    assert f["runtime_verification_status"] == "dynamic_confirmed"
+    assert harness["verdict"] == "target_blocked"
 
 
 def test_assemble_mechanism_confirmed_keeps_needs_review_and_caps_confidence():

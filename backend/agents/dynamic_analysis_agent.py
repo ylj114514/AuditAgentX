@@ -149,9 +149,18 @@ class DynamicAnalysisAgent:
             code_root_str = (acp_finding.get("extra") or {}).get("code_root")
             code_root = Path(code_root_str) if code_root_str else None
 
-        # ACP finding → legacy dict；动态验证只处理「已确认」漏洞，故置 confirmed
+        # ACP finding → legacy dict；必须保留 VerifyAgent 的裁决边界。旧实现无条件置为
+        # confirmed，会让 false_positive 重新进入利用/动态验证并浪费 API。
         legacy = acp_to_legacy_finding(acp_finding)
-        legacy["status"] = "confirmed"
+        static_verdict = str(
+            verification.get("static_verdict") or verification.get("final_verdict") or "needs_review"
+        ).lower()
+        if static_verdict == "false_positive":
+            legacy["status"] = "false_positive"
+        elif static_verdict in {"confirmed", "statically_verified", "dynamic_confirmed", "harness_confirmed"}:
+            legacy["status"] = "confirmed"
+        else:
+            legacy["status"] = "needs_review"
         legacy["_verify"] = {
             "source": verification.get("source"),
             "sink": verification.get("sink"),
@@ -175,7 +184,7 @@ class DynamicAnalysisAgent:
 
         # 动态裁决严格取自 runtime/harness 的真实执行结果，再同步综合裁决
         dynamic_verdict = _derive_dynamic_verdict(runtime, harness)
-        static_verdict = verification.get("static_verdict") or "confirmed"
+        static_verdict = verification.get("static_verdict") or static_verdict
         final_verdict = _derive_final_verdict(static_verdict, dynamic_verdict)
         verification["dynamic_verdict"] = dynamic_verdict
         verification["final_verdict"] = final_verdict

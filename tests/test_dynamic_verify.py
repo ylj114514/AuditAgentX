@@ -4,7 +4,7 @@
 不依赖真实 socket（部分 Windows 安全软件会拦截本地监听端口）。
 真实靶场联调见 examples/vulnerable_projects/safe_sqli_target/server.py 与 docs。
 """
-from backend.verifier.dynamic_verifier import DynamicVerifier, ProbeRecord
+from backend.verifier.dynamic_verifier import DynamicVerifier, ProbeRecord, _log_delta
 from backend.verifier import exploit_templates as tpl
 
 
@@ -134,6 +134,19 @@ def test_dynamic_verifier_request_timeout():
     v.probe = ErrorProbe("request_timeout")
     result = v.verify("http://target.local", exploit, endpoints=["/user"])
     assert result.reason == "request_timeout"
+
+
+def test_dynamic_verifier_generic_request_error_is_not_endpoint_not_found():
+    exploit = {"payloads": ["payload"], "success_indicators": ["SQL syntax"]}
+    v = DynamicVerifier()
+    v.probe = ErrorProbe("request_error")
+    result = v.verify("http://target.local", exploit, endpoints=["/user"])
+    assert result.reason == "payload_not_matched"
+    assert result.reproduction_status == "not_reproduced"
+
+
+def test_unattributable_rotated_logs_are_not_used_as_attack_delta():
+    assert _log_delta("old-prefix", "rotated tail with SQL syntax error") == ""
 
 
 def test_dynamic_verifier_stops_repeated_unreachable_target_probes():

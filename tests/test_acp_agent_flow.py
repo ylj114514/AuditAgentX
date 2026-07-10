@@ -671,6 +671,36 @@ def test_dynamic_analysis_run_acp_not_executed_is_consistent():
         or reply.payload["runtime"]["reproduction_status"] == "not_executed"
 
 
+def test_dynamic_analysis_run_acp_does_not_reopen_false_positive(monkeypatch):
+    """静态裁决为误报时，动态阶段不得强改 confirmed 或再次调用利用生成。"""
+    from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
+
+    monkeypatch.setattr(
+        "backend.agents.exploit_agent.ExploitAgent.run",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("false positive must be skipped")),
+    )
+    req = make_message(
+        sender="orchestrator", receiver="dynamic_analysis_agent",
+        message_type=ACPMessageType.DYNAMIC_VERIFY_REQUEST,
+        context=ACPContext(scan_id="s-dyn-fp"),
+        payload={
+            "finding": {
+                "type": "SQL Injection", "severity": "high",
+                "location": {"file": "db.py", "start_line": 10},
+                "code": {"snippet": "cursor.execute('SELECT 1')"},
+            },
+            "verification": {"static_verdict": "false_positive"},
+            "enable_exploit": True, "enable_dynamic": False, "enable_harness": False,
+        },
+    )
+
+    reply = DynamicAnalysisAgent().run_acp(req)
+
+    assert reply.payload["findings"][0]["status"] == "false_positive"
+    assert reply.payload["verification"]["final_verdict"] == "false_positive"
+    assert reply.payload["exploit"] == {}
+
+
 # ---------------------------------------------------------------------------
 # 13. Orchestrator 主流程确实通过 _dispatch_acp() 调度（消息驱动，非旁路记录）
 # ---------------------------------------------------------------------------

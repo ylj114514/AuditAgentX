@@ -292,6 +292,13 @@ class DynamicVerifier:
         for ind in indicators:
             if not _credible_indicator(ind):
                 continue
+            # 反射防御（防"自我感动"）：若该 indicator 在**发出的 payload 本身**就能匹配，
+            # 那它出现在响应/日志里可能只是应用回显了输入（reflection），而非漏洞真正
+            # 执行/求值。模板 indicator 都要求真执行（如 {{7*191}}->1337、id->uid=，
+            # payload 里没有该串），不受影响；仅挡住 LLM 生成的"payload 子串即判据"这类
+            # 反射可解释的弱判据，避免纯回显被误判 dynamic_confirmed。
+            if _matches(ind, rec.payload):
+                continue
             if _matches(ind, body) and not _matches(ind, base_body):
                 return ind
             # Docker 应用通常在生产配置下把异常隐藏为 500 页面；只接受“请求后新增”的
@@ -332,7 +339,9 @@ class DynamicVerifier:
             result.error = result.records[0].get("error", "")
             result.logs.append("请求超时，目标未在限制时间内响应")
             return
-        if statuses and all(status == 404 for status in statuses if status is not None):
+        # all([]) 为 True；普通 request_error 的 status 全是 None 时，旧逻辑会被
+        # 误报为 endpoint_not_found。只有每条攻击请求都明确返回 404 才能这样归类。
+        if statuses and all(status == 404 for status in statuses):
             result.reason = "endpoint_not_found"
             result.logs.append("所有探测端点均返回 404，未找到可验证入口")
             return
@@ -462,8 +471,9 @@ def _log_delta(before: str, after: str) -> str:
         return ""
     if before and after.startswith(before):
         return after[len(before):][-1200:]
-    # Docker tail 截断时无法可靠按前缀比对；此时仅保留最后一小段并由 HTTP 对照继续约束。
-    return after[-1200:]
+    # Docker tail 截断或日志轮转时无法证明哪些内容由本次请求新增。返回旧日志尾部会让
+    # 历史异常命中 success_indicator，形成“自己骗自己”的动态确认，因此宁可放弃该证据。
+    return ""
 
 
 _GENERIC_INDICATORS = {

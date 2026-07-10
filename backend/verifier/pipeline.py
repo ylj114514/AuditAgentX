@@ -306,7 +306,12 @@ class ExploitPipeline:
     # ------------------------------------------------------------------ #
     def _gen_exploit(self, f: dict, enable_exploit: bool) -> dict:
         """阶段 A：生成利用方案并补齐模板注入点（可并行）。"""
-        exploit = self.exploit_agent.run(f) if enable_exploit else {}
+        # 手动复核/ACP 链路可能已经生成了利用方案。动态阶段必须复用该制品，
+        # 否则不仅会重复消耗一次 LLM/API，还可能用第二次生成的载荷覆盖已审计内容。
+        existing = f.get("_exploit")
+        exploit = dict(existing) if isinstance(existing, dict) and existing else (
+            self.exploit_agent.run(f) if enable_exploit else {}
+        )
         template = tpl.match_template(f.get("type"))
         strategy = resolve_strategy(f.get("type"))
         if template:
@@ -409,13 +414,16 @@ class ExploitPipeline:
                 harness_result["verdict"] = "target_blocked"
                 harness_result["dynamically_triggered"] = False
                 harness_result["confirmed_blockers"] = blockers or f.get("confirmed_blockers") or []
-                f["status"] = "needs_review"
-                f["verified"] = False
-                f["dynamically_verified"] = False
-                f["runtime_verification_status"] = "harness_target_blocked"
-                f["confirmed_blockers"] = _dedupe(
-                    list(f.get("confirmed_blockers") or []) + blockers)
-                f["downgrade_reason"] = f.get("downgrade_reason") or "; ".join(blockers)
+                # Harness 证据不足只能否定该 Harness 的确认资格，不能推翻已经由
+                # 独立 HTTP baseline/attack 对照得到的真实 endpoint 复现结论。
+                if not (dyn_result and dyn_result.get("reproducible")):
+                    f["status"] = "needs_review"
+                    f["verified"] = False
+                    f["dynamically_verified"] = False
+                    f["runtime_verification_status"] = "harness_target_blocked"
+                    f["confirmed_blockers"] = _dedupe(
+                        list(f.get("confirmed_blockers") or []) + blockers)
+                    f["downgrade_reason"] = f.get("downgrade_reason") or "; ".join(blockers)
         elif hv == "function_reproduced":
             f["function_mechanism_verified"] = True
             f["function_unit_reproduced"] = True
@@ -447,7 +455,8 @@ class ExploitPipeline:
                 f["downgrade_reason"] = f.get("downgrade_reason") or reason
             if not (dyn_result and dyn_result.get("reproducible")):
                 f["dynamically_verified"] = False
-            f["runtime_verification_status"] = "harness_mechanism_confirmed"
+            if not (dyn_result and dyn_result.get("reproducible")):
+                f["runtime_verification_status"] = "harness_mechanism_confirmed"
             if dyn_result is not None and not dyn_result.get("reproducible"):
                 dyn_result.setdefault("logs", []).append(
                     "模板 Harness 只证明漏洞机理，仍需 source-to-sink 或 HTTP 复现确认")
