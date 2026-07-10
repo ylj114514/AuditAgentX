@@ -194,6 +194,14 @@ class OrchestratorAgent:
             confirmed = self._verify_and_poc(candidates, code_root)
             self._persist(confirmed)
 
+            # RAG 自进化：仅从**可信结果**（动态确认 TP / 明确误报 FP）归纳进知识库，
+            # 让后续扫描越用越准；Agent 自报/needs_review 一律不学（防自我感动）。失败不影响扫描。
+            try:
+                from backend.rag.feedback_learner import learn_from_scan
+                learn_from_scan(confirmed)
+            except Exception:  # noqa: BLE001
+                logger.exception("[%s] RAG 自进化录入失败（已忽略）", self.scan.id)
+
             self.scan.status = "done"
             self.scan.progress = 100
             self.scan.current_stage = "finished"

@@ -475,3 +475,38 @@ def test_delete_scan_cascades_findings_and_evidence():
 
     # 重复删除返回 404
     assert client.delete(f"/api/scans/{scan_id}").status_code == 404
+
+
+def test_label_finding_ingests_human_feedback(tmp_path, monkeypatch):
+    """人工标注端点：把真漏洞/误报（黄金 ground truth）录入 RAG 自进化知识库。"""
+    import backend.rag.retriever as R
+    monkeypatch.setattr(R, "feedback_dir", lambda: tmp_path)
+    R.load_default_items.cache_clear()
+
+    db = SessionLocal()
+    project = Project(id=ids.project_id(), name="label_demo", source_type="local",
+                      local_path="x", status="created")
+    db.add(project); db.commit()
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="static", status="done")
+    db.add(scan); db.commit()
+    finding = Finding(id=ids.finding_id(), scan_id=scan.id, type="Command Injection",
+                      severity="high", file_path="a.py", start_line=1, confidence=0.6,
+                      status="needs_review",
+                      detail_json=json.dumps({"detail": {"source": "request.args", "sink": "os.system"}},
+                                             ensure_ascii=False))
+    db.add(finding); db.commit()
+    fid = finding.id
+    db.close()
+
+    # 非法 label -> 400
+    assert client.post(f"/api/findings/{fid}/label", json={"label": "maybe"}).status_code == 400
+    # 人工标注真漏洞 -> 录入
+    r = client.post(f"/api/findings/{fid}/label", json={"label": "true_positive"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["label_source"] == "human" and body["learned"] is True
+    assert (tmp_path / "learned_feedback.json").exists()
+    # 标注误报 -> 落库并录入
+    r2 = client.post(f"/api/findings/{fid}/label", json={"label": "false_positive"})
+    assert r2.json()["learned"] is True
+    R.load_default_items.cache_clear()

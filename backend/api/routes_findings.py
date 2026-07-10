@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
@@ -49,6 +49,40 @@ def get_finding(finding_id: str, db: Session = Depends(get_db)) -> FindingDetail
         verification=verification,
         fix_suggestion=f.fix_suggestion,
     )
+
+
+@router.post("/{finding_id}/label")
+def label_finding(finding_id: str, label: str = Body(..., embed=True),
+                  db: Session = Depends(get_db)) -> dict:
+    """人工标注真漏洞/误报（黄金 ground truth）——录入 RAG 知识库供后续复核自进化。
+
+    label ∈ {"true_positive", "false_positive"}。人工标注是最可信来源。
+    """
+    if label not in ("true_positive", "false_positive"):
+        raise HTTPException(400, "label 必须是 true_positive 或 false_positive")
+    f = db.get(Finding, finding_id)
+    if not f:
+        raise HTTPException(404, "finding not found")
+    detail = json.loads(f.detail_json or "{}")
+    inner = detail.get("detail", {}) or {}
+    ev = _latest_evidence(db, finding_id)
+    evidence = _decode_evidence(ev) if ev else {}
+    finding = {
+        "type": f.type, "file": f.file_path, "status": f.status,
+        "cwe_id": (evidence.get("knowledge") or {}).get("cwe_id"),
+        "context": detail.get("context"),
+        "false_positive_reason": detail.get("false_positive_reason") or detail.get("downgrade_reason"),
+        "source_symbol": inner.get("source"),
+        "evidence": evidence or {"source": inner.get("source"), "sink": inner.get("sink")},
+    }
+    from backend.rag.feedback_learner import ingest_feedback
+    learned = ingest_feedback(finding, label, "human")
+    # 人工判误报时同步落库，避免它再次出现在待确认队列
+    if label == "false_positive":
+        f.status = "false_positive"
+        f.verified = False
+        db.commit()
+    return {"finding_id": finding_id, "label": label, "label_source": "human", "learned": learned}
 
 
 @router.post("/{finding_id}/verify", response_model=VerifyResponse)

@@ -42,12 +42,38 @@ class SecurityKnowledgeRetriever:
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         results = [item.to_dict(score=score) for score, item in scored[:max(limit, 1)]]
-        return {
+        result = {
             "query": query_text,
             "results": results,
             "top_result": results[0] if results else None,
             "summary": _summarize(results),
         }
+        self._merge_learned_feedback(candidate, result)
+        return result
+
+    def _merge_learned_feedback(self, candidate: dict[str, Any], result: dict[str, Any]) -> None:
+        """把匹配同类型的「学到的反馈知识」（误报信号 / 验证要点）合并进 top_result。
+
+        自进化知识可能排名不到 top，但其 false_positive_signals / verification_checks
+        必须始终参与后续复核——这才是"越用越准"的落点。
+        """
+        top = result.get("top_result")
+        vuln_type = str(candidate.get("type") or candidate.get("vulnerability_type") or "").strip().lower()
+        if top is None or not vuln_type:
+            return
+        for item in self.items:
+            if item.source_type != "learned_feedback":
+                continue
+            if not any(vuln_type == t.lower() or vuln_type in t.lower() or t.lower() in vuln_type
+                       for t in item.vuln_types):
+                continue
+            for k in ("false_positive_signals", "verification_checks"):
+                merged = list(top.get(k) or [])
+                for v in getattr(item, k, []) or []:
+                    if v not in merged:
+                        merged.append(v)
+                top[k] = merged
+            top["learned_feedback_applied"] = True
 
     def retrieve_playbook(self, candidate: dict[str, Any], *, limit: int = 2) -> dict[str, Any]:
         return self.retrieve(candidate=candidate, source_type="verification_playbook", limit=limit)
@@ -105,13 +131,30 @@ class SecurityKnowledgeRetriever:
         return score
 
 
+def feedback_dir() -> Path:
+    """运行时"学习到的反馈知识"目录（不进仓库、gitignore）。"""
+    from backend.config import settings
+    d = settings.data_path / "rag_feedback"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 @lru_cache(maxsize=1)
 def load_default_items() -> list[SecurityKnowledgeItem]:
     items: list[SecurityKnowledgeItem] = []
-    for path in sorted(SOURCES_DIR.glob("*.json")):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        records = data.get("items", data if isinstance(data, list) else [])
-        items.extend(SecurityKnowledgeItem.from_dict(record) for record in records)
+    dirs = [SOURCES_DIR]
+    try:
+        dirs.append(feedback_dir())   # 额外加载"自进化"学到的可信反馈知识
+    except Exception:  # noqa: BLE001  无 data 目录不致命
+        pass
+    for base in dirs:
+        for path in sorted(base.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001  单个损坏文件不影响整体
+                continue
+            records = data.get("items", data if isinstance(data, list) else [])
+            items.extend(SecurityKnowledgeItem.from_dict(record) for record in records)
     return items
 
 
