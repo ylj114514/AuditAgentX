@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import ast
+import hmac
 import json
 import logging
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,12 @@ TRIGGER_MARKER = "AUDITAGENTX_VULN_TRIGGERED"
 NO_TRIGGER_MARKER = "AUDITAGENTX_NO_TRIGGER"
 # 新增：Harness 最后一行输出结构化结果，优先据此判定（无则退回 marker）
 RESULT_JSON_MARKER = "AUDITAGENTX_RESULT_JSON="
+# 框架侧「真实调用证明」：只有框架把真实目标函数包裹起来、在其被真正调用时打印的
+# 随机 nonce 才算数。脚本自报的 target_function_called 一律忽略（避免自我感动）。
+TARGET_INVOKED_MARKER = "AUDITAGENTX_TARGET_INVOKED="
+# 脚手架里预留的占位符，只有 run_harness 在认证过的 scaffold 来源上才替换成本次随机 nonce。
+NONCE_PLACEHOLDER = "__AUDITAGENTX_NONCE__"
+_SCAFFOLD_CAPABILITY = secrets.token_urlsafe(32)
 
 # 细化的执行级 verdict（run_harness 返回）
 V_TARGET_CONFIRMED = "target_confirmed"        # 调用了项目真实目标函数 + 危险 sink 被攻击输入触发
@@ -38,8 +46,15 @@ V_SANDBOX_FAILED = "sandbox_failed"           # Docker/执行环境异常
 V_UNSAFE_BLOCKED = "unsafe_harness_blocked"   # Harness 违反安全策略被阻止执行
 
 LEVEL_TARGET = "target_specific"
+LEVEL_ENTRYPOINT = "entrypoint_reproduced"
 LEVEL_TEMPLATE = "template_mechanism"
+LEVEL_UNATTESTED = "unattested_generated"
 LEVEL_NONE = "none"
+
+
+def scaffold_capability() -> str:
+    """Return the process-local capability used for trusted backend scaffolds."""
+    return _SCAFFOLD_CAPABILITY
 
 # 多语言 Harness 执行运行时：本地解释器 / Docker 镜像 / 文件扩展名 / Docker 内联执行参数
 _LANG_RUNTIMES = {
@@ -61,6 +76,29 @@ _LANG_ALIASES = {
 def normalize_language(value: str | None) -> str:
     """把文件后缀 / 语言名归一化为受支持的 Harness 执行语言（默认 python）。"""
     return _LANG_ALIASES.get(str(value or "").strip().lower(), "python")
+
+
+def is_target_harness_confirmed(harness: "dict | None") -> bool:
+    """Canonical 判据：Harness 是否达到「入口级动态确认」。
+
+    唯一权威定义，统一供 verify_agent / dynamic_analysis_agent / evidence_collector 共用，
+    杜绝各处判据分叉。所有依赖字段都是框架侧独立事实，而非被验证对象自报：
+      - verdict == V_TARGET_CONFIRMED：harness_verifier 已剔除全部 confirmed_blocker 后才保留；
+      - dynamically_triggered：_VERDICT_EFFECT 中仅 target_confirmed 为 True；
+      - function_extracted：确实从项目源码提取到了目标函数；
+      - target_function_called：由框架随机 nonce 插桩证明「真实目标函数被调用」，忽略脚本自报；
+      - verification_level == LEVEL_ENTRYPOINT：除函数触发外，还有真实入口到目标函数的可达性证明；
+      - entrypoint_reachable：框架侧入口追踪明确成立。
+    """
+    h = harness or {}
+    return bool(
+        h.get("verdict") == V_TARGET_CONFIRMED
+        and h.get("dynamically_triggered")
+        and h.get("function_extracted")
+        and h.get("target_function_called")
+        and h.get("verification_level") == LEVEL_ENTRYPOINT
+        and h.get("entrypoint_reachable")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +192,8 @@ _FUNC_START = re.compile(
 def _blank_extract(file, line, reason) -> dict:
     return {"found": False, "file": file, "line": line, "function_code": "",
             "function_name": None, "class_name": None, "module_path": None,
-            "imports": [], "decorators": [], "language": None, "reason": reason}
+            "imports": [], "decorators": [], "language": None,
+            "extraction_method": None, "reason": reason}
 
 
 def extract_function(code_root: Path | None, file: str | None, line: int | None,
@@ -235,32 +274,102 @@ def _extract_python(text: str, rel: str, line: int) -> dict:
 
 
 def _extract_regex(text: str, rel: str, line: int, lang: str, max_lines: int) -> dict:
-    """JS/PHP 的正则兜底提取（精度有限）。"""
+    """JS/PHP 的保守函数提取。
+
+    没有语言 AST 解析器时，宁可返回 ``found=False``，也不能把目标行附近任意
+    片段伪装成函数。对可识别的函数头再做花括号边界匹配，结果仍显式标为
+    ``regex_brace_limited``，调用方不得把它升级为入口级确认。
+    """
     lines = text.splitlines()
+    if not lines:
+        return _blank_extract(rel, line, "empty_source_file")
     idx = max(0, min(line - 1, len(lines) - 1))
-    start = idx
+
+    # JS 同时覆盖 function foo()、async function foo()、const foo = () => {}、
+    # class method() {}；PHP 覆盖 function foo()。这是识别函数边界的最低条件。
+    if lang == "javascript":
+        func_start = re.compile(
+            r"^\s*(?:async\s+)?(?:function\s+[A-Za-z_$][\w$]*\s*\(|"
+            r"(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=.*=>\s*\{|"
+            r"(?:async\s+)?[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{)"
+        )
+        name_re = re.compile(
+            r"(?:function\s+|(?:const|let|var)\s+)([A-Za-z_$][\w$]*)|"
+            r"^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\("
+        )
+    elif lang == "php":
+        func_start = re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)*function\s+&?\s*[A-Za-z_]\w*\s*\(", re.I)
+        name_re = re.compile(r"function\s+&?\s*([A-Za-z_]\w*)", re.I)
+    else:
+        return _blank_extract(rel, line, f"unsupported_regex_language:{lang}")
+
+    # 从目标行向上逐一考察候选函数头；只有目标行确实落在括号配对范围内才接受。
     for i in range(idx, max(-1, idx - max_lines), -1):
-        if _FUNC_START.match(lines[i]):
-            start = i
-            break
-    end = min(len(lines), start + max_lines)
-    def_indent = len(lines[start]) - len(lines[start].lstrip())
-    for j in range(start + 1, min(len(lines), start + max_lines)):
-        if not lines[j].strip():
+        if not func_start.match(lines[i]):
             continue
-        cur_indent = len(lines[j]) - len(lines[j].lstrip())
-        if cur_indent <= def_indent and _FUNC_START.match(lines[j]):
-            end = j
-            break
-    m = re.search(r"(?:function|func|def)\s+([A-Za-z_]\w*)", lines[start])
-    return {
-        "found": True, "file": rel, "line": line,
-        "start_line": start + 1, "end_line": end,
-        "function_name": m.group(1) if m else None, "class_name": None,
-        "module_path": rel, "function_code": "\n".join(lines[start:end]),
-        "imports": [], "decorators": [], "language": lang,
-        "reason": "regex_extraction_limited_precision",
-    }
+        end = _brace_function_end(lines, i, max_lines)
+        if end is None or not (i <= idx < end):
+            continue
+        match = name_re.search(lines[i])
+        groups = match.groups() if match else ()
+        name = next((g for g in groups if g), None)
+        return {
+            "found": True, "file": rel, "line": line,
+            "start_line": i + 1, "end_line": end,
+            "function_name": name, "class_name": None,
+            "module_path": rel, "function_code": "\n".join(lines[i:end]),
+            "imports": [], "decorators": [], "language": lang,
+            "extraction_method": "regex_brace_limited",
+            "reason": "regex_extraction_limited_precision",
+        }
+    return _blank_extract(rel, line, "no_enclosing_recognized_function_at_line")
+
+
+def _brace_function_end(lines: list[str], start: int, max_lines: int) -> int | None:
+    """返回函数右花括号后的行号（0-based exclusive），无法可靠配对则返回 None。
+
+    这是轻量保守解析：跳过单/双引号中的花括号和行尾注释；遇到模板字符串、
+    block comment 等复杂结构时不猜测边界，最多截取 ``max_lines`` 范围。
+    """
+    depth = 0
+    seen_open = False
+    quote: str | None = None
+    escaped = False
+    end_limit = min(len(lines), start + max_lines)
+    for line_index in range(start, end_limit):
+        source = lines[line_index]
+        pos = 0
+        while pos < len(source):
+            ch = source[pos]
+            next_ch = source[pos + 1] if pos + 1 < len(source) else ""
+            if quote:
+                if escaped:
+                    escaped = False
+                elif ch == "\\\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                pos += 1
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                pos += 1
+                continue
+            if ch == "/" and next_ch == "/":
+                break
+            if ch == "#":  # PHP 单行注释
+                break
+            if ch == "{":
+                depth += 1
+                seen_open = True
+            elif ch == "}" and seen_open:
+                depth -= 1
+                if depth == 0:
+                    return line_index + 1
+                if depth < 0:
+                    return None
+            pos += 1
+    return None
 
 
 def build_template_harness(vuln_type: str | None, code_snippet: str | None = None) -> str:
@@ -297,6 +406,15 @@ def build_template_harness(vuln_type: str | None, code_snippet: str | None = Non
         'else:\n'
         '    print("AUDITAGENTX_NO_TRIGGER")\n'
     )
+
+
+def _is_builtin_template_harness(code: str) -> bool:
+    normalized = (code or "").strip()
+    return normalized in {
+        _HARNESS_CMDI.strip(), _HARNESS_SQLI.strip(), _HARNESS_PATH.strip(),
+        _HARNESS_DESERIAL.strip(), _HARNESS_CODEI.strip(), _HARNESS_SSTI.strip(),
+        _HARNESS_XPATH.strip(), _HARNESS_LDAP.strip(),
+    }
 
 
 _HARNESS_CMDI = '''executed = []
@@ -453,6 +571,7 @@ def _base_result(language: str, source: str, backend: str) -> dict:
         "verdict": V_INCONCLUSIVE, "verification_level": LEVEL_NONE,
         "backend": backend, "language": language, "harness_source": source,
         "target_function_called": False, "sink_called": False,
+        "entrypoint_reachable": False,
         "sink_name": None, "captured_argument": None, "payload": None,
         "trigger_detail": "", "stdout": "", "stderr": "", "reason": None,
         "attempt": 1, "safety": {"allowed": True, "blocked_reason": None, "checks": []},
@@ -539,19 +658,28 @@ def build_target_scaffold_harness(func: dict, vuln_type: str) -> str | None:
         "_p" if p == data_param else ("_Dummy()" if p == sink_obj else "None") for p in params)
 
     import json as _json
+    # 框架插桩：包裹真实目标函数，只有当它真正被调用时才打印框架 nonce（占位符，
+    # 由 run_harness 在认证过的 scaffold 来源上替换成本次随机值）。脚本无法伪造该 nonce，
+    # 因此 target_function_called 由框架据 nonce 独立判定，而非采信脚本自报字段。
+    invoke_probe = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
     return (
         "import json, os, subprocess\n"
         "_rec = []\n"
         + mock_setup +
         "\n# ==== 内联的项目真实目标函数 ====\n"
         + _dedent_code(code) +
-        "\n# ==== 用攻击 payload 真实调用目标函数 ====\n"
+        "\n# ==== 框架插桩：真实调用被包裹的目标函数时打印框架 nonce ====\n"
+        f"_orig_target = globals().get({_json.dumps(fname)})\n"
+        "def _target(*_a, **_k):\n"
+        f"    print({_json.dumps(invoke_probe)})\n"
+        "    return _orig_target(*_a, **_k)\n"
         f"_payloads = {_json.dumps(payloads)}\n"
         "_triggered = False; _cap = None; _pl = None\n"
         "for _p in _payloads:\n"
         "    _rec.clear()\n"
         "    try:\n"
-        f"        {fname}({call_args})\n"
+        "        if callable(_orig_target):\n"
+        f"            _target({call_args})\n"
         "    except Exception:\n"
         "        pass\n"
         "    for _r in _rec:\n"
@@ -560,11 +688,151 @@ def build_target_scaffold_harness(func: dict, vuln_type: str) -> str | None:
         "    if _triggered:\n"
         "        break\n"
         "print('AUDITAGENTX_RESULT_JSON=' + json.dumps({\n"
-        "    'triggered': _triggered, 'target_function_called': True,\n"
+        "    'triggered': _triggered,\n"
         "    'sink_called': bool(_rec) or _triggered,\n"
         f"    'sink_name': {_json.dumps(sink_name)},\n"
         "    'captured_argument': _cap, 'payload': _pl,\n"
         "    'trigger_detail': ('真实目标函数把攻击 payload 送达 sink' if _triggered else '')}))\n"
+        "print('AUDITAGENTX_VULN_TRIGGERED' if _triggered else 'AUDITAGENTX_NO_TRIGGER')\n"
+    )
+
+
+def build_route_testclient_harness(func: dict, vuln_type: str) -> str | None:
+    """DeepAudit 式（借鉴非抄）：对【Web 路由 handler 型】漏洞，用框架 test-client
+    在**进程内**调用真实路由——不用起整个服务、不碰端口/DB。
+
+    执行模型（运行时自省，鲁棒）：
+      1) import 真实模块；2) 在模块里找到 Flask/FastAPI app 实例；
+      3) 从 app.url_map / app.routes 定位该 handler 的真实路由与方法；
+      4) nonce 包裹真实 handler（含 flask view_functions），证明真实路由被真正调用；
+      5) 全局打桩 os/subprocess 危险 sink（只记录不真跑）；
+      6) test_client 用安全 marker 向真实路由发攻击请求，检测 marker 是否流到 sink。
+
+    仅适用于「读取 request 输入的路由 handler + 命令注入类 sink」；否则返回 None，
+    交由 import scaffold / 内联 / 模板兜底。真正安全边界是禁网只读一次性 Docker 沙箱。
+    """
+    if not isinstance(func, dict) or not func.get("found"):
+        return None
+    if normalize_language(func.get("language")) != "python":
+        return None
+    # test-client 需要 import 真实框架（flask/fastapi）——只有配置了预装框架的固定沙箱
+    # 镜像才可靠可用；否则诚实回退（返回 None -> 内联/模板兜底），不产生"跑不起来"的假阴性。
+    if not (getattr(settings, "harness_sandbox_image", "") or "").strip():
+        return None
+    code = func.get("function_code") or ""
+    fname = func.get("function_name")
+    module_path = (func.get("module_path") or "").strip()
+    if not code or not fname or not module_path:
+        return None
+    # 必须是「读取 request 输入」的路由 handler（区别于工具函数 -> import scaffold）
+    if "request" not in code:
+        return None
+    if module_path.endswith(".py"):
+        module_path = module_path[:-3]
+    module_path = module_path.replace("/", ".").replace("\\", ".").strip(".")
+    if not module_path or not all(p.isidentifier() for p in module_path.split(".")):
+        return None
+    # 命令注入类 sink 才用本 harness（SQLi 等对象 sink 需真实 DB，交由别的路径）
+    sink_name = "os.system"
+    mcmd = re.search(r"(os\.system|os\.popen|subprocess\.\w+)", code)
+    if mcmd:
+        sink_name = mcmd.group(1)
+    elif not re.search(r"os\.system|os\.popen|subprocess\.|commands\.", code):
+        return None
+    # 提取 request 参数名（拿不到就用常见默认，test-client 会逐个试）
+    params = re.findall(r"request\.(?:args|form|values|json)\.get\(\s*['\"]([^'\"]+)['\"]", code)
+    params += re.findall(r"request\.(?:args|form|values)\[\s*['\"]([^'\"]+)['\"]", code)
+    seen: set = set()
+    params = [p for p in params if not (p in seen or seen.add(p))]
+    if not params:
+        params = ["id", "host", "cmd", "q", "input", "file", "name", "path", "url", "data"]
+
+    import json as _json
+    invoke_probe = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
+    return (
+        "import json, sys, importlib, os, subprocess, re as _re\n"
+        "sys.path.insert(0, '/target')\n"
+        "_rec = []\n"
+        f"_marker = {_json.dumps('AAXROUTE_' + secrets.token_hex(6))}\n"
+        f"_params = {_json.dumps(params)}\n"
+        f"FUNC = {_json.dumps(fname)}\n"
+        f"MOD = {_json.dumps(module_path)}\n"
+        f"_nonce = {_json.dumps(invoke_probe)}\n"
+        "_triggered=False; _cap=None; _imp_err=None; _route=None; _fw=None\n"
+        "# 先用真实 exec/eval import 真实模块\n"
+        "try:\n"
+        "    _m = importlib.import_module(MOD)\n"
+        "except Exception as _e:\n"
+        "    _m = None; _imp_err = repr(_e)[:200]\n"
+        "# import 后再打桩 os/subprocess（只记录不真跑；不碰框架内部 eval/exec）\n"
+        "def _record(*a, **k):\n"
+        "    try: _rec.append(str(a) + str(k))\n"
+        "    except Exception: _rec.append('<arg>')\n"
+        "    return ''\n"
+        "class _FR:\n"
+        "    def read(self,*a,**k): return ''\n"
+        "    def close(self): pass\n"
+        "os.system=_record\n"
+        "os.popen=lambda *a,**k:(_rec.append(str(a)+str(k)),_FR())[1]\n"
+        "subprocess.run=_record; subprocess.call=_record; subprocess.check_output=_record; subprocess.Popen=_record\n"
+        "# 找 app 实例\n"
+        "_app=None\n"
+        "if _m:\n"
+        "    for _n in dir(_m):\n"
+        "        try: _o=getattr(_m,_n)\n"
+        "        except Exception: continue\n"
+        "        _cn=type(_o).__name__\n"
+        "        if _cn=='Flask': _app=_o; _fw='flask'; break\n"
+        "        if _cn=='FastAPI': _app=_o; _fw='fastapi'; break\n"
+        "# nonce 包裹真实 handler（证明真实路由被真正调用）\n"
+        "if _m and hasattr(_m, FUNC):\n"
+        "    _orig=getattr(_m,FUNC)\n"
+        "    def _wrap(*a,**k):\n"
+        "        print(_nonce)\n"
+        "        return _orig(*a,**k)\n"
+        "    try: setattr(_m,FUNC,_wrap)\n"
+        "    except Exception: pass\n"
+        "    if _fw=='flask' and _app is not None:\n"
+        "        for _ep,_vf in list(getattr(_app,'view_functions',{}).items()):\n"
+        "            if getattr(_vf,'__name__','')==FUNC: _app.view_functions[_ep]=_wrap\n"
+        "def _hit():\n"
+        "    for _r in _rec:\n"
+        "        if _marker in str(_r): return True\n"
+        "    return False\n"
+        "try:\n"
+        "    if _fw=='flask' and _app is not None:\n"
+        "        _c=_app.test_client()\n"
+        "        for _rule in _app.url_map.iter_rules():\n"
+        "            if _rule.endpoint.split('.')[-1]==FUNC: _route=str(_rule.rule); break\n"
+        "        _rp=_re.sub(r'<[^>]+>','1',_route or '/')\n"
+        "        for _p in _params:\n"
+        "            _rec.clear()\n"
+        "            try: _c.get(_rp, query_string={_p:_marker})\n"
+        "            except Exception: pass\n"
+        "            if not _hit():\n"
+        "                try: _c.post(_rp, data={_p:_marker})\n"
+        "                except Exception: pass\n"
+        "            if _hit(): _triggered=True; _cap=[x for x in _rec if _marker in str(x)][0][:200]; break\n"
+        "    elif _fw=='fastapi' and _app is not None:\n"
+        "        from starlette.testclient import TestClient as _TC\n"
+        "        _c=_TC(_app)\n"
+        "        for _r in getattr(_app,'routes',[]):\n"
+        "            if getattr(getattr(_r,'endpoint',None),'__name__','')==FUNC: _route=getattr(_r,'path',None); break\n"
+        "        _rp=_re.sub(r'{[^}]+}','1',_route or '/')\n"
+        "        for _p in _params:\n"
+        "            _rec.clear()\n"
+        "            try: _c.get(_rp, params={_p:_marker})\n"
+        "            except Exception: pass\n"
+        "            if _hit(): _triggered=True; _cap=[x for x in _rec if _marker in str(x)][0][:200]; break\n"
+        "except Exception as _e:\n"
+        "    if not _imp_err: _imp_err='route_probe_error: '+repr(_e)[:180]\n"
+        "print('AUDITAGENTX_RESULT_JSON=' + json.dumps({\n"
+        "  'triggered': _triggered, 'sink_called': bool(_rec) or _triggered,\n"
+        f"  'sink_name': {_json.dumps(sink_name)}, 'captured_argument': _cap,\n"
+        "  'payload': (_marker if _triggered else None), 'import_error': _imp_err,\n"
+        "  'route': _route, 'framework': _fw,\n"
+        "  'trigger_detail': ('真实路由 handler 经 test-client 被调用，用户输入送达 sink'\n"
+        "      if _triggered else (_imp_err or '未命中 sink'))}))\n"
         "print('AUDITAGENTX_VULN_TRIGGERED' if _triggered else 'AUDITAGENTX_NO_TRIGGER')\n"
     )
 
@@ -601,6 +869,106 @@ def _scaffold_mock(sink_name: str, sink_obj: str | None) -> str:
     return base + f"{sink_name.split('.')[-1]} = _mock\n"
 
 
+def build_import_scaffold_harness(func: dict, vuln_type: str) -> str | None:
+    """DeepAudit 式：import 项目**真实模块**并调用真实函数（而非内联副本），
+    配合 _run_in_docker 只读挂载的 /target 源码执行。
+
+    适用范围：模块级函数（非类方法）+ 全局/内建 sink（os.system/os.popen/subprocess.*/
+    eval/exec/open —— 命令注入/代码注入/路径遍历等）。方法级或对象方法 sink（如 SQLi 的
+    cursor.execute）无法用全局打桩拦截、且需真实对象，返回 None 交由内联/模板兜底。
+
+    安全：危险 sink 全局打桩为「只记录参数、绝不真实执行」；真正的安全边界是 Docker 沙箱
+    （禁网/只读根/无 capability/nobody/一次性）。payload 用安全唯一 marker（不含会被安全
+    校验器硬拦的 __subclasses__ 等），只为追踪「参数是否流到 sink」。框架 nonce 独立证明
+    真实函数被真正调用。
+    """
+    from backend.scanners.interproc_taint import _sink_reaching_params
+
+    if not isinstance(func, dict) or not func.get("found"):
+        return None
+    if normalize_language(func.get("language")) != "python" or func.get("class_name"):
+        return None
+    module_path = (func.get("module_path") or "").strip()
+    fname = func.get("function_name")
+    code = func.get("function_code")
+    if not module_path or not fname or not code:
+        return None
+    if module_path.endswith(".py"):
+        module_path = module_path[:-3]
+    module_path = module_path.replace("/", ".").replace("\\", ".").strip(".")
+    if not module_path or not all(p.isidentifier() for p in module_path.split(".")):
+        return None
+    try:
+        fn = next((n for n in ast.walk(ast.parse(code))
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fname), None)
+    except SyntaxError:
+        return None
+    if fn is None:
+        return None
+    reaching = _sink_reaching_params(fn)
+    if not reaching:
+        return None
+    data_param, (_vt, sink_name, _line) = next(iter(reaching.items()))
+    # 只处理全局/内建 sink（对象方法 sink 全局打桩拦不住）
+    root = sink_name.split(".", 1)[0]
+    if "." in sink_name and root not in ("os", "subprocess"):
+        return None
+
+    import json as _json
+    params = _params_of_py(fn)
+    marker = "AAXPROBE_" + secrets.token_hex(6)
+    call_args = ", ".join("_p" if p == data_param else "None" for p in params)
+    invoke_probe = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
+    return (
+        "import json, sys, os, subprocess, builtins\n"
+        "sys.path.insert(0, '/target')\n"
+        "_rec = []\n"
+        "def _record(*a, **k):\n"
+        "    try: _rec.append(str(a) + str(k))\n"
+        "    except Exception: _rec.append('<arg>')\n"
+        "    return ''\n"
+        "class _FR:\n"
+        "    def read(self, *a, **k): return ''\n"
+        "    def readlines(self, *a, **k): return []\n"
+        "    def close(self): pass\n"
+        f"_marker = {_json.dumps(marker)}\n"
+        "_p = _marker\n"
+        "_triggered = False; _cap = None; _imp_err = None\n"
+        "# 关键顺序：先用真实 exec/eval import 模块（Python import 机制依赖 exec），再打桩 sink\n"
+        "try:\n"
+        f"    from {module_path} import {fname} as _real\n"
+        "except Exception as _e:\n"
+        "    _real = None; _imp_err = repr(_e)[:200]\n"
+        "# import 完成后再全局打桩危险 sink：只记录送入参数，绝不真实执行\n"
+        "os.system = _record\n"
+        "os.popen = lambda *a, **k: (_rec.append(str(a) + str(k)), _FR())[1]\n"
+        "subprocess.run = _record; subprocess.call = _record\n"
+        "subprocess.check_output = _record; subprocess.Popen = _record\n"
+        "builtins.eval = lambda s, *a, **k: (_rec.append(str(s)), None)[1]\n"
+        "builtins.exec = lambda s, *a, **k: _rec.append(str(s))\n"
+        "def _target(*a, **k):\n"
+        f"    print({_json.dumps(invoke_probe)})\n"
+        "    return _real(*a, **k)\n"
+        "if callable(_real):\n"
+        "    try:\n"
+        f"        _target({call_args})\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    for _r in _rec:\n"
+        "        if _marker in str(_r):\n"
+        "            _triggered = True; _cap = str(_r)[:200]; break\n"
+        "print('AUDITAGENTX_RESULT_JSON=' + json.dumps({\n"
+        "    'triggered': _triggered,\n"
+        "    'sink_called': bool(_rec) or _triggered,\n"
+        f"    'sink_name': {_json.dumps(sink_name)},\n"
+        "    'captured_argument': _cap, 'payload': (_marker if _triggered else None),\n"
+        "    'import_error': _imp_err,\n"
+        "    'trigger_detail': ('真实模块函数把用户输入送达 sink（import 真实代码执行）'\n"
+        "        if _triggered else (('import 失败: ' + _imp_err) if _imp_err else '未触达 sink'))}))\n"
+        "print('AUDITAGENTX_VULN_TRIGGERED' if _triggered else 'AUDITAGENTX_NO_TRIGGER')\n"
+    )
+
+
 def _dedent_code(code: str) -> str:
     import textwrap
     return textwrap.dedent(code)
@@ -608,7 +976,10 @@ def _dedent_code(code: str) -> str:
 
 def run_harness(harness_code: str, *, timeout: int | None = None,
                 language: str | None = None, source: str = "llm",
-                require_docker: bool | None = None) -> dict:
+                require_docker: bool | None = None,
+                scaffold_token: str | None = None,
+                code_root: str | None = None,
+                harness_kind: str | None = None) -> dict:
     """执行 Harness 并返回结构化结果 + 细化 verdict。
 
     安全策略（Docker-first）：
@@ -618,6 +989,12 @@ def run_harness(harness_code: str, *, timeout: int | None = None,
     判定优先读 AUDITAGENTX_RESULT_JSON，无则退回 AUDITAGENTX_VULN_TRIGGERED marker。
     """
     timeout = timeout or int(getattr(settings, "harness_timeout", 8))
+    if source == "scaffold" and not (
+        scaffold_token
+        and hmac.compare_digest(str(scaffold_token), _SCAFFOLD_CAPABILITY)
+    ):
+        logger.warning("拒绝未认证的 scaffold 来源，按普通 LLM Harness 降级处理")
+        source = "llm"
     lang = normalize_language(language)
     if require_docker is None:
         # llm 与 scaffold（内联真实项目代码）都走 Docker-first；仅内置模板可本地
@@ -629,7 +1006,14 @@ def run_harness(harness_code: str, *, timeout: int | None = None,
         res["reason"] = "empty_harness"
         return res
 
-    # 1) 安全审查
+    # 每次运行生成一个随机 nonce。只有认证过的 scaffold（框架自建、包裹真实目标函数）才会被
+    # 注入该 nonce；其它来源的脚本无从得知它，因此永远无法伪造"真实目标函数被调用"的证明。
+    nonce = secrets.token_hex(16)
+    exec_code = harness_code
+    if source == "scaffold":
+        exec_code = harness_code.replace(NONCE_PLACEHOLDER, nonce)
+
+    # 1) 安全审查（对原始代码审查即可；nonce 替换只影响打印内容）
     safety = validate_harness_safety(harness_code, lang, source)
     res["safety"] = safety
     if not safety["allowed"]:
@@ -640,28 +1024,33 @@ def run_harness(harness_code: str, *, timeout: int | None = None,
 
     # 2) 内置可信模板：本地快速执行（模板只做 mock，无需 Docker 开销）
     if source == "template":
-        local_out = _run_local(harness_code, timeout, lang, source)
-        return _finalize(local_out, source, lang, local_out.get("backend", "local"))
+        local_out = _run_local(exec_code, timeout, lang, source)
+        return _finalize(local_out, source, lang, local_out.get("backend", "local"), nonce, harness_kind)
 
-    # 3) LLM 生成的 Harness：Docker-first（只要 Docker 引擎可用就用它，与 HTTP 动态验证同一判断）
-    docker_out = _run_in_docker(harness_code, timeout, lang)
+    # 3) LLM/scaffold Harness：Docker-first（只要 Docker 引擎可用就用它，与 HTTP 动态验证同一判断）
+    #    scaffold 挂载真实项目源码，import 真实模块；LLM 代码不挂载（不可信）。
+    mount_root = code_root if source == "scaffold" else None
+    docker_out = _run_in_docker(exec_code, timeout, lang, code_root=mount_root)
     if docker_out is not None:
-        return _finalize(docker_out, source, lang, "docker")
+        return _finalize(docker_out, source, lang, "docker", nonce, harness_kind)
 
-    # Docker 不可用
-    if require_docker:
-        res["verdict"] = V_SANDBOX_FAILED
-        res["reason"] = ("sandbox_failed: Docker 引擎不可用，LLM 生成的 Harness 出于安全禁止本地执行"
-                         "（请启动 Docker，或临时设 harness_require_docker=False 走受控本地执行）")
-        return res
-
-    # require_docker=False 时才允许本地回退（显式放宽）
-    local_out = _run_local(harness_code, timeout, lang, source)
-    return _finalize(local_out, source, lang, local_out.get("backend", "local"))
+    # Docker 不可用：LLM 代码与抽取自不可信项目的 scaffold 永不回退宿主机执行。
+    # require_docker 参数只保留 API 兼容，不再能放宽这条安全边界。
+    res["verdict"] = V_SANDBOX_FAILED
+    res["reason"] = (
+        "sandbox_failed: Docker 引擎不可用；LLM/scaffold Harness 禁止在宿主机执行。"
+        "请启动 Docker，内置 template 仍可走本地预审模板路径。"
+    )
+    return res
 
 
-def _finalize(exec_out: dict, source: str, language: str, backend: str) -> dict:
-    """把底层执行输出（stdout/stderr）解析为结构化结果 + verdict + verification_level。"""
+def _finalize(exec_out: dict, source: str, language: str, backend: str,
+              nonce: str = "", harness_kind: str | None = None) -> dict:
+    """把底层执行输出（stdout/stderr）解析为结构化结果 + verdict + verification_level。
+
+    关键：`target_function_called` 完全由框架侧证据（本次随机 nonce 是否被真实调用打印）
+    判定，**忽略脚本自报的同名字段**——避免"被验证对象自报成功"式的自我感动。
+    """
     res = _base_result(language, source, backend)
     res.update({k: exec_out.get(k, res.get(k)) for k in
                 ("executed", "stdout", "stderr", "reason")})
@@ -673,12 +1062,11 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str) -> dict:
         res["reason"] = exec_out.get("reason") or "not_executed"
         return res
 
-    # 优先结构化 JSON
+    # 优先结构化 JSON（注意：不再从 JSON 读取 target_function_called，它是脚本自报，不可信）
     parsed = _parse_result_json(stdout)
     if parsed:
         res["triggered"] = bool(parsed.get("triggered"))
         res["sink_called"] = bool(parsed.get("sink_called", res["triggered"]))
-        res["target_function_called"] = bool(parsed.get("target_function_called"))
         res["sink_name"] = parsed.get("sink_name")
         res["captured_argument"] = parsed.get("captured_argument")
         res["payload"] = parsed.get("payload")
@@ -691,11 +1079,28 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str) -> dict:
             m = re.search(re.escape(TRIGGER_MARKER) + r"(.*)", stdout)
             res["trigger_detail"] = (m.group(1).strip() if m else "")[:300]
 
-    # verification_level：模板恒为机理级；LLM 只有真实调用目标函数才算 target_specific
+    # 框架侧独立证明「真实目标函数被调用」：仅当 scaffold 来源、且本次随机 nonce 真的被
+    # 框架插桩打印出来才成立。脚本自报的 target_function_called 一律不采信。
+    res["target_function_called"] = bool(
+        source == "scaffold" and nonce and (TARGET_INVOKED_MARKER + nonce) in stdout
+    )
+
+    # 入口级可达性：仅当框架自建的 testclient_route 脚手架（经真实路由 dispatch 调真实
+    # handler）+ 框架 nonce 证明真实调用 + sink 被触发，才成立。这不是脚本自报——
+    # harness_kind 由框架侧决定，nonce/触发由框架独立观测。
+    res["entrypoint_reachable"] = bool(
+        source == "scaffold" and harness_kind == "testclient_route"
+        and res["target_function_called"] and res["triggered"]
+    )
+
+    # verification_level：只有后端 scaffold 包裹真实函数、框架 nonce 证明其被真正调用，
+    # 且危险 sink 被攻击 payload 触发，才算目标级；再叠加真实入口可达 -> 入口级。
     if source == "template":
         res["verification_level"] = LEVEL_TEMPLATE
-    elif res["target_function_called"]:
-        res["verification_level"] = LEVEL_TARGET
+    elif source == "scaffold" and res["target_function_called"] and res["triggered"]:
+        res["verification_level"] = LEVEL_ENTRYPOINT if res["entrypoint_reachable"] else LEVEL_TARGET
+    elif source == "llm" and res["triggered"]:
+        res["verification_level"] = LEVEL_UNATTESTED
     else:
         res["verification_level"] = LEVEL_NONE
 
@@ -703,18 +1108,23 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str) -> dict:
     if not res["triggered"]:
         res["verdict"] = V_NOT_REPRODUCED
         res["reason"] = res["reason"] or "executed_but_sink_not_triggered"
-    elif res["verification_level"] == LEVEL_TARGET:
+    elif res["verification_level"] in (LEVEL_TARGET, LEVEL_ENTRYPOINT):
         res["verdict"] = V_TARGET_CONFIRMED
     else:
         res["verdict"] = V_MECHANISM_CONFIRMED
     return res
 
 
-def _run_in_docker(harness_code: str, timeout: int, language: str) -> dict | None:
+def _run_in_docker(harness_code: str, timeout: int, language: str,
+                   code_root: str | None = None) -> dict | None:
     """Docker 沙箱执行（网络禁用 + 内存/CPU/超时限制 + 自动清理）；不可用返回 None。
 
     以「Docker 引擎是否真的可达」为准（复用 HTTP 动态验证同一套 get_docker_client），
     不再依赖 enable_sandbox 开关——只要装了 Docker 且引擎在跑，harness 就会用它。
+
+    code_root 非空且为 Python 时，把项目源码**只读挂载**到 /target 并加入 PYTHONPATH，
+    让 scaffold 能 `import` 项目真实模块（DeepAudit 式：跑真实代码而非内联副本）。
+    配 settings.harness_sandbox_image 可用预装常见依赖的固定沙箱镜像。
     """
     try:
         from backend.verifier.app_runner import get_docker_client
@@ -723,23 +1133,38 @@ def _run_in_docker(harness_code: str, timeout: int, language: str) -> dict | Non
         logger.info("Docker 引擎不可用，harness 不走 Docker: %s", e)
         return None
     rt = _LANG_RUNTIMES.get(language, _LANG_RUNTIMES["python"])
+    image = (getattr(settings, "harness_sandbox_image", "") or "").strip() or rt["image"]
     code = harness_code
     if language == "php":
         code = code.replace("<?php", "").replace("?>", "")
+    run_kwargs = dict(
+        image=image,
+        command=rt["inline"] + [code],
+        detach=True,
+        network_disabled=True,          # 禁网
+        mem_limit="512m",               # 内存上限（import 真实框架需更多）
+        nano_cpus=1_000_000_000,        # CPU 上限（1 核）
+        pids_limit=64,                  # 进程数上限，抑制 fork 炸弹
+        read_only=True,                 # 根文件系统只读
+        tmpfs={"/tmp": "size=32m"},     # 仅 /tmp 可写（受限）
+        security_opt=["no-new-privileges"],
+        cap_drop=["ALL"],
+        user="65534:65534",
+        remove=False,
+    )
+    # DeepAudit 式：只读挂载项目真实源码，让 scaffold import 真实模块（仅 Python）
+    if code_root and language == "python":
+        try:
+            host_path = str(Path(code_root).resolve())
+            if Path(host_path).exists():
+                run_kwargs["volumes"] = {host_path: {"bind": "/target", "mode": "ro"}}
+                run_kwargs["environment"] = {"PYTHONPATH": "/target",
+                                             "PYTHONDONTWRITEBYTECODE": "1"}
+        except Exception:  # noqa: BLE001  挂载失败不致命，退回无挂载执行
+            pass
     container = None
     try:
-        container = client.containers.run(
-            image=rt["image"],
-            command=rt["inline"] + [code],
-            detach=True,
-            network_disabled=True,          # 禁网
-            mem_limit="256m",               # 内存上限
-            nano_cpus=1_000_000_000,        # CPU 上限（1 核）
-            pids_limit=64,                  # 进程数上限，抑制 fork 炸弹
-            read_only=True,                 # 根文件系统只读
-            tmpfs={"/tmp": "size=16m"},     # 仅 /tmp 可写（受限）
-            remove=False,
-        )
+        container = client.containers.run(**run_kwargs)
         container.wait(timeout=timeout)
         stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="ignore")
         stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="ignore")

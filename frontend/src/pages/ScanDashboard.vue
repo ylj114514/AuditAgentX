@@ -53,7 +53,7 @@
 
     <div v-if="status" class="summary-grid">
       <el-card shadow="never" class="summary-card">
-        <span>任务状态</span><strong><el-tag :type="statusTagType(status.status)">{{ status.status || "unknown" }}</el-tag></strong><small>{{ status.current_stage || "等待阶段信息" }}</small>
+        <span>任务状态</span><strong><el-tag :type="statusTagType(status.status)">{{ statusLabel(status.status) }}</el-tag></strong><small>{{ status.current_stage || "等待阶段信息" }}</small>
       </el-card>
       <el-card shadow="never" class="summary-card">
         <span>扫描进度</span><strong>{{ status.progress }}%</strong><el-progress :percentage="status.progress" :show-text="false" />
@@ -76,6 +76,42 @@
       </el-card>
     </div>
 
+    <!-- Task 3/4：进度分区 + 候选计数分离 -->
+    <el-card v-if="status" shadow="never" class="partition-card">
+      <div class="partition-head">
+        <h3>进度分区</h3>
+        <el-tag v-if="verifyAllCandidates" type="warning" size="small" effect="light">本次将复核全部候选</el-tag>
+      </div>
+      <div class="partition-grid">
+        <div v-for="p in progressPartitions" :key="p.key" class="partition-tile">
+          <span class="partition-label">{{ p.label }}</span>
+          <strong class="partition-value">{{ p.value }}</strong>
+          <small class="partition-hint">{{ p.hint }}</small>
+        </div>
+      </div>
+      <div class="partition-head partition-head--counts">
+        <h3>候选计数</h3>
+      </div>
+      <div class="partition-grid partition-grid--counts">
+        <div class="partition-tile">
+          <span class="partition-label">原始静态发现</span>
+          <strong class="partition-value">{{ candidateCounts.original }}</strong>
+        </div>
+        <div class="partition-tile">
+          <span class="partition-label">已送验证</span>
+          <strong class="partition-value">{{ candidateCounts.sent }}</strong>
+        </div>
+        <div class="partition-tile">
+          <span class="partition-label">已完成验证</span>
+          <strong class="partition-value">{{ candidateCounts.done }}</strong>
+        </div>
+        <div class="partition-tile">
+          <span class="partition-label">待人工复核</span>
+          <strong class="partition-value">{{ candidateCounts.needsReview }}</strong>
+        </div>
+      </div>
+    </el-card>
+
     <el-alert
       v-if="status?.status === 'failed'"
       type="error"
@@ -84,6 +120,31 @@
       class="error-alert"
       :title="status.error || '扫描任务失败，请检查仓库地址、网络、分支或本地路径。'"
     />
+
+    <el-alert
+      v-if="status?.status === 'partial_completed'"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="error-alert"
+      :title="status.error || '扫描已部分完成（partial_completed）：部分阶段被跳过或未产出完整结果，以下为已获得的结果。'"
+    />
+
+    <el-alert
+      v-if="staleWarning"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="error-alert"
+      title="任务疑似停滞"
+    >
+      <template #default>
+        <div class="warning-action-row">
+          <span>{{ staleWarning }}</span>
+          <el-button type="primary" plain size="small" :loading="loading" @click="load">刷新状态</el-button>
+        </div>
+      </template>
+    </el-alert>
 
     <el-alert
       v-if="longRunningWarning"
@@ -152,6 +213,22 @@
             <h2>动态验证结果</h2>
             <p>展示已执行动态验证的漏洞、命中特征、响应状态和验证结论。</p>
           </div>
+
+          <!-- Task 2：动态验证环境信息（从 stage_detail 读，缺字段显示 —） -->
+          <el-descriptions
+            v-if="hasDynamicInfo"
+            :column="3"
+            border
+            class="dynamic-info-desc"
+            title="动态验证环境"
+          >
+            <el-descriptions-item label="检测到的启动方式">{{ dynamicInfo.launchMethod }}</el-descriptions-item>
+            <el-descriptions-item label="服务名">{{ dynamicInfo.serviceName }}</el-descriptions-item>
+            <el-descriptions-item label="端口映射">{{ dynamicInfo.portMapping }}</el-descriptions-item>
+            <el-descriptions-item label="健康检查结果">{{ dynamicInfo.healthCheck }}</el-descriptions-item>
+            <el-descriptions-item label="回退 Harness 原因" :span="2">{{ dynamicInfo.harnessReason }}</el-descriptions-item>
+          </el-descriptions>
+
           <el-table v-loading="evidenceLoading" :data="dynamicRows" stripe empty-text="暂无动态验证结果，可在漏洞详情中执行按需验证">
             <el-table-column prop="type" label="漏洞类型" min-width="150" />
             <el-table-column prop="file" label="位置" min-width="220" show-overflow-tooltip />
@@ -167,6 +244,11 @@
             </el-table-column>
             <el-table-column label="状态码" width="90">
               <template #default="scope">{{ scope.row.runtime?.response_status || "-" }}</template>
+            </el-table-column>
+            <el-table-column label="Docker" width="140">
+              <template #default="scope">
+                {{ scope.row.sandbox?.docker_engine?.status || scope.row.sandbox?.status || "-" }}
+              </template>
             </el-table-column>
             <el-table-column label="说明" min-width="220" show-overflow-tooltip>
               <template #default="scope">{{ scope.row.runtime?.reason || scope.row.runtime?.error || "-" }}</template>
@@ -340,6 +422,28 @@ const currentPage = ref(1);
 const pageSize = ref(50);
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
+// ---- 前端 watchdog：客户端侧 stale 检测，防止把已停滞任务永久显示成 running ----
+const STALE_MS = 90_000;              // 90s 内无任何进度/阶段变化即判定疑似停滞
+const lastActivityAt = ref<number>(Date.now());
+const nowTick = ref<number>(Date.now());
+let lastActivitySignature = "";
+function statusActivitySignature(data: any) {
+  const sd = data?.stage_detail || {};
+  return [
+    data?.status, data?.progress, data?.current_stage,
+    sd.verify_results, sd.verify_requests, sd.dynamic_completed, sd.dynamic_phase,
+  ].join("|");
+}
+// 每次拿到最新状态时调用：进度/阶段有变化就刷新活动时间，并推进 nowTick 让 stale 计算生效
+function noteStatusActivity(data: any) {
+  const sig = statusActivitySignature(data);
+  if (sig !== lastActivitySignature) {
+    lastActivitySignature = sig;
+    lastActivityAt.value = Date.now();
+  }
+  nowTick.value = Date.now();
+}
+
 const agentFilters = reactive({
   actor: "",
   messageType: "",
@@ -355,42 +459,163 @@ const pagedStaticFindings = computed(() => {
   return staticFindings.value.slice(start, start + pageSize.value);
 });
 const dynamicRows = computed(() => findings.value
-  .map((item) => ({ ...item, runtime: evidenceMap.value[item.finding_id]?.runtime }))
+  .map((item) => ({
+    ...item,
+    runtime: evidenceMap.value[item.finding_id]?.runtime,
+    sandbox: evidenceMap.value[item.finding_id]?.sandbox,
+  }))
   .filter((item) => item.runtime));
 const exploitRows = computed(() => findings.value
   .map((item) => ({ ...item, exploit: evidenceMap.value[item.finding_id]?.exploit }))
   .filter((item) => item.exploit?.exploit_code));
 
 const stageDetail = computed<Record<string, any>>(() => status.value?.stage_detail || {});
+
+const DASH = "—";
+function numOrDash(value: any) {
+  const n = Number(value);
+  return Number.isFinite(n) && value !== null && value !== undefined && value !== "" ? n : DASH;
+}
+
+// 目标沙箱 / 健康检查状态 → 中文标签（供动态验证信息展示与回退原因用）
+function targetStatusLabel(statusValue?: string) {
+  const map: Record<string, string> = {
+    started: "已启动，健康检查通过",
+    not_available: "靶场不可用（回退 Harness）",
+    not_web_target: "非 Web 项目，HTTP 不适用",
+    sandbox_start_failed: "沙箱启动失败",
+    health_check_failed: "健康检查失败",
+    dependency_install_failed: "依赖安装失败",
+    unsafe_project_config: "项目容器配置被安全策略阻止",
+    not_installed: "Docker 未安装",
+    unsupported: "当前环境不支持自启动 Docker",
+    start_failed: "启动失败",
+    start_timeout: "启动超时",
+    launch_not_detected: "未识别启动方式",
+  };
+  return map[String(statusValue || "").toLowerCase()] || statusValue || DASH;
+}
+
+// Task 2：动态验证信息（从 stage_detail 读，读不到显示 —，不报错）
+// launch_plan 来自后端 config.options.dynamic_target.launch_plan，通常仅在用户高级覆盖或后端回写后有值。
+const launchPlan = computed<Record<string, any>>(() => stageDetail.value.launch_plan || {});
+const dynamicInfo = computed(() => {
+  const lp = launchPlan.value;
+  const d = stageDetail.value;
+  const targetStatus = d.dynamic_target_status;
+  const isStarted = String(targetStatus || "").toLowerCase() === "started";
+  return {
+    // 检测到的启动方式：优先 launch_plan.source/framework，回退动态目标模式
+    launchMethod: lp.source || lp.framework || lp.run_command || lp.command || d.dynamic_target_mode || DASH,
+    // 服务名：compose / framework（后端暂无独立 service_name 字段）
+    serviceName: lp.compose || lp.framework || DASH,
+    // 端口映射：launch_plan.port（后端暂未把真实 host->container 映射写入 stage_detail）
+    portMapping: lp.port ? String(lp.port) : DASH,
+    // 健康检查结果：dynamic_target_status
+    healthCheck: targetStatus ? targetStatusLabel(targetStatus) : DASH,
+    // 回退到 Harness 的原因：非 started 时用 dynamic_detail / 状态标签
+    harnessReason: targetStatus && !isStarted
+      ? (d.dynamic_detail || targetStatusLabel(targetStatus))
+      : DASH,
+  };
+});
+const hasDynamicInfo = computed(() => {
+  const d = stageDetail.value;
+  return Boolean(
+    d.dynamic_target_mode || d.dynamic_target_status || d.dynamic_phase ||
+    d.dynamic_total || Object.keys(launchPlan.value).length,
+  );
+});
+
+// Task 4：候选计数分离（从 findings 按 status 归类 + stage_detail 的验证收发计数）
+const needsReviewCount = computed(() =>
+  findings.value.filter((f) => String(f.status || "").toLowerCase().includes("review")).length);
+const candidateCounts = computed(() => ({
+  original: findings.value.length,                              // 原始静态发现数
+  sent: numOrDash(stageDetail.value.verify_requests),          // 已送验证
+  done: numOrDash(stageDetail.value.verify_results),           // 已完成验证
+  needsReview: needsReviewCount.value,                         // 待人工复核
+}));
+// max_verify_candidates=0（或不限）时，明确显示"本次将复核全部候选"
+const verifyAllCandidates = computed(() => {
+  const raw = stageDetail.value.max_verify_candidates;
+  return raw !== null && raw !== undefined && Number(raw) <= 0;
+});
+
+// Task 3：进度分区（静态扫描 / 静态复核 / 动态发现 / 动态验证 / 失败-跳过）
+const progressPartitions = computed(() => {
+  const d = stageDetail.value;
+  const dynTotal = Number(d.dynamic_total || 0);
+  const dynDone = Number(d.dynamic_completed || 0);
+  const verReq = Number(d.verify_requests || 0);
+  const verRes = Number(d.verify_results || 0);
+  return [
+    { key: "static", label: "静态扫描", value: String(findings.value.length), hint: "原始发现" },
+    { key: "review", label: "静态复核", value: verReq > 0 ? `${verRes}/${verReq}` : String(verRes || 0), hint: "VerifyAgent" },
+    { key: "discover", label: "动态发现", value: dynTotal > 0 ? String(dynTotal) : DASH, hint: "送验证候选" },
+    { key: "dynamic", label: "动态验证", value: dynTotal > 0 ? `${dynDone}/${dynTotal}` : DASH, hint: d.dynamic_phase || "未开始" },
+    { key: "skipped", label: "失败 / 跳过", value: String(needsReviewCount.value), hint: "待人工复核" },
+  ];
+});
+
+// Task 5：stale 检测——非终态且 90s 无变化时判定疑似停滞
+const isStale = computed(() => {
+  if (!status.value || isTerminalStatus(status.value.status)) return false;
+  return nowTick.value - lastActivityAt.value >= STALE_MS;
+});
+const staleWarning = computed(() => {
+  if (!isStale.value) return "";
+  const secs = Math.floor((nowTick.value - lastActivityAt.value) / 1000);
+  return `任务已 ${secs} 秒无任何进度或阶段变化，疑似停滞。后端可能已置为 partial_completed / failed，请点击"查询"刷新，或查看当前阶段日志。`;
+});
 const elapsedMinutes = computed(() => {
   const seconds = Number(stageDetail.value.elapsed_seconds || 0);
   return Math.floor(seconds / 60);
 });
+// ExploitAgent/DynamicVerify 是动态验证阶段，不应复用 VerifyAgent 的
+// 静态复核计数；否则会把“已返回的静态复核数/配置上限”误显示成动态进度。
+const isVerifyAgentStage = computed(() => /^verifyagent\b/i.test(
+  String(status.value?.current_stage || "").trim(),
+));
+const isDynamicStage = computed(() => /dynamic|harness|exploit/i.test(
+  String(status.value?.current_stage || ""),
+));
 const stageProgressPercent = computed(() => {
   if (!status.value) return null;
-  const stage = String(status.value.current_stage || "").toLowerCase();
-  if (!stage.includes("verify")) return null;
-  const total = Number(stageDetail.value.max_verify_candidates || stageDetail.value.verify_requests || 0);
-  const done = Number(stageDetail.value.verify_results || 0);
+  const total = isVerifyAgentStage.value
+    ? Number(stageDetail.value.max_verify_candidates || stageDetail.value.verify_requests || 0)
+    : (isDynamicStage.value ? Number(stageDetail.value.dynamic_total || 0) : 0);
+  const done = isVerifyAgentStage.value
+    ? Number(stageDetail.value.verify_results || 0)
+    : (isDynamicStage.value ? Number(stageDetail.value.dynamic_completed || 0) : 0);
   if (!Number.isFinite(total) || total <= 0) return null;
   return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
 });
 const stageProgressLabel = computed(() => {
   const stage = status.value?.current_stage || "等待阶段信息";
   const detail = stageDetail.value;
-  if (String(stage).toLowerCase().includes("verify")) {
+  if (isVerifyAgentStage.value) {
     const done = Number(detail.verify_results || 0);
     const total = Number(detail.max_verify_candidates || detail.verify_requests || 0);
     return total > 0 ? `${done}/${total}` : `${done}`;
+  }
+  if (isDynamicStage.value) {
+    const done = Number(detail.dynamic_completed || 0);
+    const total = Number(detail.dynamic_total || 0);
+    const phase = String(detail.dynamic_phase || "动态验证");
+    return total > 0 ? `${phase} ${done}/${total}` : phase;
   }
   return stage;
 });
 const stageProgressHint = computed(() => {
   const detail = stageDetail.value;
-  if (String(status.value?.current_stage || "").toLowerCase().includes("verify")) {
+  if (isVerifyAgentStage.value) {
     const pending = Number(detail.verify_pending || 0);
     const workers = Number(detail.max_verify_workers || 0);
     return `待返回 ${pending}，并发 ${workers || "-"}，已运行 ${elapsedMinutes.value} 分钟`;
+  }
+  if (isDynamicStage.value) {
+    return detail.dynamic_detail || `已运行 ${elapsedMinutes.value} 分钟`;
   }
   return `已运行 ${elapsedMinutes.value} 分钟`;
 });
@@ -398,15 +623,18 @@ const longRunningWarning = computed(() => {
   if (!status.value || isTerminalStatus(status.value.status)) return "";
   const stage = String(status.value.current_stage || "").toLowerCase();
   const minutes = elapsedMinutes.value;
-  if (stage.includes("verify") && minutes >= 10) return `VerifyAgent 已运行 ${minutes} 分钟，可能被 LLM 重试或候选数量拖慢`;
+  if (isVerifyAgentStage.value && minutes >= 10) return `VerifyAgent 已运行 ${minutes} 分钟，可能被 LLM 重试或候选数量拖慢`;
   if ((stage.includes("dynamic") || stage.includes("harness")) && minutes >= 15) return `动态验证阶段已运行 ${minutes} 分钟，可能卡在沙箱启动、健康检查或请求超时`;
   if (minutes >= 25) return `扫描已运行 ${minutes} 分钟，建议检查当前阶段日志或停止后调小候选数量`;
   return "";
 });
 const longRunningHint = computed(() => {
   const detail = stageDetail.value;
-  if (String(status.value?.current_stage || "").toLowerCase().includes("verify")) {
+  if (isVerifyAgentStage.value) {
     return `当前 Verify 请求 ${detail.verify_requests || 0}，结果 ${detail.verify_results || 0}，上限 ${detail.max_verify_candidates || "-"}`;
+  }
+  if (isDynamicStage.value) {
+    return `动态阶段：${detail.dynamic_phase || "准备中"}，${detail.dynamic_completed || 0}/${detail.dynamic_total || 0}；${detail.dynamic_detail || "等待执行结果"}`;
   }
   return "可以先停止扫描，再降低候选上限或切换 Quick 模式复测。";
 });
@@ -525,7 +753,35 @@ async function load() {
     await loadByScanId(keyword);
     return;
   }
-  ElMessage.warning("未找到该项目名称，请从推荐项中选择历史记录");
+  // 浏览器 localStorage 未命中时，回退到后端按项目名/ID 查询（历史的真实数据源）。
+  // 解决「清缓存/换浏览器/经脚本跑扫描」导致本地查不到的问题。
+  loading.value = true;
+  let matches: any[] = [];
+  try {
+    const { data } = await ScanApi.list(keyword);
+    matches = data.scans || [];
+  } finally {
+    loading.value = false;
+  }
+  if (matches.length === 0) {
+    ElMessage.warning("未找到该项目的扫描记录，请确认项目名称，或先发起一次审计");
+    return;
+  }
+  if (matches.length > 1) {
+    ElMessage.info(`找到 ${matches.length} 条匹配记录，已加载最近一条`);
+  }
+  const hit = matches[0];
+  await loadByScanId(hit.scan_id);
+  // 回写带真实项目名的历史，下次可直接本地命中
+  upsertHistory({
+    scanId: hit.scan_id,
+    projectId: hit.project_id,
+    projectName: hit.project_name,
+    target: hit.target,
+    sourceType: hit.source_type,
+    status: hit.status,
+    progress: hit.progress,
+  });
 }
 
 async function loadRecord(record: AuditHistoryRecord) {
@@ -542,6 +798,8 @@ async function loadByScanId(nextScanId: string) {
   try {
     const { data } = await ScanApi.get(nextScanId);
     status.value = data;
+    lastActivitySignature = "";        // 切换扫描时重置活动基线，避免旧任务的 stale 误判
+    noteStatusActivity(data);
     const { data: f } = await ScanApi.findings(nextScanId);
     findings.value = f.findings;
     currentPage.value = 1;
@@ -578,7 +836,8 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 function isTerminalStatus(s?: string) {
   const v = String(s || "").toLowerCase();
-  return v === "done" || v === "finished" || v === "failed" || v === "cancelled";
+  return v === "done" || v === "finished" || v === "failed"
+    || v === "cancelled" || v === "partial_completed";
 }
 
 function stopScanPolling() {
@@ -601,6 +860,7 @@ async function cancelCurrentScan() {
     await ScanApi.cancel(scanId.value);
     const { data } = await ScanApi.get(scanId.value);
     status.value = data;
+    noteStatusActivity(data);
     stopScanPolling();
     upsertHistory({
       scanId: scanId.value,
@@ -627,6 +887,7 @@ function startScanPolling() {
     try {
       const { data } = await ScanApi.get(scanId.value);
       status.value = data;
+      noteStatusActivity(data);
       const { data: f } = await ScanApi.findings(scanId.value);
       findings.value = f.findings;
       upsertHistory({
@@ -810,10 +1071,24 @@ function severityType(severity: string) {
 function statusTagType(status?: string) {
   const value = String(status || "").toLowerCase();
   if (value === "failed") return "danger";
+  if (value === "partial_completed") return "warning";
   if (value === "cancelled") return "info";
   if (value === "done" || value === "finished") return "success";
   if (value === "running") return "warning";
   return "info";
+}
+
+function statusLabel(status?: string) {
+  const map: Record<string, string> = {
+    queued: "排队中",
+    running: "运行中",
+    done: "已完成",
+    finished: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    partial_completed: "部分完成",
+  };
+  return map[String(status || "").toLowerCase()] || status || "unknown";
 }
 
 function findingStatusType(status?: string) {
@@ -848,6 +1123,8 @@ function runtimeStatusLabel(runtime: any) {
   if (status === "dynamic_confirmed" || runtime?.reproducible) return "可复现";
   if (runtime?.harness_confirmed) return "Harness 已复现";
   if (status === "not_reproduced") return "未复现";
+  if (status === "function_reproduced") return "仅函数单元复现";
+  if (status === "mechanism_confirmed") return "仅机理复现";
   if (status === "not_executed") return "未执行";
   if (status === "not_runtime_verifiable") return "不适合动态验证";
   if (status === "false_positive") return "误报排除";
@@ -855,6 +1132,8 @@ function runtimeStatusLabel(runtime: any) {
   if (status === "request_timeout") return "请求超时";
   if (status === "endpoint_not_found") return "入口不存在";
   if (status === "launch_not_detected") return "未识别启动方式";
+  if (status === "not_web_target") return "非 Web 项目（HTTP 不适用）";
+  if (status === "unsafe_project_config") return "项目容器配置已被安全策略阻止";
   if (status === "sandbox_start_failed") return "沙箱启动失败";
   if (status === "health_check_failed") return "沙箱健康检查失败";
   if (status === "dependency_install_failed") return "沙箱依赖安装失败";
@@ -865,7 +1144,7 @@ function runtimeTagType(runtime: any) {
   const status = runtime?.reproduction_status;
   if (status === "dynamic_confirmed" || runtime?.reproducible || runtime?.harness_confirmed) return "success";
   if (status === "not_reproduced") return "warning";
-  if (status === "not_executed" || status === "not_runtime_verifiable" || status === "false_positive") return "info";
+  if (status === "not_executed" || status === "not_runtime_verifiable" || status === "not_web_target" || status === "function_reproduced" || status === "mechanism_confirmed" || status === "false_positive") return "info";
   if (status === "connection_failed" || status === "request_timeout" || status === "endpoint_not_found" || status === "launch_not_detected" || status === "sandbox_start_failed" || status === "health_check_failed" || status === "dependency_install_failed") return "warning";
   return "info";
 }
@@ -917,10 +1196,14 @@ function verdictLabel(verdict?: string, state?: string) {
     not_executed: "未执行",
     not_reproduced: "未复现",
     not_runtime_verifiable: "不适合动态验证",
+    function_reproduced: "仅函数单元复现",
+    mechanism_confirmed: "仅漏洞机理复现",
     connection_failed: "连接失败",
     endpoint_not_found: "入口不存在",
     request_timeout: "请求超时",
     launch_not_detected: "未识别启动方式",
+    not_web_target: "非 Web 项目（HTTP 不适用）",
+    unsafe_project_config: "项目容器配置被安全策略阻止",
     sandbox_start_failed: "沙箱启动失败",
     health_check_failed: "沙箱健康检查失败",
     dependency_install_failed: "沙箱依赖安装失败",
@@ -1025,6 +1308,18 @@ onUnmounted(() => {
 .summary-card small { color: #667085; }
 .stage-summary-card strong { font-size: 24px; }
 .error-alert { border-radius: 12px; }
+.partition-card { border-radius: 18px; }
+.partition-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.partition-head--counts { margin-top: 18px; }
+.partition-head h3 { margin: 0; color: #162235; font-size: 15px; }
+.partition-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.partition-grid--counts { grid-template-columns: repeat(4, 1fr); }
+.partition-tile { border: 1px solid #e4ebf3; border-radius: 12px; padding: 12px 14px; background: #fbfdff; display: flex; flex-direction: column; gap: 4px; }
+.partition-label { color: #667085; font-size: 13px; }
+.partition-value { color: #162235; font-size: 22px; }
+.partition-hint { color: #98a2b3; font-size: 12px; }
+.dynamic-info-desc { margin-bottom: 16px; }
+@media (max-width: 980px) { .partition-grid, .partition-grid--counts { grid-template-columns: repeat(2, 1fr); } }
 .warning-action-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .tab-intro { margin-bottom: 16px; }
 .tab-intro h2 { margin: 0; color: #162235; }

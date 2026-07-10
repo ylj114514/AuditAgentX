@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from backend.skills.harness_tools import is_target_harness_confirmed
+
 
 def _build_call_path(verify_result: dict, exploit: dict) -> list[dict]:
     """把 source→传播→sink 整理为逐跳「调用路径」（结构化，便于证据链展示）。
@@ -94,6 +96,19 @@ class EvidenceCollector:
         runtime = _build_runtime_evidence(verify_result, exploit, dynamic, sample_record, sandbox)
         harness_evidence = _build_harness_evidence(harness)
         verification = _build_verification_evidence(verify_result, runtime, harness_evidence)
+        exploit_evidence = _redact_sensitive({
+            "trigger_location": exploit.get("trigger_location"),
+            "exploit_path": exploit.get("exploit_path"),
+            "attack_vector": exploit.get("attack_vector"),
+            "payloads": exploit.get("payloads"),
+            "exploit_code": exploit.get("exploit_code"),
+            "verification_method": exploit.get("verification_method"),
+            "impact": exploit.get("impact"),
+        })
+        runtime = _redact_sensitive(runtime)
+        harness_evidence = _redact_sensitive(harness_evidence)
+        sandbox = _redact_sensitive(sandbox)
+        logs = _redact_sensitive(logs)
 
         return {
             # 静态数据流证据
@@ -103,15 +118,7 @@ class EvidenceCollector:
             # 结构化调用路径：source -> 传播 -> sink，逐跳可追溯
             "call_path": call_path,
             # 利用证据（PDF 模块③要求）
-            "exploit": {
-                "trigger_location": exploit.get("trigger_location"),
-                "exploit_path": exploit.get("exploit_path"),
-                "attack_vector": exploit.get("attack_vector"),
-                "payloads": exploit.get("payloads"),
-                "exploit_code": exploit.get("exploit_code"),
-                "verification_method": exploit.get("verification_method"),
-                "impact": exploit.get("impact"),
-            },
+            "exploit": exploit_evidence,
             # 动态运行时证据
             "runtime": runtime,
             # Docker 沙箱环境证据（Deep 模式 docker_project）
@@ -352,17 +359,24 @@ def _build_runtime_evidence(verify_result: dict, exploit: dict, dynamic: dict,
         "reason": reason,
         "error": dynamic.get("error", ""),
         "matched_indicator": dynamic.get("matched_indicator"),
+        "verification_level": dynamic.get("verification_level", "not_executed"),
+        "oracle": dynamic.get("oracle", ""),
         "request": {
             "url": sample_record.get("url"),
             "method": sample_record.get("method"),
             "params": sample_record.get("params"),
             "payload": sample_record.get("payload"),
+            "transport": sample_record.get("transport"),
         },
+        "baseline": dynamic.get("baseline_record") or {},
         "response_status": sample_record.get("status_code") or sample_record.get("status"),
         "response_excerpt": (sample_record.get("response_excerpt") or "")[:400],
+        "runtime_log_excerpt": (sample_record.get("runtime_log_excerpt") or "")[:1200],
         "elapsed_ms": sample_record.get("elapsed_ms"),
         "records": dynamic.get("records", [])[:10],
+        "baseline_records": dynamic.get("baseline_records", [])[:10],
         "candidate_endpoints": dynamic.get("candidate_endpoints") or [],
+        "surfaces": dynamic.get("surfaces", [])[:40],
         "evidence_flow": _build_runtime_flow(verify_result, exploit, sample_record, dynamic),
         "sandbox": sandbox,
     }
@@ -388,14 +402,19 @@ def _build_harness_evidence(harness: dict) -> dict:
         "reason": harness.get("reason", ""),
         "harness_code": harness.get("harness_code"),
         "harness_source": harness.get("harness_source"),
+        "harness_kind": harness.get("harness_kind") or harness.get("harness_source"),
         "harness_language": harness.get("harness_language"),
         "sink_name": harness.get("sink_name"),
         "captured_argument": harness.get("captured_argument"),
         "payload": harness.get("payload"),
+        "function_extracted": harness.get("function_extracted", False),
         "target_function_called": harness.get("target_function_called", False),
+        "entrypoint_reachable": harness.get("entrypoint_reachable", False),
+        "function_unit_reproduced": harness.get("verdict") == "function_reproduced",
         "function_name": harness.get("function_name"),
         "trigger_detail": harness.get("trigger_detail"),
         "execution_backend": harness.get("execution_backend"),
+        "confirmed_blockers": harness.get("confirmed_blockers") or [],
         "safety": harness.get("safety"),
         "attempts": harness.get("attempts"),
         "execution_log": harness.get("execution_log"),
@@ -421,7 +440,12 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
     harness_verdict = harness.get("verdict")
     http_reproduced = (runtime.get("reproduction_status") == "dynamic_confirmed"
                        or runtime.get("reproducible"))
-    harness_target = harness_verdict == "target_confirmed" or harness.get("dynamically_triggered")
+    # 目标级动态确认判据统一走 canonical（框架 nonce 证明真实调用，非脚本自报）。
+    harness_target = is_target_harness_confirmed(harness)
+    function_reproduced = harness_verdict == "function_reproduced"
+    mechanism_only = harness_verdict == "mechanism_confirmed" or (
+        bool(harness.get("function_mechanism_verified")) and not function_reproduced
+    )
 
     if http_reproduced:
         dynamic_verdict = "dynamic_confirmed"
@@ -443,6 +467,18 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
 
     # 是否经运行时证据（HTTP 复现 / 目标函数级 Harness）动态确认——供报告如实展示。
     dynamically_verified = bool(http_reproduced or harness_target)
+    if http_reproduced:
+        evidence_level = "http_reproduced"
+    elif harness_target:
+        evidence_level = "target_harness"
+    elif function_reproduced:
+        evidence_level = "function_unit_reproduced"
+    elif mechanism_only:
+        evidence_level = "mechanism_only"
+    elif runtime.get("skipped") and harness_verdict in {None, "not_executed"}:
+        evidence_level = "not_executed"
+    else:
+        evidence_level = "not_reproduced"
 
     return {
         "mcp_server": verify_result.get("mcp_server"),
@@ -451,9 +487,17 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
         "dynamic_verdict": dynamic_verdict,
         "final_verdict": final_verdict,
         "false_positive_reason": verify_result.get("false_positive_reason"),
+        "context": verify_result.get("context"),
+        "risk_modifier": verify_result.get("risk_modifier"),
+        "downgrade_reason": verify_result.get("downgrade_reason"),
+        "verification_level": harness.get("verification_level") or verify_result.get("verification_level"),
+        "harness_kind": harness.get("harness_kind") or harness.get("harness_source") or verify_result.get("harness_kind"),
+        "dynamic_applicable": verify_result.get("dynamic_applicable"),
+        "confirmed_blockers": verify_result.get("confirmed_blockers") or harness.get("confirmed_blockers") or [],
         # 动态验证透出：报告/前端可据此展示「经动态确认」标记与方法
         "dynamically_verified": dynamically_verified,
         "dynamic_method": dynamic_method,
+        "evidence_level": evidence_level,
         "runtime_verification_status": runtime.get("reproduction_status"),
         "harness_verdict": harness_verdict,
         "harness_dynamically_triggered": bool(harness.get("dynamically_triggered")),
@@ -488,3 +532,29 @@ def _build_runtime_flow(verify_result: dict, exploit: dict,
     if response_detail["status"] or response_detail["matched_indicator"] or response_detail["reason"]:
         flow.append({"stage": "response", "detail": response_detail})
     return flow
+
+
+_SENSITIVE_KEY_RE = re.compile(r"(password|passwd|secret|api[_-]?key|token|authorization|cookie)", re.I)
+_SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)\b(password|passwd|secret(?:[_-]?key)?|api[_-]?key|token|authorization|cookie)\b\s*[:=]\s*([^\n,;]+)"
+)
+_BEARER_RE = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+\-/=]{6,}")
+
+
+def _redact_sensitive(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if _SENSITIVE_KEY_RE.search(str(key)):
+                out[key] = "<redacted>" if item not in (None, "") else item
+            else:
+                out[key] = _redact_sensitive(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive(item) for item in value)
+    if isinstance(value, str):
+        text = _SENSITIVE_VALUE_RE.sub(lambda m: f"{m.group(1)}=<redacted>", value)
+        return _BEARER_RE.sub("Bearer <redacted>", text)
+    return value

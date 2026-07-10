@@ -108,7 +108,7 @@ def test_verify_finding_api_records_evidence(monkeypatch):
 
     r = client.post(f"/api/findings/{fid}/verify", json={
         "mode": "url",
-        "base_url": "http://target.local",
+        "base_url": "http://127.0.0.1:18080",
         "endpoints": ["/user"],
         "timeout": 5,
     })
@@ -231,7 +231,7 @@ def test_verify_finding_api_preserves_existing_verify_evidence(monkeypatch):
 
     r = client.post(f"/api/findings/{fid}/verify", json={
         "mode": "url",
-        "base_url": "http://target.local",
+        "base_url": "http://127.0.0.1:18080",
         "endpoints": ["/user"],
         "timeout": 5,
     })
@@ -253,6 +253,81 @@ def test_verify_finding_api_preserves_existing_verify_evidence(monkeypatch):
     assert "remediation" in evidence["knowledge"]
     assert "references" in evidence["knowledge"]
     assert evidence["verification"]["static_verdict"] == "confirmed_static"
+
+
+def test_verify_finding_api_rejects_external_url_by_default():
+    db = SessionLocal()
+    project = Project(id=ids.project_id(), name="api_external_guard", source_type="local", status="created")
+    db.add(project)
+    db.commit()
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="static", status="done")
+    db.add(scan)
+    db.commit()
+    finding = Finding(
+        id=ids.finding_id(), scan_id=scan.id, type="SQL Injection", severity="high",
+        file_path="app.py", start_line=1, code_snippet="cursor.execute(q)",
+        confidence=0.7, verified=False, status="confirmed",
+    )
+    db.add(finding)
+    db.commit()
+    fid = finding.id
+    db.close()
+
+    r = client.post(f"/api/findings/{fid}/verify", json={
+        "mode": "url",
+        "base_url": "http://example.com",
+        "endpoints": ["/"],
+    })
+
+    assert r.status_code == 400
+
+
+def test_verify_finding_api_context_blocks_workflow_confirmation(monkeypatch):
+    class FakeDynamicResult:
+        verified = True
+        reproducible = True
+        reproduction_status = "dynamic_confirmed"
+        matched_indicator = "uid=1000"
+        confirmed_record = {"url": "http://127.0.0.1:18080/", "method": "GET", "params": {}, "payload": "", "status_code": 200}
+        records = [confirmed_record]
+        logs = []
+        skipped = False
+        reason = ""
+        error = ""
+
+    monkeypatch.setattr("backend.agents.exploit_agent.ExploitAgent.run", lambda self, finding: {
+        "payloads": ["; id"], "success_indicators": ["uid=\\d+"], "_injection_points": ["cmd"]})
+    monkeypatch.setattr("backend.verifier.dynamic_verifier.DynamicVerifier.verify", lambda self, base_url, exploit, endpoints=None: FakeDynamicResult())
+
+    db = SessionLocal()
+    project = Project(id=ids.project_id(), name="api_context_guard", source_type="local", status="created")
+    db.add(project)
+    db.commit()
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="static", status="done")
+    db.add(scan)
+    db.commit()
+    finding = Finding(
+        id=ids.finding_id(), scan_id=scan.id, type="run-shell-injection", severity="high",
+        file_path=".github/workflows/test.yml", start_line=10,
+        code_snippet="run: make ${{ inputs.target }}",
+        confidence=0.7, verified=False, status="needs_review",
+    )
+    db.add(finding)
+    db.commit()
+    fid = finding.id
+    db.close()
+
+    r = client.post(f"/api/findings/{fid}/verify", json={
+        "mode": "url", "base_url": "http://127.0.0.1:18080", "endpoints": ["/"]})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verified"] is False
+    db = SessionLocal()
+    stored = db.get(Finding, fid)
+    assert stored.status == "needs_review"
+    assert stored.verified is False
+    db.close()
 
 
 def test_report_generation_preserves_evidence_tool_calls(monkeypatch, tmp_path):
@@ -322,3 +397,81 @@ def test_report_generation_preserves_evidence_tool_calls(monkeypatch, tmp_path):
         "verify_source_sink",
         "retrieve_security_knowledge",
     ]
+
+
+def test_list_scans_and_search_by_project_name():
+    """GET /api/scans 作为历史记录的后端数据源，可按项目名/ID/scan_id 搜索。"""
+    db = SessionLocal()
+    project = Project(
+        id=ids.project_id(), name="scan_history_demo_proj", source_type="git",
+        url="https://github.com/example/scan-history-demo", status="created",
+    )
+    db.add(project)
+    db.commit()
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="deep", status="done",
+                progress=100)
+    db.add(scan)
+    db.commit()
+    scan_id, project_name = scan.id, project.name
+    db.close()
+
+    # 全量列表可用（未开始/新扫描优先展示）
+    r = client.get("/api/scans")
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+
+    # 按项目名模糊搜索能命中，且回带项目名/target
+    r2 = client.get("/api/scans", params={"q": "scan_history_demo"})
+    assert r2.status_code == 200
+    hits = r2.json()["scans"]
+    assert any(s["scan_id"] == scan_id for s in hits)
+    hit = next(s for s in hits if s["scan_id"] == scan_id)
+    assert hit["project_name"] == project_name
+    assert hit["target"] == "https://github.com/example/scan-history-demo"
+
+    # 按 scan_id 精确搜索能命中
+    r3 = client.get("/api/scans", params={"q": scan_id})
+    assert any(s["scan_id"] == scan_id for s in r3.json()["scans"])
+
+    # 无关键词无命中
+    r4 = client.get("/api/scans", params={"q": "no_such_project_xyz_123"})
+    assert all(s["scan_id"] != scan_id for s in r4.json()["scans"])
+
+
+def test_delete_scan_cascades_findings_and_evidence():
+    """DELETE /api/scans/{id} 应级联删除扫描及其 findings/evidence，历史页删除按钮才不留死数据。"""
+    db = SessionLocal()
+    project = Project(id=ids.project_id(), name="del_demo_proj", source_type="local",
+                      local_path="x", status="created")
+    db.add(project)
+    db.commit()
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="static", status="done")
+    db.add(scan)
+    db.commit()
+    finding = Finding(id=ids.finding_id(), scan_id=scan.id, type="SQL Injection",
+                      severity="high", file_path="a.py", start_line=1, confidence=0.7,
+                      status="confirmed")
+    db.add(finding)
+    db.commit()
+    db.add(Evidence(id=ids.evidence_id(), finding_id=finding.id,
+                    source=json.dumps("u"), sink=json.dumps("s"),
+                    data_flow=json.dumps([]), poc_result=json.dumps({}), logs=json.dumps([])))
+    db.commit()
+    scan_id, finding_id = scan.id, finding.id
+    db.close()
+
+    # 删除前存在
+    assert client.get(f"/api/scans/{scan_id}").status_code == 200
+
+    # 删除
+    r = client.delete(f"/api/scans/{scan_id}")
+    assert r.status_code == 200 and r.json()["deleted"] == scan_id
+
+    # 扫描与级联数据均已消失
+    assert client.get(f"/api/scans/{scan_id}").status_code == 404
+    check = SessionLocal()
+    assert check.get(Finding, finding_id) is None
+    check.close()
+
+    # 重复删除返回 404
+    assert client.delete(f"/api/scans/{scan_id}").status_code == 404

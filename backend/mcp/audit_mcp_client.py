@@ -142,9 +142,15 @@ class AuditMCPClient:
                 if not enable_dynamic:
                     continue
                 # 未配置 base_url 时将返回 not_executed（工具层保证语义正确）
+                from backend.verifier import exploit_templates
+                template = exploit_templates.match_template(candidate.get("type"))
                 exploit_hint = {
-                    "payloads": heuristic_result.get("suggested_payloads") or [],
-                    "success_indicators": heuristic_result.get("success_indicators") or [],
+                    "vuln_type": candidate.get("type"),
+                    "payloads": heuristic_result.get("suggested_payloads") or (
+                        list(template.payloads) if template else []),
+                    "success_indicators": heuristic_result.get("success_indicators") or (
+                        list(template.success_indicators) if template else []),
+                    "_injection_points": list(template.injection_points) if template else [],
                 }
                 dynamic_result = self._call(tool_name, {
                     "finding": candidate,
@@ -162,33 +168,24 @@ class AuditMCPClient:
                 # 未启用 harness 时跳过
                 if not enable_harness:
                     continue
-                func_result = self._call(tool_name, {
-                    "candidate": candidate,
-                    "code_root": str(code_root) if code_root else None,
-                })
-                tools_used.append(_tool_call(tool_name, "Extract vulnerable function for harness building.", func_result))
+                # Harness 只有一个权威入口。旧实现先提取函数、随后却丢弃提取结果，
+                # 又生成通用模板，最终只凭 triggered=True 就可能自证 harness_confirmed。
+                # 统一委托 HarnessVerifier，让 nonce、来源认证和证据分级在同一处完成。
+                from backend.verifier.harness_verifier import HarnessVerifier
+                harness_result = HarnessVerifier().run(candidate, code_root)
+                tools_used.append(_tool_call(
+                    "harness_verifier",
+                    "Run the authoritative target-aware harness verifier.",
+                    harness_result,
+                ))
 
             elif tool_name == "generate_fuzzing_harness":
-                # 未启用 harness 时跳过
-                if not enable_harness:
-                    continue
-                harness_code_result = self._call(tool_name, {
-                    "vuln_type": candidate.get("type"),
-                    "code_snippet": candidate.get("code_snippet"),
-                })
-                tools_used.append(_tool_call(tool_name, "Generate template fuzzing harness.", harness_code_result))
-                # 暂存 harness_code 供后续 run_fuzzing_harness 使用
-                harness_result["_code"] = harness_code_result.get("harness_code", "")
+                # 已由上面的权威 HarnessVerifier 完成；禁止重复走通用模板自证路径。
+                continue
 
             elif tool_name == "run_fuzzing_harness":
-                # 未启用 harness 时跳过
-                if not enable_harness:
-                    continue
-                harness_code = harness_result.get("_code", "")
-                if harness_code:
-                    run_result = self._call(tool_name, {"harness_code": harness_code})
-                    harness_result.update(run_result)
-                    tools_used.append(_tool_call(tool_name, "Execute fuzzing harness and check trigger.", run_result))
+                # 已由上面的权威 HarnessVerifier 完成。
+                continue
 
         return {
             "architecture": "MCP+Skill",

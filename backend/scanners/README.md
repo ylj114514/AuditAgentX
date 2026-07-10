@@ -10,7 +10,6 @@
 | **Semgrep** | `semgrep_runner.py` | AST 语义 + **taint mode** | 官方 `auto` 规则 + 项目自定义 `rules/semgrep/*.yaml` 污点规则 |
 | **Bandit** | `bandit_runner.py` | Python AST | Python 专项安全检查 |
 | **Gitleaks** | `gitleaks_runner.py` | 熵值 + 规则 | 硬编码密钥检测 |
-| **Trivy** | `trivy_runner.py` | CVE 库比对 | 依赖组件漏洞（SCA） |
 | **CustomTaint** | `custom_rules.py` + `taint_rules.py` | **轻量污点分析** | 离线兜底，source→sink 可达性分析 |
 
 `registry.py` 统一调度：`run_scanners(target, enabled_tools)` 始终追加 `custom` 兜底，

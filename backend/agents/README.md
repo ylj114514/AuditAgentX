@@ -15,7 +15,7 @@
 | **ExploitAgent** | `exploit_agent.py` | 生成漏洞利用代码、触发位置、利用路径、验证方法 |
 | **DynamicAnalysisAgent** | `dynamic_analysis_agent.py` | 动态验证调度：识别启动方式 + 提取端点 + 策略映射，委托 HTTP/Harness 验证器执行（`plan()` 可单独展示决策；`run()` 委托 ExploitPipeline） |
 | **HarnessVerifier** | `../verifier/harness_verifier.py` | DeepAudit 式 Fuzzing Harness 动态验证 |
-| **ReportAgent / SummaryAgent** | `report_agent.py` | 结构化报告与执行摘要 |
+| **SummaryAgent** | `summary_agent.py` | 结构化报告与执行摘要，并经 RAG 检索标准修复建议（`_retrieve_remediation()`） |
 | `verification_tools.py` | — | VerifyAgent 的本地工具实现（读码上下文、启发式复核、SAST 重放） |
 
 ## 工作流（对应用户设计的四段式）

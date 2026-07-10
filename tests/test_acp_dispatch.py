@@ -65,13 +65,13 @@ def test_invalid_message_rejected():
 # ---------------------------------------------------------------------------
 
 def test_message_types_endpoint_lists_new_types():
-    """message-types 端点必须声明全部 7 种请求类型。"""
+    """message-types 端点必须声明全部 6 种请求类型。"""
     body = client.get("/api/acp/message-types").json()
     supported = body["supported_request_types"]
     assert supported == ACPDispatcher().supported_request_types()
     for t in ("parse.request", "static_scan.request", "audit.request",
               "verify.request", "exploit.generate.request",
-              "dynamic.verify.request", "report.request"):
+              "dynamic.verify.request"):
         assert t in supported, f"{t} 未在 supported_request_types 中"
 
 

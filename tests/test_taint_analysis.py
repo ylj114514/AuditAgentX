@@ -131,7 +131,7 @@ def test_interproc_cross_function_taint():
 
 def test_java_function_level_taint():
     """Java 函数级污点(javalang)：源在顶部、经中间变量拼接到底部 sink（正则窗口够不着）应检出；
-    安全用例用 `bar = 三元 ? 常量 : param` 打断污点，不应误报。"""
+    三元表达式任一可达分支含污点时都必须保留污点。"""
     from backend.scanners.java_taint import analyze_java, available
     if not available():
         import pytest
@@ -150,8 +150,8 @@ def test_java_function_level_taint():
     assert any(f.type == "SQL Injection" for f in r), "Java 函数级多跳 SQLi 漏检"
     assert r[0].extra["analysis"] == "java-taint"
 
-    # 三元打断污点：bar 取字面量分支，param 分支视为断链 -> 不报
-    safe = (
+    # 一支常量、一支污点仍然可走到污点分支，必须报告。
+    mixed = (
         "public class T {\n"
         "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
         "    String param = request.getParameter(\"id\");\n"
@@ -160,8 +160,8 @@ def test_java_function_level_taint():
         "    conn.createStatement().executeQuery(sql);\n"
         "  }\n"
         "}\n")
-    assert not any(f.type == "SQL Injection" for f in analyze_java("T.java", safe)), \
-        "三元打断污点的安全用例不应误报"
+    assert any(f.type == "SQL Injection" for f in analyze_java("T.java", mixed)), \
+        "三元表达式的污点分支真实可达，不应漏报"
 
 
 def test_java_weak_crypto_hash_random_literal():

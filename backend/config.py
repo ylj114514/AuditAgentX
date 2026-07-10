@@ -48,13 +48,22 @@ class Settings(BaseSettings):
     enable_semgrep: bool = True
     enable_bandit: bool = True
     enable_gitleaks: bool = True
-    enable_trivy: bool = False
 
     # ---- 沙箱 ----
     enable_sandbox: bool = False
     # docker_host 留空则用 docker.from_env() 自动适配平台（Windows npipe / Linux socket）
     docker_host: str = ""
     sandbox_timeout: int = 60
+
+    # ---- Docker 引擎自启（项目启动时确保 Docker 可用）----
+    # 后端启动时若检测到 Docker 引擎未就绪，自动拉起 Docker Desktop 并等待就绪，
+    # 避免动态验证因“Docker 没开”而整批失败。设为 False 可关闭。
+    docker_autostart: bool = True
+    # Docker Desktop 可执行文件路径；留空则按平台探测常见安装位置。
+    docker_desktop_path: str = ""
+    # 等待引擎就绪的最长秒数与轮询间隔。
+    docker_start_timeout: int = 120
+    docker_poll_interval: int = 3
 
     # ---- Fuzzing Harness 动态验证 ----
     harness_timeout: int = 8            # 单次 Harness 执行超时（秒）
@@ -63,6 +72,18 @@ class Settings(BaseSettings):
     # Docker-first 安全策略：LLM 生成的 Harness 必须在 Docker 沙箱执行；
     # Docker 不可用时返回 sandbox_failed 而非本地跑 LLM 代码（模板不受此限）。
     harness_require_docker: bool = True
+    # 固定沙箱镜像（DeepAudit 式）：预装常见框架依赖，供 scaffold import 项目真实模块。
+    # 留空则用 python:3.11-slim（无第三方依赖的函数仍可跑）。
+    # 构建：docker build -t auditagentx-sandbox:latest docker/sandbox
+    harness_sandbox_image: str = ""
+
+    # ---- 动态验证安全边界 ----
+    # 默认只允许 HTTP 动态验证访问 localhost/127.0.0.1，避免误打真实第三方或内网目标。
+    allow_external_dynamic_targets: bool = False
+    # 本机子进程启动不可信项目风险高，默认关闭；Deep 模式默认走 docker_project。
+    enable_local_dynamic_runner: bool = False
+    # CORS 默认限制到常见本地前端端口；如需公网部署请显式配置。
+    cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
 
     # ---- 服务 ----
     app_host: str = "0.0.0.0"

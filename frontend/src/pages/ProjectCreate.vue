@@ -77,10 +77,17 @@
               <el-input-number
                 v-model="verifyBudget.max_verify_candidates"
                 :min="1"
-                :max="500"
+                :max="100000"
                 :step="10"
+                :disabled="verifyBudget.unlimited_verify"
                 controls-position="right"
               />
+              <el-checkbox v-model="verifyBudget.unlimited_verify" style="margin-left: 12px;">
+                不限（复核全部候选）
+              </el-checkbox>
+              <div v-if="verifyBudget.unlimited_verify" class="hint-text">
+                将对全部候选逐条调用 VerifyAgent 复核——大项目会显著更慢、更耗 LLM token。
+              </div>
             </el-form-item>
             <el-form-item label="Verify 并发 max_verify_workers">
               <el-input-number
@@ -99,47 +106,43 @@
           type="warning"
           show-icon
           :closable="false"
-          title="Deep 模式将在 Docker 沙箱中尝试启动 GitHub 项目，只对本地容器服务执行授权动态验证，不会攻击真实第三方系统。"
+          title="Deep 模式会自动识别项目 Docker/Compose 或 Web 启动方式；能启动时验证真实本地服务，不能启动时回退到目标函数 Harness。无需填写固定端口或 base_url。"
           class="notice"
         />
 
         <el-form v-if="scanMode === 'deep'" :model="deep" label-position="top" class="dynamic-form">
-          <el-form-item label="动态验证目标">
-            <el-segmented v-model="deep.target_mode" :options="targetModeOptions" />
+          <el-form-item>
+            <el-checkbox v-model="deep.trust_project_container_config">
+              允许直接使用项目自带 Dockerfile（可选）
+            </el-checkbox>
+            <p class="deep-hint">默认由系统自动识别并生成受限启动方案。Compose 始终先经过安全策略检查；只有你勾选此项，才会直接执行项目自己的 Dockerfile。</p>
           </el-form-item>
 
-          <!-- 已运行靶场：直接指定 base_url，跳过构建，最快最可靠 -->
-          <template v-if="deep.target_mode === 'url'">
-            <p class="deep-hint">直接对一个你已手动启动的授权靶场做动态验证，后端不再构建 Docker，速度最快。</p>
-            <el-form-item label="靶场地址 base_url">
-              <el-input v-model="deep.base_url" placeholder="http://127.0.0.1:8080" />
-            </el-form-item>
-            <el-form-item label="端点 endpoints（逗号分隔，可选）">
-              <el-input v-model="deep.endpoints" placeholder="/user,/search,/ping" />
-            </el-form-item>
-          </template>
-
-          <!-- 自动构建：由沙箱构建并启动项目，高级项留空则自动推断 -->
-          <template v-else>
-            <p class="deep-hint">留空则后端 launch_detector 自动推断启动方式；识别不到时可在此手动指定。检测到 docker-compose 会自动多服务编排。</p>
-            <el-form-item label="安装命令 install_command">
-              <el-input v-model="deep.install_command" placeholder="pip install -r requirements.txt" />
-            </el-form-item>
-            <el-form-item label="启动命令 run_command">
-              <el-input v-model="deep.run_command" placeholder="python app.py" />
-            </el-form-item>
-            <div class="deep-inline">
-              <el-form-item label="端口 port">
-                <el-input v-model="deep.port" placeholder="5000" />
+          <el-collapse v-model="advancedOpen" class="advanced-collapse">
+            <el-collapse-item name="override">
+              <template #title>
+                <span class="advanced-title">高级覆盖（仅自动识别失败时使用）</span>
+              </template>
+              <p class="deep-hint">
+                仅在自动识别启动方式失败时才需填写。留空即由系统自动识别 install / run 命令与端口；
+                任意填写项会合并进 launch_plan 覆盖自动识别结果。
+              </p>
+              <el-form-item label="安装命令 install_command">
+                <el-input v-model="deep.override.install_command" placeholder="例如 pip install -r requirements.txt（留空自动识别）" />
               </el-form-item>
-              <el-form-item label="健康检查路径">
-                <el-input v-model="deep.health_path" placeholder="/" />
+              <el-form-item label="启动命令 run_command">
+                <el-input v-model="deep.override.run_command" placeholder="例如 python app.py（留空自动识别）" />
               </el-form-item>
-            </div>
-            <el-form-item label="环境变量 env（每行 KEY=VALUE）">
-              <el-input v-model="deep.env" type="textarea" :rows="2" placeholder="DEBUG=1" />
-            </el-form-item>
-          </template>
+              <div class="override-inline">
+                <el-form-item label="服务端口 port">
+                  <el-input v-model="deep.override.port" placeholder="例如 8000（留空自动识别）" />
+                </el-form-item>
+                <el-form-item label="工作目录 working_dir">
+                  <el-input v-model="deep.override.working_dir" placeholder="例如 . 或 src（留空为仓库根）" />
+                </el-form-item>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </el-form>
 
         <el-button type="primary" size="large" :loading="submitting" class="submit-btn" @click="submit">
@@ -168,11 +171,6 @@ const sourceOptions = [
   { label: "本地目录", value: "local" },
 ];
 
-const targetModeOptions = [
-  { label: "自动构建 Docker 沙箱", value: "build" },
-  { label: "已运行靶场 URL", value: "url" },
-];
-
 const form = reactive({
   name: "maccms10",
   source_type: "git",
@@ -186,14 +184,30 @@ const scanMode = ref<"quick" | "standard" | "deep">("standard");
 const verifyBudget = reactive({
   max_verify_candidates: 50,
   max_verify_workers: 4,
+  unlimited_verify: false,   // 勾选后提交 0 = 后端不设上限，复核全部候选
 });
-// Deep 模式可选高级配置（留空则由后端 launch_detector 自动推断）
-// target_mode: build=自动在 Docker 沙箱构建并启动项目；url=直接指定一个已运行的授权靶场
+const advancedOpen = ref<string[]>([]); // 默认折叠「高级覆盖」，避免误导用户以为必填
 const deep = reactive({
-  target_mode: "build" as "build" | "url",
-  install_command: "", run_command: "", port: "", health_path: "/", env: "",
-  base_url: "", endpoints: "",
+  trust_project_container_config: false,
+  override: {
+    install_command: "",
+    run_command: "",
+    port: "",
+    working_dir: "",
+  },
 });
+
+// 只把用户真正填写的覆盖项合并进 launch_plan；空串一律不发，保持后端自动识别。
+function buildLaunchPlanOverride(): Record<string, any> {
+  const o = deep.override;
+  const plan: Record<string, any> = {};
+  if (o.install_command.trim()) plan.install_command = o.install_command.trim();
+  if (o.run_command.trim()) plan.run_command = o.run_command.trim();
+  if (o.working_dir.trim()) plan.working_dir = o.working_dir.trim();
+  const portNum = Number(o.port);
+  if (o.port.trim() && Number.isFinite(portNum) && portNum > 0) plan.port = portNum;
+  return plan;
+}
 
 function pickDirectory() {
   directoryInput.value?.click();
@@ -241,40 +255,25 @@ async function submit() {
       const { data } = await ProjectApi.create(payload);
       proj = data;
     }
-    // Deep 模式：组装动态验证目标（url 模式指定已运行靶场，或 docker_project 自动构建）
+    // Deep 模式固定使用项目 Docker 沙箱：后端负责识别启动方式和实际映射端口。
     const options: any = { enable_poc: false };
     if (scanMode.value !== "quick") {
-      options.max_verify_candidates = verifyBudget.max_verify_candidates;
+      // 不限 -> 送 0：后端 _verify_candidate_limit 把 <=0 视为「复核全部候选」
+      options.max_verify_candidates = verifyBudget.unlimited_verify
+        ? 0
+        : verifyBudget.max_verify_candidates;
       options.max_verify_workers = verifyBudget.max_verify_workers;
     }
     if (scanMode.value === "deep") {
-      if (deep.target_mode === "url") {
-        if (!deep.base_url.trim()) {
-          ElMessage.warning("已选择「已运行靶场 URL」，请填写 base_url");
-          submitting.value = false;
-          return;
-        }
-        const endpoints = deep.endpoints.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-        options.dynamic_target = {
-          mode: "url",
-          base_url: deep.base_url.trim(),
-          ...(endpoints.length ? { endpoints } : {}),
-        };
-      } else {
-        const launchPlan: any = {};
-        if (deep.install_command.trim()) launchPlan.install_command = deep.install_command.trim();
-        if (deep.run_command.trim()) launchPlan.run_command = deep.run_command.trim();
-        if (deep.port.trim()) launchPlan.port = Number(deep.port.trim());
-        if (deep.health_path.trim()) launchPlan.health_path = deep.health_path.trim();
-        const env: Record<string, string> = {};
-        deep.env.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).forEach((kv) => {
-          const i = kv.indexOf("="); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1);
-        });
-        options.dynamic_target = {
-          mode: "docker_project",
-          ...(Object.keys(launchPlan).length ? { launch_plan: launchPlan } : {}),
-          ...(Object.keys(env).length ? { env } : {}),
-        };
+      options.dynamic_target = {
+        mode: "docker_project",
+        auto_start_docker: true,
+        trust_project_container_config: deep.trust_project_container_config,
+      };
+      const launchOverride = buildLaunchPlanOverride();
+      if (Object.keys(launchOverride).length > 0) {
+        // 后端 pipeline 会把 launch_plan 覆盖项合并进自动识别结果
+        options.dynamic_target.launch_plan = launchOverride;
       }
     }
 
@@ -337,6 +336,10 @@ async function submit() {
 .verify-budget-form { margin-top: 14px; }
 .verify-budget-form :deep(.el-input-number) { width: 100%; }
 .dynamic-form { margin-top: 14px; }
+.advanced-collapse { margin-top: 6px; border-top: 1px dashed #e4ebf3; }
+.advanced-title { color: #475467; font-weight: 700; }
+.override-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 720px) { .override-inline { grid-template-columns: 1fr; } }
 .submit-btn { width: 100%; margin-top: 18px; }
 @media (max-width: 980px) { .create-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .page-title-row { align-items: flex-start; flex-direction: column; } }

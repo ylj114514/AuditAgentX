@@ -14,9 +14,7 @@ AGENTS = [
     {"name": "ExploitAgent", "role": "为已确认漏洞生成授权 PoC、触发位置、利用路径和验证方法"},
     {"name": "DynamicAnalysisAgent", "role": "动态分析调度：识别项目启动方式、提取攻击面端点、按漏洞类型选择动态策略，委托 HTTP/Harness 验证器执行并汇总运行时证据"},
     {"name": "HarnessVerifier", "role": "DeepAudit 式 Fuzzing Harness 动态验证：生成 mock 验证脚本、沙箱执行、自我修正，动态确认漏洞可利用性"},
-    {"name": "PocAgent", "role": "生成本地沙箱 PoC 验证方案"},
-    {"name": "SummaryAgent", "role": "汇总项目概况、静态/动态验证结果和证据链，生成执行摘要与修改建议"},
-    {"name": "ReportAgent", "role": "负责结构化报告渲染与导出"},
+    {"name": "SummaryAgent", "role": "汇总项目概况、静态/动态验证结果和证据链，生成执行摘要与修改建议，并经 RAG 检索标准修复建议"},
 ]
 
 

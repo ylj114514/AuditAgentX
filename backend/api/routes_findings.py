@@ -15,6 +15,9 @@ from backend.verifier.dynamic_verifier import DynamicVerifier
 from backend.verifier.evidence_collector import EvidenceCollector
 from backend.verifier import exploit_templates as tpl
 from backend.verifier import app_runner
+from backend.verifier.context_classifier import classify_finding_context
+from backend.dynamic.target_guard import validate_dynamic_base_url
+from backend.config import settings
 from contextlib import nullcontext
 
 router = APIRouter(prefix="/api/findings", tags=["findings"])
@@ -67,8 +70,10 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
     finding_dict = {
         "type": f.type, "file": f.file_path,
         "start_line": f.start_line, "line": f.start_line,
+        "severity": f.severity, "status": f.status,
         "code_snippet": f.code_snippet, "_verify": verify_context,
     }
+    context = classify_finding_context(finding_dict)
 
     # 1) 生成利用方案
     exploit = ExploitAgent(scan_id=f.scan_id).run(finding_dict)
@@ -84,6 +89,8 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
             if base_url and exploit.get("payloads"):
                 dr = verifier.verify(base_url, exploit, payload.endpoints or endpoints)
                 dyn = dr.__dict__
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         dyn = {"skipped": True, "reason": f"动态验证失败: {e}", "reproducible": False}
 
@@ -95,7 +102,18 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
             runtime_status = "dynamic_confirmed" if dyn.get("reproducible") else "not_reproduced"
         verify_context["dynamic_verdict"] = runtime_status
         if dyn.get("reproducible"):
-            verify_context["final_verdict"] = "dynamic_confirmed"
+            if context.get("allow_confirmed", True):
+                verify_context["final_verdict"] = "dynamic_confirmed"
+            else:
+                dyn["blocked_reproducible"] = True
+                dyn["reproducible"] = False
+                dyn["verified"] = False
+                dyn["reproduction_status"] = "dynamic_confirmed_blocked_by_context"
+                dyn.setdefault("logs", []).append("动态复现被上下文降级阻断，不能自动升级 confirmed")
+                verify_context["dynamic_verdict"] = "dynamic_confirmed_blocked_by_context"
+                verify_context["final_verdict"] = "needs_review"
+                verify_context["downgrade_reason"] = context.get("reason")
+                verify_context["confirmed_blockers"] = context.get("confirmed_blockers") or []
 
     evidence = EvidenceCollector.build(verify_context,
                                        exploit=exploit, dynamic=dyn)
@@ -119,7 +137,7 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
         logs=json.dumps(evidence.get("logs"), ensure_ascii=False, default=str),
     ))
     reproducible = bool(dyn and dyn.get("reproducible"))
-    if reproducible:
+    if reproducible and context.get("allow_confirmed", True):
         f.verified = True
         f.status = "confirmed"
         f.confidence = max(f.confidence or 0.0, 0.98)
@@ -139,9 +157,15 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
 def _resolve_verify_target(payload: VerifyRequest):
     """根据 VerifyRequest 解析动态验证目标（上下文管理器）。"""
     if payload.mode == "url" and payload.base_url:
-        return nullcontext((payload.base_url, payload.endpoints))
+        try:
+            base_url = validate_dynamic_base_url(payload.base_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return nullcontext((base_url, payload.endpoints))
     dt = payload.dynamic_target or {}
     if payload.mode == "local" and dt.get("command"):
+        if not settings.enable_local_dynamic_runner:
+            raise HTTPException(400, "local dynamic runner is disabled; use docker/url localhost target")
         return _wrap(app_runner.LocalAppRunner(dt["command"], dt.get("cwd", "."),
                                                env=dt.get("env")), payload.endpoints)
     if payload.mode == "docker" and dt.get("image"):

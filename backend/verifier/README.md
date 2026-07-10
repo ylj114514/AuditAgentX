@@ -38,7 +38,6 @@ GitHub URL → clone → launch_detector 生成 launch_plan
 **安全边界**：仅本地 Docker 沙箱/授权目标；容器限内存、扫描后销毁。
 Docker 失败时如实标记 `sandbox_start_failed` / `health_check_failed` / `dependency_install_failed`，
 **绝不造假复现结果**；静态类漏洞（硬编码密钥等）标记 `not_runtime_verifiable`。
-| `poc_runner.py` | PoC 生成 + 沙箱执行调度 |
 | `evidence_collector.py` | **证据链汇总**：source→sink→call_path→exploit→runtime→harness |
 | `pipeline.py` | `ExploitPipeline`：把利用生成 + HTTP 动态 + Harness 动态 + 证据链一体化装配 |
 

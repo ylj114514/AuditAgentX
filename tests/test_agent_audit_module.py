@@ -35,13 +35,14 @@ def test_verify_agent_confirms_unsafe_sql_with_local_tools(monkeypatch, tmp_path
     }, code_root=tmp_path)
 
     assert result["is_valid"] is True
-    assert result["source"]
-    assert result["sink"]
+    assert result["needs_review"] is True
+    assert not result.get("source")
+    assert not result.get("sink")
     assert result["_tool_evidence"]["code_context"]["found"] is True
-    assert result["_tool_evidence"]["heuristic_result"]["is_valid"] is True
+    assert result["_tool_evidence"]["heuristic_result"]["is_valid"] is None
     assert "read_code_context" in {tool["name"] for tool in result["_tool_evidence"]["tools_used"]}
     assert "run_sast_replay" in {tool["name"] for tool in result["tool_calls"]}
-    assert result["call_path"]
+    assert result.get("call_path") is not None
     assert result["evidence_chain"]["sast_replay"]["matched_rules"]
     assert result["_tool_evidence"]["architecture"] == "MCP+Skill"
     assert result["_tool_evidence"]["skill"]["name"] == "vulnerability-verification"
@@ -74,8 +75,9 @@ def test_mcp_server_exposes_verification_tools(tmp_path: Path):
     assert "retrieve_remediation_advice" in calls
     assert context["knowledge_result"]["top_result"]["cwe_id"] == "CWE-89"
     assert context["code_context"]["found"] is True
-    assert context["heuristic_result"]["is_valid"] is True
-    assert context["evidence_chain"]["call_path"]
+    assert context["heuristic_result"]["is_valid"] is None
+    assert "attacker-controlled source" in context["heuristic_result"]["reason"]
+    assert isinstance(context["evidence_chain"]["call_path"], list)
 
 
 def test_vulnerability_verification_skill_declares_required_tools():

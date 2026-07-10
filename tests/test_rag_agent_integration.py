@@ -1,6 +1,6 @@
-"""RAG 接入 AuditAgent / ReportAgent + 知识库全覆盖测试（离线，不触发 LLM）。"""
+"""RAG 接入 AuditAgent / SummaryAgent + 知识库全覆盖测试（离线，不触发 LLM）。"""
 from backend.agents.audit_agent import AuditAgent
-from backend.agents.report_agent import ReportAgent
+from backend.agents.summary_agent import SummaryAgent
 from backend.scanners.base import RawFinding
 from backend.rag.retriever import SecurityKnowledgeRetriever, load_default_items
 from backend.dynamic.strategy import STRATEGY_RULES
@@ -54,8 +54,8 @@ def test_audit_agent_dedups_and_caps():
     assert len(knowledge) == 1  # 同类型去重
 
 
-def test_report_agent_retrieves_remediation():
-    rem = ReportAgent._retrieve_remediation({
+def test_summary_agent_retrieves_remediation():
+    rem = SummaryAgent._retrieve_remediation({
         "top_vulnerability_types": [{"type": "SQL Injection"}, {"type": "Hardcoded Secret"}]})
     by_type = {r["for_type"]: r for r in rem}
     assert "SQL Injection" in by_type

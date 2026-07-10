@@ -139,6 +139,8 @@ class CustomRuleScanner(BaseScanner):
 
     def _evaluate(self, rel, lines, idx, line, vuln_type, base_sev, require_source):
         """对一个 sink 命中做污点评估，返回 RawFinding 或 None（判为噪音时）。"""
+        if vuln_type == "XSS" and self._is_non_web_echo(rel, line):
+            return None
         # 硬编码密钥：占位值直接跳过（降误报）
         if vuln_type == "Hardcoded Secret" and tr.PLACEHOLDER.search(line):
             return None
@@ -208,6 +210,14 @@ class CustomRuleScanner(BaseScanner):
             if tr.has_injection_marker(lines[off]):
                 return off + 1
         return None
+
+    @staticmethod
+    def _is_non_web_echo(rel: str, line: str) -> bool:
+        suffix = Path(rel).suffix.lower()
+        if suffix in {".php", ".phtml", ".html", ".htm", ".jsx", ".tsx", ".vue", ".erb"}:
+            return False
+        lowered = line.lower()
+        return any(token in lowered for token in ("echo ", "printf(", "logger ", "cat "))
 
     @staticmethod
     def _make(rel, idx, line, vuln_type, sev, *, confidence, source_line,

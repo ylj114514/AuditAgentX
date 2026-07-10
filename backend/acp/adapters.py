@@ -114,6 +114,14 @@ def legacy_finding_to_acp(f: dict[str, Any]) -> dict[str, Any]:
     旧字段：type, severity, file, start_line, line, end_line,
             code_snippet, confidence, source, status, message, detail
     """
+    extra = {
+        k: v for k, v in f.items()
+        if k not in (
+            "type", "severity", "file", "file_path", "start_line", "line",
+            "end_line", "code_snippet", "source", "message", "extra",
+        )
+    }
+    extra.update(f.get("extra") or {})
     finding = ACPFinding(
         finding_id=f.get("finding_id") or str(uuid.uuid4()),
         type=f.get("type"),
@@ -127,16 +135,10 @@ def legacy_finding_to_acp(f: dict[str, Any]) -> dict[str, Any]:
         source={
             "agent": f.get("source", ""),
             "tool": f.get("source", ""),
-            "rule_id": "",
+            "rule_id": f.get("rule_id", ""),
         },
         description=f.get("message", ""),
-        extra={
-            k: v for k, v in f.items()
-            if k not in (
-                "type", "severity", "file", "file_path", "start_line", "line",
-                "end_line", "code_snippet", "source", "message",
-            )
-        },
+        extra=extra,
     )
     return finding.model_dump()
 

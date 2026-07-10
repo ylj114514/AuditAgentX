@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.scanners.registry import run_scanners
+from backend.scanners.registry import run_scanners_detailed
 from backend.scanners.base import RawFinding
 
 
@@ -16,6 +16,7 @@ class StaticScanAgent:
 
     def __init__(self) -> None:
         self.tool_calls: list[dict] = []
+        self.scanner_status: list[dict] = []
         # 加载 static-scanning Skill（声明扫描工具工作流，统一 Agent×Skill 结构）
         try:
             from backend.skills.loader import load_skill
@@ -25,15 +26,18 @@ class StaticScanAgent:
 
     def run(self, code_root: Path, enabled_tools: list[str]) -> list[RawFinding]:
         tools = list(dict.fromkeys(enabled_tools + ["custom"]))
+        findings, self.scanner_status = run_scanners_detailed(code_root, enabled_tools)
+        status_by_tool = {item.get("tool"): item for item in self.scanner_status}
         self.tool_calls = [
             {
                 "tool": tool,
                 "purpose": _tool_purpose(tool),
                 "target": str(code_root),
+                "status": status_by_tool.get(tool) or {},
             }
             for tool in tools
         ]
-        return run_scanners(code_root, enabled_tools)
+        return findings
 
     def run_acp(self, request: "ACPMessage") -> "ACPMessage":  # noqa: F821
         """ACP 接口：static_scan.request → static_scan.result。
@@ -59,8 +63,11 @@ class StaticScanAgent:
         raw = self.run(Path(code_root_str), enabled_tools)
         acp_findings = [raw_finding_to_acp(rf) for rf in raw]
         raw_findings = [rf.to_dict() for rf in raw]
-        tool_calls = [ACPToolCall(tool_name=tc["tool"], input={"target": tc["target"]},
-                                  output={"purpose": tc["purpose"]}) for tc in self.tool_calls]
+        tool_calls = [ACPToolCall(
+            tool_name=tc["tool"], input={"target": tc["target"]},
+            output={"purpose": tc["purpose"], "status": tc.get("status") or {}},
+            success=bool((tc.get("status") or {}).get("success")),
+        ) for tc in self.tool_calls]
         return make_reply(
             request, sender=self.name,
             message_type=ACPMessageType.STATIC_SCAN_RESULT,
@@ -70,6 +77,7 @@ class StaticScanAgent:
                 "raw_findings": raw_findings,
                 # 兼容既有测试/调用方，第一阶段不强制删除旧字段。
                 "_raw": raw_findings,
+                "scanner_status": self.scanner_status,
             },
             tools=tool_calls,
             state=ACPState.SUCCESS,
@@ -81,6 +89,5 @@ def _tool_purpose(tool: str) -> str:
         "semgrep": "SAST rule scanning for injection, traversal, XSS, and framework risks.",
         "bandit": "Python security linting.",
         "gitleaks": "Secret and credential leakage detection.",
-        "trivy": "Dependency, container, and configuration vulnerability scanning.",
         "custom": "Built-in offline rules for SQL injection, command injection, path traversal, and hardcoded secrets.",
     }.get(tool, "External or custom static analysis tool.")

@@ -32,7 +32,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[item.strip() for item in settings.cors_allow_origins.split(",") if item.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -46,10 +46,25 @@ app.include_router(routes_analytics.router)
 app.include_router(routes_acp.router)
 
 
+def _bootstrap_docker() -> None:
+    """后台线程：确保 Docker 引擎在线，供动态验证使用。失败不影响后端运行。"""
+    try:
+        from backend.dynamic.docker_bootstrap import ensure_docker_running
+        result = ensure_docker_running()
+        logging.getLogger(__name__).info("Docker 自启结果：%s", result)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("Docker 自启过程异常（已忽略，不影响后端）。")
+
+
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
     logging.getLogger(__name__).info("AuditAgentX 已启动，数据库初始化完成。")
+    # 项目启动即在后台预热 Docker 引擎（引擎冷启动较慢，用独立线程避免阻塞服务就绪）。
+    if settings.docker_autostart:
+        import threading
+        threading.Thread(target=_bootstrap_docker, name="docker-bootstrap",
+                         daemon=True).start()
 
 
 @app.get("/")

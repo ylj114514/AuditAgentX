@@ -46,3 +46,21 @@ tmp/
 # Runtime logs
 logs/
 *.log
+
+# Tokens / keys / proxy configs（除 .env 外的敏感文件，绝不提交）
+*_token
+*.token
+*.pem
+*.key
+.netrc
+.npmrc
+proxychains.conf
+proxy.conf
+
+# Docker / harness 运行时产物
+docker/**/*.log
+*harness*.tmp
+
+# 说明：顶层 reports/ 为有意提交的实验产物（已被 git 跟踪），此处不做 blanket ignore
+# 以免与已跟踪文件冲突；镜像层面由 .dockerignore 排除 reports/。若今后希望新的
+# 运行时报告不进版本库，再按需在此追加具体子目录规则。

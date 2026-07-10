@@ -114,10 +114,10 @@ def test_verify_agent_run_acp_returns_verify_result(monkeypatch, tmp_path: Path)
     assert reply.header.in_reply_to == req.header.message_id
     assert "verification" in reply.payload
     vinfo = reply.payload["verification"]
-    assert vinfo["static_verdict"] in ("confirmed", "false_positive", "uncertain")
+    assert vinfo["static_verdict"] in ("confirmed", "false_positive", "uncertain", "needs_review")
     assert "dynamic_verdict" in vinfo
     assert "final_verdict" in vinfo
-    assert vinfo["final_verdict"] == "statically_verified"
+    assert vinfo["final_verdict"] in ("statically_verified", "needs_review")
     assert "source" in vinfo
     assert "call_path" in vinfo
     assert reply.status.confidence is not None
@@ -403,7 +403,7 @@ def test_dynamic_http_verify_mcp_tool_with_fake_probe_confirmed(monkeypatch):
             "payloads": ["1' OR '1'='1"],
             "success_indicators": ["SQL syntax"],
         },
-        "base_url": "http://fake-target.local",
+        "base_url": "http://127.0.0.1:8765",
         "endpoints": ["/user"],
     })["structuredContent"]
 
@@ -540,6 +540,22 @@ def test_acp_tracer_summary(tmp_path):
     # 因此用 any() 匹配 value 字符串
     assert any("scan" in t.lower() or "start" in t.lower() for t in types)
     assert any("verify" in t.lower() for t in types)
+
+
+def test_acp_tracer_load_by_type_accepts_enum_value(tmp_path):
+    """动态阶段通过 Enum 序列化后，按协议 value 仍能被可靠筛选。"""
+    tracer = ACPTracer(scan_id="trace-progress")
+    tracer.base_dir = tmp_path / "agent_messages"
+    tracer.save(make_message(
+        sender="dynamic_analysis_agent", receiver="orchestrator_agent",
+        message_type=ACPMessageType.DYNAMIC_PROGRESS,
+        context=ACPContext(scan_id="trace-progress"),
+        payload={"progress": {"phase": "http_verification", "completed": 1, "total": 2}},
+    ))
+
+    progress = tracer.load_by_type("dynamic.progress")
+    assert len(progress) == 1
+    assert progress[0].payload["progress"]["phase"] == "http_verification"
 
 
 # ---------------------------------------------------------------------------

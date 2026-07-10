@@ -32,7 +32,6 @@ class ACPDispatcher:
             ACPMessageType.VERIFY_REQUEST.value,
             ACPMessageType.EXPLOIT_GENERATE_REQUEST.value,
             ACPMessageType.DYNAMIC_VERIFY_REQUEST.value,
-            ACPMessageType.REPORT_REQUEST.value,
         ]
 
     def dispatch(self, request: ACPMessage) -> ACPMessage:
@@ -60,9 +59,6 @@ class ACPDispatcher:
             if mtype_val == ACPMessageType.DYNAMIC_VERIFY_REQUEST.value:
                 from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
                 return DynamicAnalysisAgent(scan_id=self.scan_id).run_acp(request)
-            if mtype_val == ACPMessageType.REPORT_REQUEST.value:
-                from backend.agents.report_agent import ReportAgent
-                return ReportAgent(scan_id=self.scan_id).run_acp(request)
         except Exception as exc:  # noqa: BLE001
             logger.exception("ACP dispatch 处理 %s 失败: %s", mtype_val, exc)
             return make_reply(

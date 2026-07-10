@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import Project, Scan, Finding
 
-SEVERITY_KEYS = ["critical", "high", "medium", "low"]
+SEVERITY_KEYS = ["critical", "high", "medium", "low", "info"]
 
 
 def _empty_severity() -> dict:
@@ -96,6 +96,6 @@ def project_comparison(db: Session) -> list[dict]:
 
 
 def _risk_score(dist: dict) -> int:
-    """简单加权风险分：critical×10 + high×5 + medium×2 + low×1。"""
+    """简单加权风险分：critical×10 + high×5 + medium×2 + low×1；info 不计风险分。"""
     return (dist.get("critical", 0) * 10 + dist.get("high", 0) * 5
             + dist.get("medium", 0) * 2 + dist.get("low", 0))

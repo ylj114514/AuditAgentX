@@ -18,6 +18,26 @@ from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
 from backend.agents.orchestrator_agent import OrchestratorAgent
 from backend.verifier.pipeline import ExploitPipeline
 
+
+def test_dynamic_selection_respects_context_blocker():
+    findings = [{
+        "type": "OS Command Injection",
+        "file": ".github/workflows/build.yml",
+        "start_line": 10,
+        "status": "needs_review",
+        "severity": "high",
+        "dynamic_applicable": False,
+    }]
+    assert ExploitPipeline._select_candidates(findings, 20) == []
+
+
+def test_dynamic_budget_caps_confirmed_and_review_together():
+    findings = [
+        {"type": "SQL Injection", "status": "confirmed", "severity": "high"}
+        for _ in range(4)
+    ]
+    assert len(ExploitPipeline._select_candidates(findings, 2)) == 2
+
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "vulnerable_projects" / "demo_flask_app"
 
 
@@ -85,7 +105,10 @@ def test_assemble_target_harness_upgrades_needs_review():
     pipe = _pipeline()
     f = {"type": "Command Injection", "status": "needs_review", "confidence": 0.5}
     harness = {"verdict": "target_confirmed", "dynamically_triggered": True,
-               "trigger_detail": "os.system 被攻击输入触发"}
+               "trigger_detail": "os.system 被攻击输入触发",
+               "function_extracted": True, "target_function_called": True,
+               "verification_level": "entrypoint_reproduced", "entrypoint_reachable": True,
+               "harness_source": "scaffold"}
     pipe._assemble(f, {}, None, harness, None)
 
     assert f["status"] == "confirmed"
@@ -110,6 +133,34 @@ def test_assemble_mechanism_confirmed_keeps_needs_review_and_caps_confidence():
     assert f["confidence"] <= 0.75                 # 机理级贡献置信度上限 0.75
     ver = f["_evidence"]["verification"]
     assert ver["dynamically_verified"] is False
+
+
+def test_assemble_mechanism_confirmed_downgrades_weak_confirmed():
+    pipe = _pipeline()
+    f = {"type": "insecure-use-strtok-fn", "status": "confirmed", "confidence": 0.9, "verified": True}
+    harness = {"verdict": "mechanism_confirmed", "dynamically_triggered": False,
+               "confidence": 0.95, "function_mechanism_verified": True}
+    pipe._assemble(f, {}, None, harness, None)
+
+    assert f["status"] == "needs_review"
+    assert f["verified"] is False
+    assert f.get("dynamically_verified") is not True
+    assert f["confidence"] <= 0.75
+    assert any("mechanism" in b.lower() for b in f["confirmed_blockers"])
+
+
+def test_assemble_unsafe_harness_blocked_clears_dynamic_confirmation():
+    pipe = _pipeline()
+    f = {"type": "Command Injection", "status": "confirmed", "confidence": 0.96, "verified": True,
+         "dynamically_verified": True}
+    harness = {"verdict": "unsafe_harness_blocked", "dynamically_triggered": False,
+               "reason": "refused to execute dangerous payload"}
+    pipe._assemble(f, {}, None, harness, None)
+
+    assert f["status"] == "needs_review"
+    assert f["verified"] is False
+    assert f["dynamically_verified"] is False
+    assert f["runtime_verification_status"] == "unsafe_harness_blocked"
 
 
 # --------------------------------------------------------------------------- #

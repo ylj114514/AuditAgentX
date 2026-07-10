@@ -18,7 +18,9 @@ from pathlib import Path
 from backend.dynamic.launch_detector import detect_launch
 from backend.dynamic.endpoint_extractor import extract_endpoints, candidate_endpoints
 from backend.dynamic.strategy import resolve_strategy, NOT_APPLICABLE
+from backend.skills.harness_tools import is_target_harness_confirmed
 from backend.verifier.pipeline import ExploitPipeline
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,7 @@ class DynamicAnalysisAgent:
     def run(self, findings: list[dict], *, code_root: Path | None = None,
             enable_exploit: bool = True, enable_dynamic: bool = False,
             enable_harness: bool = True, dynamic_target: dict | None = None,
-            max_candidates: int | None = None) -> list[dict]:
+            max_candidates: int | None = None, progress_callback=None) -> list[dict]:
         """对候选漏洞执行动态验证。返回同一 findings 列表（就地附加证据）。
 
         - 候选 = confirmed（全量）+ needs_review 中动态可验证者（受预算上限约束）。
@@ -82,7 +84,7 @@ class DynamicAnalysisAgent:
             findings, enable_exploit=enable_exploit,
             enable_dynamic=enable_dynamic, dynamic_target=dynamic_target,
             enable_harness=enable_harness, code_root=code_root,
-            max_candidates=max_candidates,
+            max_candidates=max_candidates, on_progress=progress_callback,
         )
 
     # ------------------------------------------------------------------ #
@@ -117,11 +119,13 @@ class DynamicAnalysisAgent:
         if isinstance(request.payload.get("findings"), list):
             legacy_findings = [dict(item) for item in request.payload.get("findings") or []]
             max_candidates = request.payload.get("max_dynamic_candidates") or opts.get("max_dynamic_candidates")
+            progress_callback = self._progress_recorder(request)
             results = self.run(
                 legacy_findings, code_root=code_root, enable_exploit=enable_exploit,
                 enable_dynamic=enable_dynamic, enable_harness=enable_harness,
                 dynamic_target=dynamic_target,
                 max_candidates=int(max_candidates) if max_candidates else None,
+                progress_callback=progress_callback,
             )
             summary = _dynamic_summary(results, code_root)
             verdict_enum = (ACPVerdict.DYNAMIC_CONFIRMED
@@ -204,6 +208,9 @@ class DynamicAnalysisAgent:
 
     def _auto_target(self, code_root: Path) -> dict | None:
         """根据启动识别结果构造 local 模式靶场启动配置（隔离环境使用）。"""
+        if not settings.enable_local_dynamic_runner:
+            logger.info("本机动态靶场自动启动已关闭，跳过 local auto_target")
+            return None
         launch = detect_launch(code_root)
         command = launch.get("command")
         if not command:
@@ -223,6 +230,34 @@ class DynamicAnalysisAgent:
                     launch.get("framework"), command)
         return target
 
+    def _progress_recorder(self, request):
+        """把 pipeline 的阶段进度持久化为 ACP，前端可真实显示而非猜测 88%。"""
+        from backend.acp.factory import make_message
+        from backend.acp.models import ACPMessageType, ACPState
+        from backend.acp.trace import ACPTracer
+
+        scan_id = self.scan_id or request.context.scan_id or request.header.task_id
+
+        def record(progress: dict) -> None:
+            if not scan_id:
+                return
+            message = make_message(
+                sender=self.name,
+                receiver="orchestrator_agent",
+                message_type=ACPMessageType.DYNAMIC_PROGRESS,
+                intent=f"动态验证进度：{progress.get('phase')}",
+                conversation_id=request.header.conversation_id,
+                task_id=request.header.task_id or scan_id,
+                trace_id=request.header.trace_id,
+                in_reply_to=request.header.message_id,
+                context=request.context,
+                payload={"progress": progress},
+                state=ACPState.PENDING if progress.get("phase") != "completed" else ACPState.SUCCESS,
+            )
+            ACPTracer(scan_id=scan_id).save(message)
+
+        return record
+
 
 def _derive_dynamic_verdict(runtime: dict, harness: dict) -> str:
     """由 runtime(HTTP) / harness(函数级) 的真实执行结果推导动态裁决。
@@ -231,7 +266,7 @@ def _derive_dynamic_verdict(runtime: dict, harness: dict) -> str:
       dynamic_confirmed | not_reproduced | not_executed | not_runtime_verifiable | ...
     严格以真实执行结果为准，禁止在未执行时臆造 confirmed。
     """
-    if harness.get("dynamically_triggered"):
+    if is_target_harness_confirmed(harness):
         return "harness_confirmed"
     status = runtime.get("reproduction_status")
     if status:
@@ -269,7 +304,7 @@ def _dynamic_summary(findings: list[dict], code_root: Path | None = None) -> dic
         ),
         "harness_confirmed": sum(
             1 for f in findings
-            if (f.get("_harness") or {}).get("dynamically_triggered")
+            if is_target_harness_confirmed(f.get("_harness") or {})
         ),
         "not_executed": sum(
             1 for f in findings

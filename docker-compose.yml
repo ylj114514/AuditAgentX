@@ -1,44 +1,78 @@
-# ===== AuditAgentX 本地编排 =====
-# 说明：sandbox 服务用于 PoC 隔离验证，属进阶功能，默认不随后端启动。
+# ===== AuditAgentX 平台编排 =====
+#
+# 默认起两个业务服务：backend（FastAPI）+ frontend（Vite 开发服务器）。
+#
+#   docker compose up --build backend frontend
+#
+# 安全边界（重要）：
+#   - 业务镜像默认【不挂宿主 docker socket】，不继承宿主 shell 的敏感环境变量/代理。
+#     Compose 默认不会把宿主环境注入容器；这里也不写 `environment: - HTTP_PROXY` 之类，
+#     因此宿主代理不会进入业务容器。
+#   - data / reports 走【目录挂载】持久化，不打进镜像（另见 .dockerignore）。
+#   - 需要 Deep 模式「整项目容器动态执行」时，才启用最下方注释掉的
+#     `project-executor` profile 挂载 docker socket —— 那等同把宿主 Docker 守护进程
+#     （≈宿主 root）暴露给后端容器，仅限受控环境，风险自负。
+#   - 提醒：容器内的 127.0.0.1 指向容器自身，不是宿主机。容器间互访用服务名
+#     （如 http://backend:8000），宿主访问容器用端口映射（127.0.0.1:PORT:PORT）。
 
 services:
-  safe-sqli-target:
-    build:
-      context: ./examples/vulnerable_projects/safe_sqli_target
-    container_name: auditagentx-safe-sqli-target
-    ports:
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
-
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     container_name: auditagentx-backend
+    # .env 是应用自身配置（LLM key、扫描器、沙箱开关等）；
+    # 请勿把宿主代理变量（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）写进 .env。
     env_file:
       - .env
+    environment:
+      # 容器内默认监听所有网卡，仅通过下方端口映射到宿主回环暴露。
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
     ports:
-      - "8000:8000"
+      # 仅绑定宿主回环，避免把服务暴露到局域网。
+      - "127.0.0.1:8000:8000"
     volumes:
+      # 运行数据（含 data/scans、data/reports、data/projects、data/sandbox 与 SQLite）持久化到宿主目录。
       - ./data:/app/data
-      - ./rules:/app/rules
-      # 挂载 docker.sock 以便后端调度沙箱容器（进阶功能，注意安全风险）
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # 规则只读挂载，便于本地迭代 Semgrep/自定义规则而无需重建镜像。
+      - ./rules:/app/rules:ro
+      # 默认【不挂】docker socket。仅在启用 project-executor profile 时才需要（见文件末尾）。
     restart: unless-stopped
 
-  # 前端（开发期可直接 npm run dev，此处提供生产构建示例）
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #   container_name: auditagentx-frontend
-  #   ports:
-  #     - "5173:80"
-  #   depends_on:
-  #     - backend
+  frontend:
+    # 前端无独立 Dockerfile，用官方 node 镜像跑 Vite 开发服务器（bind mount 源码）。
+    image: node:20-alpine
+    container_name: auditagentx-frontend
+    working_dir: /app
+    environment:
+      # 关键：容器内 localhost 是前端容器自己，后端要用 Compose 服务名寻址。
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./frontend:/app
+      # 匿名卷覆盖 /app/node_modules，避免宿主（Windows）node_modules 覆盖容器内依赖。
+      - /app/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
 
-  # PostgreSQL（可选，默认使用 SQLite）
+  # ---- 可选：安全 SQLi 模拟靶场（不随平台默认启动，显式指定服务名才起）----
+  safe-sqli-target:
+    build:
+      context: ./examples/vulnerable_projects/safe_sqli_target
+    container_name: auditagentx-safe-sqli-target
+    profiles: ["targets"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  # ---- 可选：PostgreSQL（默认用 SQLite，无需启用）----
   # db:
   #   image: postgres:16-alpine
+  #   profiles: ["postgres"]
   #   environment:
   #     POSTGRES_USER: auditagentx
   #     POSTGRES_PASSWORD: auditagentx
@@ -46,7 +80,22 @@ services:
   #   volumes:
   #     - pgdata:/var/lib/postgresql/data
   #   ports:
-  #     - "5432:5432"
+  #     - "127.0.0.1:5432:5432"
+
+  # ---- 可选且高风险：Deep 模式整项目容器执行器 ----
+  # 仅当需要后端调度「被测项目容器」做整项目动态验证时启用。
+  # 挂载 docker socket 等同把宿主 Docker（≈宿主 root）暴露给该容器，务必在受控环境使用。
+  # 启用方式：docker compose --profile project-executor up backend-project-executor
+  #
+  # backend-project-executor:
+  #   extends:
+  #     service: backend
+  #   container_name: auditagentx-backend-executor
+  #   profiles: ["project-executor"]
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./rules:/app/rules:ro
+  #     - /var/run/docker.sock:/var/run/docker.sock   # 高风险：宿主 Docker 控制权
 
 # volumes:
 #   pgdata:

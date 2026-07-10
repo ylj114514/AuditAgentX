@@ -19,8 +19,10 @@ class BanditScanner(BaseScanner):
         findings: list[RawFinding] = []
         try:
             data = json.loads(proc.stdout or "{}")
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("bandit did not produce valid JSON") from exc
+        if proc.returncode not in (0, 1) and not data.get("results"):
+            raise RuntimeError(f"bandit failed with exit={proc.returncode}: {(proc.stderr or '')[:300]}")
         for r in data.get("results", []):
             findings.append(RawFinding(
                 type=r.get("test_name", "bandit-finding"),

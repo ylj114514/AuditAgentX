@@ -28,7 +28,7 @@ SQL注入(89) · 命令注入(78) · 路径遍历/LFI/RFI(22) · XSS(79) · SSRF
 |---|---|---|
 | **AuditAgent** | 审计发现阶段：按命中类型检索知识作 `security_knowledge` 喂 LLM，帮更准判断"像哪类 CWE"、用误报信号降误报 | `_retrieve_knowledge()` |
 | **VerifyAgent** | 复核阶段：经 MCP 工具 `retrieve_security_knowledge` 检索，写入证据链 `knowledge` 字段 | MCP + Skill |
-| **ReportAgent** | 报告阶段：按漏洞类型检索**标准修复建议**，让报告引用 CWE/OWASP 措施而非泛泛而谈 | `_retrieve_remediation()` |
+| **SummaryAgent** | 报告阶段：按漏洞类型检索**标准修复建议**，让报告引用 CWE/OWASP 措施而非泛泛而谈 | `_retrieve_remediation()` |
 
 ## MCP 工具（对外暴露）
 

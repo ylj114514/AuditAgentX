@@ -59,7 +59,8 @@ def test_harness_verifier_uses_mcp_and_skill(monkeypatch):
     )
     names = [t["name"] for t in r.get("tool_calls", [])]
     assert "extract_target_function" in names
-    assert "run_fuzzing_harness" in names
+    # 经 MCP 沙箱工具执行：规范名 run_harness_code（run_fuzzing_harness 为其向后兼容别名）
+    assert "run_harness_code" in names or "run_fuzzing_harness" in names
     assert r["skill"]["name"] == "dynamic-exploitation"
     # 无 LLM -> 模板兜底：只证明机理，判 mechanism_confirmed（非真实可利用）
     assert r["verdict"] == "mechanism_confirmed"

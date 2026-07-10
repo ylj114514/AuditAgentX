@@ -13,6 +13,7 @@ from typing import Any
 
 from backend.agents.base_agent import BaseAgent
 from backend.config import settings
+from backend.rag.retriever import SecurityKnowledgeRetriever
 
 
 class SummaryAgent(BaseAgent):
@@ -30,6 +31,36 @@ class SummaryAgent(BaseAgent):
         if not isinstance(result, dict) or result.get("_error"):
             return fallback
         return self._normalize(result, fallback)
+
+    @staticmethod
+    def _retrieve_remediation(findings_summary: dict, *, max_types: int = 10) -> list[dict]:
+        """RAG 知识增强：按报告涉及的漏洞类型检索标准修复建议（供引用 CWE/OWASP）。
+
+        由原 ReportAgent 迁入本 canonical 汇总 Agent，统一 RAG 报告增强入口。
+        """
+        types: list[str] = []
+        for key in ("types", "top_vulnerability_types", "vuln_types"):
+            val = findings_summary.get(key)
+            if isinstance(val, list):
+                for it in val:
+                    types.append(it.get("type") if isinstance(it, dict) else str(it))
+        for f in findings_summary.get("findings", []) or []:
+            if isinstance(f, dict) and f.get("type"):
+                types.append(f["type"])
+
+        retriever = SecurityKnowledgeRetriever()
+        seen: set[str] = set()
+        out: list[dict] = []
+        for vt in types:
+            vt = (vt or "").strip()
+            if not vt or vt.lower() in seen or len(out) >= max_types:
+                continue
+            seen.add(vt.lower())
+            top = retriever.retrieve(candidate={"type": vt}).get("top_result")
+            if top and top.get("remediation"):
+                out.append({"for_type": vt, "cwe_id": top.get("cwe_id"),
+                            "owasp": top.get("owasp"), "remediation": top.get("remediation")})
+        return out
 
     def _build_context(self, project: dict, scan: dict, findings: list[dict], stats: dict) -> dict:
         static_findings = list(findings)
@@ -57,6 +88,8 @@ class SummaryAgent(BaseAgent):
             "dynamic_breakdown": dynamic_breakdown,
             "type_counts": dict(type_counts.most_common(8)),
             "source_counts": dict(source_counts.most_common(8)),
+            # RAG 知识增强：为报告涉及的漏洞类型检索标准修复建议（引用 CWE/OWASP，而非泛泛而谈）
+            "remediation_knowledge": self._retrieve_remediation({"findings": findings}),
             "top_findings": self._top_findings(findings),
             "agent_workflow": [
                 {
@@ -177,8 +210,9 @@ class SummaryAgent(BaseAgent):
         harness_verdict = Counter()
         harness_source = Counter()
         target_confirmed = 0
+        function_reproduced = 0
         mechanism_confirmed = 0
-        dynamically_verified = 0   # 经运行时证据（HTTP 复现或目标函数级 Harness）确认
+        dynamically_verified = 0   # 经运行时证据（HTTP 复现或入口级 Harness）确认
         http_reproduced = 0        # 仅 HTTP 可复现
         status_counts = Counter()
 
@@ -211,6 +245,8 @@ class SummaryAgent(BaseAgent):
                     harness_source[harness.get("harness_source")] += 1
                 if verdict == "target_confirmed" or harness.get("dynamically_triggered"):
                     target_confirmed += 1
+                elif verdict == "function_reproduced":
+                    function_reproduced += 1
                 elif verdict == "mechanism_confirmed":
                     mechanism_confirmed += 1
 
@@ -228,6 +264,7 @@ class SummaryAgent(BaseAgent):
             "harness_verdict_counts": dict(harness_verdict.most_common()),
             "harness_source_counts": dict(harness_source.most_common()),
             "harness_target_confirmed": target_confirmed,
+            "harness_function_reproduced": function_reproduced,
             "harness_mechanism_confirmed": mechanism_confirmed,
             "dynamically_verified": dynamically_verified,
             "http_reproduced": http_reproduced,
@@ -259,9 +296,10 @@ class SummaryAgent(BaseAgent):
         return (
             f"本次扫描模式为 {mode}，动态开关：{switches}。"
             f"动态验证阶段对 {ctx['dynamic_total']} 条漏洞保存了 runtime 证据，其中 {ctx['reproduced']} 条具备 HTTP 可复现结果；"
-            f"经运行时证据动态确认（HTTP 复现或目标函数级 Harness）共 {bd.get('dynamically_verified', 0)} 条；"
+            f"经运行时证据动态确认（HTTP 复现或入口级 Harness）共 {bd.get('dynamically_verified', 0)} 条；"
             f"runtime 状态分布为 {runtime_counts}；Harness 裁决分布为 {harness_counts}。"
-            f"其中目标函数级 Harness 确认 {bd.get('harness_target_confirmed', 0)} 条，"
+            f"其中入口级 Harness 确认 {bd.get('harness_target_confirmed', 0)} 条，"
+            f"仅函数单元复现 {bd.get('harness_function_reproduced', 0)} 条，"
             f"模板机理级确认 {bd.get('harness_mechanism_confirmed', 0)} 条。"
             f"未复现或未执行的主要原因：{reason_counts}。"
             "注意：0 条 HTTP 可复现不等于 Deep 阶段未执行，可能是沙箱启动失败、入口缺失、类型不适合动态验证、payload 未命中，或仅达到 Harness 机理级验证。"

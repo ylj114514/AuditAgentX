@@ -149,9 +149,8 @@ class _MethodTaint:
         if isinstance(node, jt.BinaryOperation):
             return self.expr_tainted(node.operandl) or self.expr_tainted(node.operandr)
         if isinstance(node, jt.TernaryExpression):
-            # 安全用例惯用 `cond ? "常量" : param` 打断污点：任一分支是字面量则视为断链
-            if isinstance(node.if_true, jt.Literal) or isinstance(node.if_false, jt.Literal):
-                return False
+            # 任一可达分支带污点，表达式结果就可能带污点。旧逻辑只要一支是常量
+            # 就整体断链，会漏掉 `flag ? "safe" : attackerInput`。
             return self.expr_tainted(node.if_true) or self.expr_tainted(node.if_false)
         if isinstance(node, jt.Cast):
             return self.expr_tainted(node.expression)

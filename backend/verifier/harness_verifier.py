@@ -19,7 +19,8 @@ from backend.agents.base_agent import BaseAgent
 from backend.config import settings
 from backend.skills.harness_tools import (
     extract_function, run_harness, build_template_harness, normalize_language,
-    build_target_scaffold_harness,
+    build_target_scaffold_harness, build_import_scaffold_harness,
+    build_route_testclient_harness, scaffold_capability,
 )
 from backend.mcp.audit_mcp_server import AuditMCPServer
 from backend.skills.loader import load_skill
@@ -29,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 # HarnessVerifier 输出的 finding 级 verdict -> (dynamically_triggered, function_mechanism_verified, confidence)
 _VERDICT_EFFECT = {
-    "target_confirmed":       (True,  True,  0.97),   # 真实目标函数 + sink 被触发
+    "target_confirmed":       (True,  True,  0.97),   # 需额外具备真实入口可达性证明
+    "function_reproduced":    (False, True,  0.85),   # 真实函数单元触发，不等价端到端可利用
     "mechanism_confirmed":    (False, True,  0.75),   # 仅模板机理，封顶 0.75，不算完全动态确认
     "not_reproduced":         (False, False, 0.50),
     "inconclusive":           (False, False, 0.40),
@@ -73,7 +75,8 @@ class HarnessVerifier(BaseAgent):
         harness_lang = target_lang
 
         for attempt in range(max_retries + 1):
-            gen = self._generate(finding, func, target_lang, previous=last_exec if attempt else None)
+            gen = self._generate(finding, func, target_lang,
+                                 previous=last_exec if attempt else None, code_root=code_root)
             harness_code = gen.get("harness_code") or ""
             harness_source = gen.get("_source", "llm")
             harness_lang = gen.get("_language", target_lang)
@@ -82,7 +85,9 @@ class HarnessVerifier(BaseAgent):
                 last_exec = {"verdict": "inconclusive", "reason": "no_harness_generated"}
                 break
 
-            last_exec = self._mcp_run(harness_code, harness_lang, harness_source)
+            last_exec = self._mcp_run(harness_code, harness_lang, harness_source,
+                                      code_root=str(code_root) if code_root else None,
+                                      harness_kind=gen.get("_kind"))
             last_exec["attempt"] = attempt + 1
             attempts.append({
                 "attempt": attempt + 1, "source": harness_source, "language": harness_lang,
@@ -111,13 +116,48 @@ class HarnessVerifier(BaseAgent):
         """run_harness 的执行级 verdict -> HarnessVerifier 的 finding 级 verdict。"""
         ev = last_exec.get("verdict") or "inconclusive"
         if ev in ("unsafe_harness_blocked", "sandbox_failed", "not_reproduced",
-                  "target_confirmed", "mechanism_confirmed"):
+                  "target_confirmed", "function_reproduced", "mechanism_confirmed"):
             return ev
         return "inconclusive"
 
     def _finalize_verdict(self, verdict: str, last_exec: dict, attempts: list,
                           func: dict, harness_source: str, harness_lang: str,
                           *, reason: str | None = None) -> dict:
+        confirmed_blockers: list[str] = []
+        if verdict == "target_confirmed":
+            if not func.get("found"):
+                confirmed_blockers.append("function_extracted=false: target project function was not extracted")
+            if not last_exec.get("target_function_called"):
+                confirmed_blockers.append("target_function_called=false: harness did not prove real target invocation")
+            if last_exec.get("verification_level") not in ("target_specific", "entrypoint_reproduced"):
+                confirmed_blockers.append("verification_level is not target/entrypoint level")
+            if harness_source == "template":
+                confirmed_blockers.append("template harness is mechanism-only")
+            if harness_source != "scaffold":
+                confirmed_blockers.append(
+                    "target confirmation requires a backend-generated scaffold; LLM self-report is untrusted"
+                )
+            # 入口级可达性：框架经真实路由 test-client 调到真实 handler（nonce 证明），
+            # 且用户输入送达 sink（marker 证明）——「路由入口→处理函数→危险 sink」可审计关联齐全。
+            entrypoint_ok = bool(
+                last_exec.get("entrypoint_reachable")
+                and last_exec.get("verification_level") == "entrypoint_reproduced"
+            )
+            if confirmed_blockers:
+                verdict = "mechanism_confirmed" if last_exec.get("triggered") else "inconclusive"
+                reason = "; ".join(confirmed_blockers)
+            elif entrypoint_ok:
+                # 端到端动态确认：真实入口 -> 真实源码 -> 危险 sink 可达性成立，保持 target_confirmed。
+                reason = ("真实路由入口经框架 test-client 调用真实 handler（nonce 证明），"
+                          "用户输入送达危险 sink（marker 证明）；入口→源码→sink 可达性成立。")
+            else:
+                # nonce 只证明框架强制调用了抽取函数；尚未证明真实 HTTP/CLI/消息入口
+                # 能把攻击输入送到该函数。因此诚实标记为函数单元复现。
+                verdict = "function_reproduced"
+                reason = (
+                    "真实目标函数在隔离 Harness 中把攻击 payload 送达 sink；"
+                    "尚缺少 entrypoint-to-source-to-function 可达性证据，不能升级端到端动态确认。"
+                )
         triggered, mechanism_verified, confidence = _VERDICT_EFFECT.get(
             verdict, (False, False, 0.40))
         return {
@@ -127,16 +167,19 @@ class HarnessVerifier(BaseAgent):
             "confidence": confidence,
             "verification_level": last_exec.get("verification_level", "none"),
             "harness_source": harness_source,
+            "harness_kind": harness_source,
             "harness_language": harness_lang,
             "harness_code": last_exec.get("_harness_code") or "",
             "sink_name": last_exec.get("sink_name"),
             "captured_argument": last_exec.get("captured_argument"),
             "payload": last_exec.get("payload"),
             "target_function_called": last_exec.get("target_function_called", False),
+            "entrypoint_reachable": bool(last_exec.get("entrypoint_reachable")),
             "trigger_detail": last_exec.get("trigger_detail", ""),
             "execution_backend": last_exec.get("backend"),
             "function_extracted": func.get("found", False),
             "function_name": func.get("function_name"),
+            "confirmed_blockers": confirmed_blockers,
             "safety": last_exec.get("safety", {"allowed": True, "blocked_reason": None, "checks": []}),
             "attempts": attempts,
             "reason": reason or last_exec.get("reason"),
@@ -169,15 +212,21 @@ class HarnessVerifier(BaseAgent):
         return out
 
     def _mcp_run(self, harness_code: str, language: str = "python",
-                 source: str = "llm") -> dict:
-        out = self.mcp.call_tool("run_fuzzing_harness", {
-            "harness_code": harness_code,
+                 source: str = "llm", code_root: str | None = None,
+                 harness_kind: str | None = None) -> dict:
+        out = self.mcp.call_tool("run_harness_code", {
+            "code": harness_code,
             "language": language,
             "source": source,
+            "scaffold_token": scaffold_capability() if source == "scaffold" else None,
+            # 仅 scaffold 挂载项目真实源码供 import；LLM 代码不可信，不挂载。
+            "code_root": code_root if source == "scaffold" else None,
+            # harness 种类由框架决定（非脚本自报）：testclient_route 表示经真实路由入口调用。
+            "harness_kind": harness_kind if source == "scaffold" else None,
         })["structuredContent"]
         out["_harness_code"] = harness_code   # 供上层保留完整 harness 源码
         self._tool_calls.append({
-            "name": "run_fuzzing_harness",
+            "name": "run_harness_code",
             "purpose": "Execute fuzzing harness in Docker sandbox via MCP.",
             "success": out.get("verdict") in ("target_confirmed", "mechanism_confirmed"),
         })
@@ -185,7 +234,31 @@ class HarnessVerifier(BaseAgent):
 
     # ---------- 内部 ----------
     def _generate(self, finding: dict, func: dict, target_lang: str,
-                  previous: dict | None) -> dict:
+                  previous: dict | None, code_root=None) -> dict:
+        # 优先使用后端根据 AST 生成的确定性目标脚手架。它真实调用目标函数并由
+        # 后端控制 mock/调用/结果字段，因此是唯一可升级 target_confirmed 的来源。
+        if not previous and func.get("found"):
+            if code_root:
+                # 最优先：Web 路由 handler -> 框架 test-client 进程内调真实路由（入口级复现）。
+                route = build_route_testclient_harness(func, finding.get("type"))
+                if route:
+                    logger.info("HarnessVerifier 使用【框架 test-client 真实路由】脚手架 (func=%s)",
+                                func.get("function_name"))
+                    return {"harness_code": route, "_source": "scaffold", "_language": "python",
+                            "_kind": "testclient_route"}
+                # 次选：工具函数 -> import 真实模块（跑真实代码，能解析模块级依赖）。
+                imp = build_import_scaffold_harness(func, finding.get("type"))
+                if imp:
+                    logger.info("HarnessVerifier 使用【import 真实模块】脚手架 (func=%s)",
+                                func.get("function_name"))
+                    return {"harness_code": imp, "_source": "scaffold", "_language": "python",
+                            "_kind": "import_module"}
+            # 再次选：内联函数体脚手架（无源码/import 不适用时）。
+            scaffold = build_target_scaffold_harness(func, finding.get("type"))
+            if scaffold:
+                logger.info("HarnessVerifier 使用【内联函数体】脚手架 (func=%s)", func.get("function_name"))
+                return {"harness_code": scaffold, "_source": "scaffold", "_language": "python"}
+
         payload = {
             "vulnerability": {
                 "type": finding.get("type"),
@@ -236,12 +309,6 @@ class HarnessVerifier(BaseAgent):
             result.setdefault("_source", "llm")
             result.setdefault("_language", target_lang)
             return result
-        # 中间层：目标脚手架——内联真实函数 + mock 精确 sink + 真实调用（target_specific，确定性）
-        if func.get("found"):
-            scaffold = build_target_scaffold_harness(func, finding.get("type"))
-            if scaffold:
-                logger.info("HarnessVerifier 使用目标脚手架 Harness (func=%s)", func.get("function_name"))
-                return {"harness_code": scaffold, "_source": "scaffold", "_language": "python"}
         # 兜底：类型模板（仅证明漏洞机理，非真实可利用；标 template）
         logger.info("HarnessVerifier 使用模板兜底 Harness (type=%s)", finding.get("type"))
         return {

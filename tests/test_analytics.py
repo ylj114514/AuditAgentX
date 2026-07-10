@@ -33,7 +33,7 @@ def test_overview_aggregates_findings():
     db.close()
     assert ov["projects"] >= 1
     assert ov["findings_total"] >= 2
-    assert set(ov["severity_distribution"].keys()) == {"critical", "high", "medium", "low"}
+    assert set(ov["severity_distribution"].keys()) == {"critical", "high", "medium", "low", "info"}
     assert isinstance(ov["top_vulnerability_types"], list)
 
 

@@ -94,13 +94,18 @@
           <el-descriptions v-if="evidence?.sandbox" :column="2" border class="evidence-desc" title="Docker 沙箱环境">
             <el-descriptions-item label="沙箱模式">{{ evidence.sandbox.mode || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="状态">
-              <el-tag :type="evidence.sandbox.status === 'started' ? 'success' : 'danger'">{{ evidence.sandbox.status }}</el-tag>
+              <el-tag :type="sandboxStatusType(evidence.sandbox.status)">{{ verdictLabel(evidence.sandbox.status) }}</el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="镜像">{{ evidence.sandbox.image || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="容器 ID">{{ evidence.sandbox.container_id || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="Base URL">{{ evidence.sandbox.base_url || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="健康检查">{{ evidence.sandbox.health_check || "N/A" }}</el-descriptions-item>
+            <el-descriptions-item label="Docker 引擎">{{ evidence.sandbox.docker_engine?.status || "未单独检查" }}</el-descriptions-item>
+            <el-descriptions-item label="容器动作">
+              构建 {{ evidence.sandbox.image_build_attempted ? "已尝试" : "未尝试" }} / 启动 {{ evidence.sandbox.container_start_attempted ? "已尝试" : "未尝试" }}
+            </el-descriptions-item>
             <el-descriptions-item label="启动命令" :span="2"><code>{{ evidence.sandbox.launch_command || "N/A" }}</code></el-descriptions-item>
+            <el-descriptions-item label="诊断" :span="2">{{ evidence.sandbox.reason || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="容器日志摘要" :span="2"><pre class="mini-pre">{{ evidence.sandbox.logs_excerpt || "N/A" }}</pre></el-descriptions-item>
           </el-descriptions>
 
@@ -275,7 +280,11 @@ const VERDICT_LABELS: Record<string, string> = {
   request_timeout: "请求超时",
   endpoint_not_found: "入口不存在",
   payload_not_matched: "载荷未命中",
+  function_reproduced: "仅函数单元复现",
+  mechanism_confirmed: "仅漏洞机理复现",
   launch_not_detected: "未识别启动方式",
+  not_web_target: "非 Web 项目（HTTP 不适用）",
+  unsafe_project_config: "项目容器配置被安全策略阻止",
   sandbox_start_failed: "沙箱启动失败",
   health_check_failed: "沙箱健康检查失败",
   dependency_install_failed: "依赖安装失败",
@@ -305,9 +314,16 @@ function runtimeTagType(runtime: any) {
   const status = runtime?.reproduction_status;
   if (status === "dynamic_confirmed" || runtime?.reproducible) return "success";
   if (status === "not_reproduced") return "warning";
-  if (status === "not_executed" || status === "not_runtime_verifiable" || status === "false_positive") return "info";
+  if (status === "not_executed" || status === "not_runtime_verifiable" || status === "not_web_target" || status === "function_reproduced" || status === "mechanism_confirmed" || status === "false_positive") return "info";
   if (status === "connection_failed" || status === "request_timeout" || status === "endpoint_not_found" || status === "payload_not_matched" || status === "launch_not_detected" || status === "sandbox_start_failed" || status === "health_check_failed" || status === "dependency_install_failed") return "warning";
   return "info";
+}
+
+function sandboxStatusType(status?: string) {
+  if (status === "started") return "success";
+  if (status === "not_web_target" || status === "launch_not_detected") return "info";
+  if (status === "unsafe_project_config") return "warning";
+  return "danger";
 }
 
 function toolStatusType(tool: any) {

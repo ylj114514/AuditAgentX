@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -48,16 +49,25 @@ def resolve_scan_mode(payload: ScanCreate) -> dict:
     elif mode == "standard":
         agents = ["audit", "verify"]
         opts.update(enable_exploit=False, enable_dynamic=False, enable_harness=False)
-        opts.setdefault("max_verify_candidates", settings.max_verify_candidates)
+        if opts.get("max_verify_candidates") is None:
+            opts["max_verify_candidates"] = settings.max_verify_candidates
     elif mode == "deep":
         agents = ["audit", "verify", "exploit", "harness"]
         # Deep：沙箱全开——HTTP 项目沙箱 + 函数级 Harness(Docker) + PoC 沙箱 一并启用
         opts.update(enable_exploit=True, enable_dynamic=True, enable_harness=True,
                     enable_sandbox=True)
-        opts.setdefault("max_verify_candidates", settings.max_verify_candidates)
+        if opts.get("max_verify_candidates") is None:
+            opts["max_verify_candidates"] = settings.max_verify_candidates
         # Deep 默认 Docker-first：未显式指定动态目标时用 docker_project
         if not opts.get("dynamic_target"):
-            opts["dynamic_target"] = {"mode": "docker_project", "scan_id": None}
+            opts["dynamic_target"] = {
+                "mode": "docker_project",
+                "scan_id": None,
+                "auto_start_docker": True,
+            }
+        elif opts["dynamic_target"].get("mode") == "docker_project":
+            # 前端 build 模式与后端 Docker 自启建立明确契约；显式 false 才关闭。
+            opts["dynamic_target"].setdefault("auto_start_docker", True)
     return {"enabled_agents": agents, "options": opts, "scan_mode": mode or None}
 
 
@@ -89,6 +99,42 @@ def create_scan(payload: ScanCreate, background: BackgroundTasks,
     return ScanOut(scan_id=sid, status="queued")
 
 
+@router.get("")
+def list_scans(q: str | None = None, limit: int = 50,
+              db: Session = Depends(get_db)) -> dict:
+    """列出扫描任务（历史记录的后端真实数据源）。
+
+    前端历史查询原本仅依赖浏览器 localStorage，一旦清缓存/换浏览器/经脚本跑扫描，
+    就会「查不到」。本接口以数据库为准，支持按 scan_id / 项目 id / 项目名模糊搜索，
+    让前端在 localStorage 无命中时可回退到后端查询。
+    """
+    query = db.query(Scan, Project).join(Project, Scan.project_id == Project.id)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(
+            Scan.id.ilike(like),
+            Project.id.ilike(like),
+            Project.name.ilike(like),
+        ))
+    # 排序：未开始（排队/进行中，started_at 为空）视为最新排最前，其余按最近开始时间倒序。
+    # 用布尔表达式而非 NULLS FIRST，保证跨 SQLite 版本可移植。
+    rows = (query.order_by((Scan.started_at.is_(None)).desc(), Scan.started_at.desc())
+            .limit(max(1, min(limit, 200))).all())
+    scans = [{
+        "scan_id": scan.id,
+        "project_id": scan.project_id,
+        "project_name": project.name,
+        "target": project.url or project.local_path,
+        "source_type": project.source_type,
+        "scan_type": scan.scan_type,
+        "status": scan.status,
+        "progress": scan.progress,
+        "started_at": scan.started_at.isoformat() if scan.started_at else None,
+        "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
+    } for scan, project in rows]
+    return {"total": len(scans), "scans": scans}
+
+
 @router.get("/{scan_id}", response_model=ScanStatus)
 def get_scan(scan_id: str, db: Session = Depends(get_db)) -> ScanStatus:
     scan = db.get(Scan, scan_id)
@@ -102,6 +148,21 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)) -> ScanStatus:
         error=scan.error,
         stage_detail=_scan_stage_detail(scan),
     )
+
+
+@router.delete("/{scan_id}")
+def delete_scan(scan_id: str, db: Session = Depends(get_db)) -> dict:
+    """删除扫描及其级联数据（findings → evidence、reports），供历史记录页真正移除记录。
+
+    模型关系已配置 cascade="all, delete-orphan"，删除 Scan 会一并清除其 findings、
+    每条 finding 的 evidence，以及关联 reports。
+    """
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(404, "scan not found")
+    db.delete(scan)
+    db.commit()
+    return {"deleted": scan_id}
 
 
 @router.post("/{scan_id}/cancel")
@@ -161,20 +222,38 @@ def _scan_stage_detail(scan: Scan) -> dict:
         "scan_mode": config.get("scan_mode"),
         "max_verify_candidates": opts.get("max_verify_candidates"),
         "max_verify_workers": opts.get("max_verify_workers") or settings.verify_workers,
+        "dynamic_target_mode": (opts.get("dynamic_target") or {}).get("mode"),
+        "docker_autostart_requested": bool(
+            (opts.get("dynamic_target") or {}).get("auto_start_docker")
+        ),
+        "launch_plan": (opts.get("dynamic_target") or {}).get("launch_plan") or {},
         "elapsed_seconds": None,
     }
     if scan.started_at:
         end = scan.finished_at or datetime.utcnow()
         detail["elapsed_seconds"] = max(0, int((end - scan.started_at).total_seconds()))
     try:
-        messages = ACPTracer(scan_id=scan.id).summary()
+        tracer = ACPTracer(scan_id=scan.id)
+        messages = tracer.summary()
+        full_messages = tracer.load_all()
         verify_requests = sum(1 for m in messages if m.get("message_type") == "verify.request")
         verify_results = sum(1 for m in messages if m.get("message_type") == "verify.result")
+        progress_events = [
+            (msg.payload.get("progress") or {}) for msg in full_messages
+            if getattr(msg.header.message_type, "value", msg.header.message_type)
+            == "dynamic.progress"
+        ]
+        latest_progress = progress_events[-1] if progress_events else {}
         detail.update({
             "agent_message_total": len(messages),
             "verify_requests": verify_requests,
             "verify_results": verify_results,
             "verify_pending": max(0, verify_requests - verify_results),
+            "dynamic_phase": latest_progress.get("phase"),
+            "dynamic_completed": latest_progress.get("completed"),
+            "dynamic_total": latest_progress.get("total"),
+            "dynamic_detail": latest_progress.get("detail"),
+            "dynamic_target_status": latest_progress.get("target_status"),
         })
     except Exception:
         detail.update({
@@ -182,5 +261,10 @@ def _scan_stage_detail(scan: Scan) -> dict:
             "verify_requests": 0,
             "verify_results": 0,
             "verify_pending": 0,
+            "dynamic_phase": None,
+            "dynamic_completed": 0,
+            "dynamic_total": 0,
+            "dynamic_detail": None,
+            "dynamic_target_status": None,
         })
     return detail

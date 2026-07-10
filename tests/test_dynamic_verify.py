@@ -43,8 +43,10 @@ class NotFoundProbe:
 class ErrorProbe:
     def __init__(self, reason):
         self.reason = reason
+        self.calls = 0
 
     def send(self, base_url, path, param, payload, method="GET"):
+        self.calls += 1
         return ProbeRecord(
             url=base_url + path,
             method=method,
@@ -134,6 +136,26 @@ def test_dynamic_verifier_request_timeout():
     assert result.reason == "request_timeout"
 
 
+def test_dynamic_verifier_stops_repeated_unreachable_target_probes():
+    """失效靶场只保留少量失败证据，不能把 120 次请求都耗在同一连接错误上。"""
+    exploit = {
+        "payloads": ["one", "two", "three"],
+        "success_indicators": ["SQL syntax"],
+        "_injection_points": ["id", "q"],
+    }
+    v = DynamicVerifier(max_probes=120)
+    probe = ErrorProbe("connection_failed")
+    v.probe = probe
+
+    result = v.verify("http://target.local", exploit, endpoints=["/user", "/search"])
+
+    # 每个攻击请求都有对应基线；提前停止后总调用数不应继续向 120 次预算扩张。
+    assert probe.calls == 4
+    assert len(result.records) == 2
+    assert result.reason == "connection_failed"
+    assert any("提前停止" in log for log in result.logs)
+
+
 def test_dynamic_verifier_payload_not_matched():
     exploit = {"payloads": ["1' OR '1'='1"], "success_indicators": ["SQL syntax"]}
     v = DynamicVerifier()
@@ -141,3 +163,32 @@ def test_dynamic_verifier_payload_not_matched():
     result = v.verify("http://target.local", exploit, endpoints=["/user"])
     assert result.reason == "payload_not_matched"
     assert result.verified is False
+
+
+def test_dynamic_verifier_uses_post_method_from_exploit():
+    calls = []
+
+    class MethodProbe:
+        def send(self, base_url, path, param, payload, method="GET"):
+            calls.append(method)
+            return ProbeRecord(
+                url=base_url + path,
+                method=method,
+                params={param: payload},
+                payload=payload,
+                status=200,
+                status_code=200,
+                response_excerpt="normal response",
+            )
+
+    v = DynamicVerifier()
+    v.probe = MethodProbe()
+    v.verify("http://target.local", {
+        "payloads": ["admin=true"],
+        "success_indicators": ["never"],
+        "_injection_points": ["role"],
+        "http_method": "POST",
+    }, endpoints=["/login"])
+
+    assert calls
+    assert set(calls) == {"POST"}

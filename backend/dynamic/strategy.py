@@ -130,6 +130,9 @@ _ALIASES = {
     "unsafe deserialization": "insecure deserialization",
     "broken object level authorization": "idor", "bola": "idor",
     "hardcoded password": "hardcoded credential",
+    # Semgrep/Bandit SSTI 规则 ID：render_template_string 拼接可控输入即 SSTI，
+    # 子串 "template-string" 可同时命中 render-template-string / dangerous-template-string。
+    "template-string": "ssti", "template_string": "ssti",
 }
 
 # 默认策略（未匹配到规则时）：优先尝试 harness（函数级，无需靶场）

@@ -75,12 +75,36 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { readHistory, type AuditHistoryRecord } from "../api/history";
+import { ScanApi } from "../api";
 
 const router = useRouter();
 const history = ref<AuditHistoryRecord[]>([]);
 
-function refresh() {
-  history.value = readHistory();
+async function refresh() {
+  // 以后端数据库为准，合并本地缓存里的漏洞/已验证统计；后端不可用时回退本地缓存
+  const local = readHistory();
+  const localMap = new Map(local.map((r) => [r.scanId, r]));
+  try {
+    const { data } = await ScanApi.list();
+    const backend: AuditHistoryRecord[] = (data.scans || []).map((s: any) => {
+      const l = localMap.get(s.scan_id);
+      return {
+        scanId: s.scan_id,
+        projectId: s.project_id,
+        projectName: s.project_name,
+        target: s.target,
+        status: s.status,
+        findingCount: l?.findingCount,
+        verifiedCount: l?.verifiedCount,
+        createdAt: l?.createdAt ?? "",
+        updatedAt: s.finished_at || s.started_at || l?.updatedAt || "",
+      };
+    });
+    const ids = new Set(backend.map((r) => r.scanId));
+    history.value = [...backend, ...local.filter((r) => !ids.has(r.scanId))];
+  } catch {
+    history.value = local;
+  }
 }
 
 function openScan(scanId: string) {

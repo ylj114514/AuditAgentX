@@ -14,6 +14,7 @@ from typing import Any
 from backend.agents.base_agent import BaseAgent
 from backend.agents.verification_tools import build_verification_context
 from backend.mcp.audit_mcp_client import AuditMCPClient
+from backend.skills.harness_tools import is_target_harness_confirmed
 from backend.skills.loader import load_skill
 
 
@@ -110,6 +111,37 @@ class VerifyAgent(BaseAgent):
             verdict["confidence"] = heuristic.get("confidence", candidate.get("confidence", 0.5))
         verdict["confidence"] = _bounded_float(verdict.get("confidence"), default=0.5)
 
+        context = tool_context.get("context_classification") or {
+            "context": heuristic.get("context"),
+            "risk_modifier": heuristic.get("risk_modifier"),
+            "allow_confirmed": heuristic.get("allow_confirmed", True),
+            "confirmed_blockers": heuristic.get("confirmed_blockers") or [],
+            "reason": heuristic.get("downgrade_reason") or heuristic.get("false_positive_reason"),
+        }
+        if context.get("context"):
+            verdict["context"] = context.get("context")
+            verdict["risk_modifier"] = context.get("risk_modifier")
+            verdict["allow_confirmed"] = context.get("allow_confirmed", True)
+        if not context.get("allow_confirmed", True):
+            blockers = context.get("confirmed_blockers") or [context.get("reason") or "context blocks automated confirmation"]
+            verdict["confirmed_blockers"] = _dedupe_list(blockers)
+            verdict["downgrade_reason"] = context.get("reason") or blockers[0]
+            verdict["confidence"] = min(verdict["confidence"], 0.65)
+            if context.get("risk_modifier") == "false_positive":
+                verdict["is_valid"] = False
+                verdict["false_positive_reason"] = verdict.get("downgrade_reason")
+            else:
+                verdict["needs_review"] = True
+
+        if _requires_manual_review(candidate, tool_context, heuristic, verdict):
+            blocker = "No deterministic local verifier or SAST replay matched this finding; LLM-only confirmation remains needs_review."
+            verdict["needs_review"] = True
+            verdict["confidence"] = min(verdict["confidence"], 0.75)
+            verdict["confirmed_blockers"] = _dedupe_list(
+                list(verdict.get("confirmed_blockers") or []) + [blocker]
+            )
+            verdict.setdefault("downgrade_reason", blocker)
+
         for field in ("source", "sink", "propagation_path", "recommended_poc_strategy", "call_path"):
             if not verdict.get(field) and heuristic.get(field):
                 verdict[field] = heuristic[field]
@@ -140,8 +172,10 @@ class VerifyAgent(BaseAgent):
         dynamic_verdict = dynamic_result.get("reproduction_status") or "not_executed"
         if heuristic.get("runtime_verification_status") == "not_runtime_verifiable":
             dynamic_verdict = "not_runtime_verifiable"
-        if harness_result.get("triggered"):
+        if is_target_harness_confirmed(harness_result):
             dynamic_verdict = "harness_confirmed"
+        elif harness_result.get("verdict") in {"function_reproduced", "mechanism_confirmed"}:
+            dynamic_verdict = harness_result.get("verdict")
         elif dynamic_verdict == "not_executed" and harness_result.get("executed"):
             dynamic_verdict = "harness_inconclusive"
         verdict["dynamic_verdict"] = dynamic_verdict
@@ -245,6 +279,15 @@ class VerifyAgent(BaseAgent):
             recommended_poc_strategy=_as_text(vr.get("recommended_poc_strategy")),
             confidence=float(vr.get("confidence") or 0.5),
         ).model_dump()
+        verification.update({
+            "context": vr.get("context"),
+            "risk_modifier": vr.get("risk_modifier"),
+            "downgrade_reason": vr.get("downgrade_reason"),
+            "verification_level": vr.get("verification_level"),
+            "harness_kind": vr.get("harness_kind"),
+            "dynamic_applicable": vr.get("dynamic_applicable"),
+            "confirmed_blockers": vr.get("confirmed_blockers") or [],
+        })
 
         # 构建 tool_calls 列表
         tool_calls = [
@@ -335,6 +378,24 @@ def _knowledge_from_tool_context(tool_context: dict[str, Any]) -> dict[str, Any]
             "remediation_guides": remediation.get("results") or [],
         },
     }
+
+
+def _requires_manual_review(candidate: dict[str, Any], tool_context: dict[str, Any],
+                            heuristic: dict[str, Any], verdict: dict[str, Any]) -> bool:
+    if verdict.get("is_valid") is not True or verdict.get("needs_review"):
+        return False
+    dynamic_verdict = verdict.get("dynamic_verdict") or verdict.get("runtime_verification_status")
+    if dynamic_verdict in {"dynamic_confirmed", "harness_confirmed", "harness_target_confirmed"}:
+        return False
+    if heuristic.get("deterministic_flow"):
+        return False
+    extra = candidate.get("extra") or {}
+    analysis = str(extra.get("analysis") or candidate.get("analysis") or "")
+    taint_flow = extra.get("taint_flow") or candidate.get("taint_flow") or []
+    if analysis in {"taint", "interproc-taint", "java-taint"} and len(taint_flow) >= 2:
+        return False
+    # SAST/局部正则重放是支持性证据，不是独立验证器；即使命中也不能阻止人工复核。
+    return True
 
 
 def _dedupe_list(items: list[Any]) -> list[str]:

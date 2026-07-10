@@ -24,6 +24,11 @@
   .workflow { padding-left: 22px; }
   .workflow li { margin: 6px 0; }
   .evidence { background: #f8fbff; border-left: 4px solid #3498db; padding: 10px 14px; margin: 12px 0; }
+  .evidence > b { font-size: 15px; color: #1f2937; }
+  .evidence ul { margin: 8px 0; } .evidence li { margin: 4px 0; }
+  .chk-pass { color: #1e874b; font-weight: 700; } .chk-fail { color: #c0392b; font-weight: 700; }
+  .chain-title { font-weight: 700; color: #2c3e50; }
+  .dyn-confirmed { display: inline-block; padding: 1px 8px; border-radius: 10px; background: #1e874b; color: #fff; font-size: 12px; }
   .priority { display: inline-block; min-width: 34px; font-weight: 700; color: #c0392b; }
   @media (max-width: 760px) { .summary-grid { grid-template-columns: 1fr; } }
 </style>
@@ -77,7 +82,7 @@
     <tr><td>Runtime 状态分布</td><td>{% for k, v in (summary.dynamic_breakdown.runtime_status_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}</td></tr>
     <tr><td>Sandbox 状态分布</td><td>{% for k, v in (summary.dynamic_breakdown.sandbox_status_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}</td></tr>
     <tr><td>Harness 裁决分布</td><td>{% for k, v in (summary.dynamic_breakdown.harness_verdict_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}</td></tr>
-    <tr><td>Harness 确认级别</td><td>目标函数级 {{ summary.dynamic_breakdown.harness_target_confirmed or 0 }} 条；模板机理级 {{ summary.dynamic_breakdown.harness_mechanism_confirmed or 0 }} 条</td></tr>
+    <tr><td>Harness 确认级别</td><td>入口级 {{ summary.dynamic_breakdown.harness_target_confirmed or 0 }} 条；函数单元复现 {{ summary.dynamic_breakdown.harness_function_reproduced or 0 }} 条；模板机理级 {{ summary.dynamic_breakdown.harness_mechanism_confirmed or 0 }} 条</td></tr>
     <tr><td>经动态确认</td><td>运行时确认 {{ summary.dynamic_breakdown.dynamically_verified or 0 }} 条（其中 HTTP 可复现 {{ summary.dynamic_breakdown.http_reproduced or 0 }} 条）</td></tr>
     <tr><td>状态分布</td><td>{% for k, v in (summary.dynamic_breakdown.status_counts or {}).items() %}{{ k }}={{ v }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}</td></tr>
     <tr><td>未复现/未执行原因</td><td>{% for k, v in (summary.dynamic_breakdown.runtime_reason_counts or {}).items() %}{{ k }}（{{ v }}）{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}</td></tr>
@@ -124,16 +129,42 @@
     </tr>
   </table>
 
+  {% if evidence_stats %}
+  <h3>3.1 证据链覆盖概览</h3>
+  <table>
+    <tr><th>维度</th><th>覆盖条数</th></tr>
+    <tr><td>含证据链的漏洞</td><td>{{ evidence_stats.with_evidence }} / {{ findings | length }}</td></tr>
+    <tr><td>含静态验证判据（逐步核验）</td><td>{{ evidence_stats.with_static_chain }}</td></tr>
+    <tr><td>含利用/PoC 证据</td><td>{{ evidence_stats.with_exploit }}</td></tr>
+    <tr><td>含 Harness 函数级证据</td><td>{{ evidence_stats.with_harness }}</td></tr>
+    <tr><td>含运行时（HTTP）证据</td><td>{{ evidence_stats.with_runtime }}</td></tr>
+    <tr><td><b>经动态运行时确认</b></td><td><b>{{ evidence_stats.dynamically_verified }}</b> 条（其中 HTTP 真实可复现 {{ evidence_stats.http_reproduced }} 条）</td></tr>
+  </table>
+  <p class="meta">说明：漏洞按“动态确认 → 严重级 → 置信度”排序，最可信、最严重者优先展示。</p>
+  {% endif %}
+
   <h2>4. 漏洞明细</h2>
   {% for f in findings %}
-  <h3>4.{{ loop.index }} {{ f.type }} <span class="badge {{ f.severity }}">{{ f.severity | upper }}</span></h3>
+  <h3>4.{{ loop.index }} {{ f.type }} <span class="badge {{ f.severity }}">{{ f.severity | upper }}</span>{% if f.evidence and f.evidence.verification and f.evidence.verification.dynamically_verified %} <span class="dyn-confirmed">动态已确认</span>{% endif %}</h3>
   <p class="meta">
-    {{ f.file }}:{{ f.start_line or f.line }}　
-    来源 {{ f.source or "unknown" }}　
-    置信度 {{ f.confidence }}　
-    {{ "已验证" if f.verified else "未验证" }}　
+    {{ f.file }}:{{ f.start_line or f.line }}
+    来源 {{ f.source or "unknown" }}
+    置信度 {{ f.confidence }}
+    {{ "已验证" if f.verified else "未验证" }}
     状态 {{ f.status }}
   </p>
+  {% set v = (f.evidence.verification if f.evidence and f.evidence.verification else {}) %}
+  {% if f.context or v.context or f.downgrade_reason or v.downgrade_reason or f.confirmed_blockers or v.confirmed_blockers %}
+  <p class="meta">
+    上下文 {{ f.context or v.context or "N/A" }}；风险修正 {{ f.risk_modifier or v.risk_modifier or "N/A" }}；
+    动态适用 {{ f.dynamic_applicable if f.dynamic_applicable is defined else (v.dynamic_applicable if v.dynamic_applicable is defined else "N/A") }}
+    {% if f.downgrade_reason or v.downgrade_reason %}；降级原因 {{ f.downgrade_reason or v.downgrade_reason }}{% endif %}
+    {% if f.false_positive_reason or v.false_positive_reason %}；误报原因 {{ f.false_positive_reason or v.false_positive_reason }}{% endif %}
+  </p>
+  {% if f.confirmed_blockers or v.confirmed_blockers %}
+  <p class="meta">Confirmed 阻断：{{ (f.confirmed_blockers or v.confirmed_blockers) | join("；") }}</p>
+  {% endif %}
+  {% endif %}
   <pre><code>{{ f.code_snippet or f.vulnerable_code }}</code></pre>
   <p><b>修复建议：</b>{{ f.fix_suggestion or "使用参数化查询、输入白名单校验、安全 API、最小权限和统一异常处理等方式进行加固。" }}</p>
   {% if f.evidence %}
@@ -142,6 +173,29 @@
     <ul>
       <li>Source：<code>{{ f.evidence.source or "N/A" }}</code></li>
       <li>Sink：<code>{{ f.evidence.sink or "N/A" }}</code></li>
+      {% if f.evidence.data_flow %}
+      <li>数据流：
+        <ol>
+        {% for step in f.evidence.data_flow %}
+          <li>{% if step is mapping %}{{ step.stage or step.name or "step" }}：{{ step.detail or step.node or step }}{% else %}{{ step }}{% endif %}</li>
+        {% endfor %}
+        </ol>
+      </li>
+      {% endif %}
+      {% if f.evidence.static_evidence_chain and f.evidence.static_evidence_chain.checks %}
+      <li><span class="chain-title">静态验证判据（逐步核验）：</span>
+        <ol>
+        {% for c in f.evidence.static_evidence_chain.checks %}
+          <li><span class="{{ 'chk-pass' if c.passed else 'chk-fail' }}">{{ '✓ 通过' if c.passed else '✗ 未通过' }}</span>　<code>{{ c.name }}</code>{% if c.detail %} —— {{ c.detail }}{% endif %}</li>
+        {% endfor %}
+        </ol>
+      </li>
+      {% if f.evidence.static_evidence_chain.tool_calls %}
+      <li>审计工具调用链：
+        {% for tc in f.evidence.static_evidence_chain.tool_calls %}<code>{{ tc.name or tc }}</code>{% if tc.success is defined %}<span class="{{ 'chk-pass' if tc.success else 'chk-fail' }}">{{ '✓' if tc.success else '✗' }}</span>{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
+      </li>
+      {% endif %}
+      {% endif %}
       {% if f.evidence.knowledge %}
       <li>知识增强：{{ f.evidence.knowledge.cwe_id or "N/A" }}{% if f.evidence.knowledge.owasp %} / {{ f.evidence.knowledge.owasp | join("、") }}{% endif %}
         <ul>
@@ -180,7 +234,7 @@
       {% endif %}
       {% endif %}
       {% if f.evidence.sandbox %}
-      <li>Docker 沙箱：{{ f.evidence.sandbox.status }}（健康检查 {{ f.evidence.sandbox.health_check }}，镜像 <code>{{ f.evidence.sandbox.image or "N/A" }}</code>，启动命令 <code>{{ f.evidence.sandbox.launch_command or "N/A" }}</code>）</li>
+      <li>Docker 沙箱：{{ f.evidence.sandbox.status }}（引擎 {{ (f.evidence.sandbox.docker_engine or {}).status or "未单独检查" }}，健康检查 {{ f.evidence.sandbox.health_check }}，构建 {{ "已尝试" if f.evidence.sandbox.image_build_attempted else "未尝试" }}，启动 {{ "已尝试" if f.evidence.sandbox.container_start_attempted else "未尝试" }}，镜像 <code>{{ f.evidence.sandbox.image or "N/A" }}</code>，启动命令 <code>{{ f.evidence.sandbox.launch_command or "N/A" }}</code>）</li>
       {% endif %}
       {% if f.evidence.runtime %}
       <li>动态验证状态：{{ f.evidence.runtime.reproduction_status or ("可复现" if f.evidence.runtime.reproducible else "未复现") }}</li>
@@ -199,7 +253,8 @@
       {% endif %}
       {% endif %}
       {% if f.evidence.harness %}
-      <li>Harness：{{ f.evidence.harness.verdict or "N/A" }}，触发={{ "是" if f.evidence.harness.dynamically_triggered else "否" }}</li>
+      <li>Harness：{{ f.evidence.harness.verdict or "N/A" }}，触发={{ "是" if f.evidence.harness.dynamically_triggered else "否" }}，级别={{ f.evidence.harness.verification_level or "N/A" }}，类型={{ f.evidence.harness.harness_kind or f.evidence.harness.harness_source or "N/A" }}</li>
+      {% if f.evidence.harness.confirmed_blockers %}<li>Harness confirmed 阻断：{{ f.evidence.harness.confirmed_blockers | join("；") }}</li>{% endif %}
       {% if f.evidence.harness.harness_code %}
       <li>Harness 代码：
         <pre><code>{{ f.evidence.harness.harness_code }}</code></pre>
@@ -221,6 +276,7 @@
       {% if f.evidence.verification %}
       <li>验证裁决：静态={{ f.evidence.verification.static_verdict or "N/A" }}；动态={{ f.evidence.verification.dynamic_verdict or "N/A" }}；最终={{ f.evidence.verification.final_verdict or "N/A" }}</li>
       <li>动态确认：{{ "是" if f.evidence.verification.dynamically_verified else "否" }}{% if f.evidence.verification.dynamic_method %}（方法：{{ f.evidence.verification.dynamic_method }}）{% endif %}{% if f.evidence.verification.runtime_verification_status %}；运行时状态：{{ f.evidence.verification.runtime_verification_status }}{% endif %}</li>
+      {% if f.evidence.verification.context or f.evidence.verification.downgrade_reason or f.evidence.verification.confirmed_blockers %}<li>上下文裁决：context={{ f.evidence.verification.context or "N/A" }}；risk_modifier={{ f.evidence.verification.risk_modifier or "N/A" }}；verification_level={{ f.evidence.verification.verification_level or "N/A" }}；harness_kind={{ f.evidence.verification.harness_kind or "N/A" }}；dynamic_applicable={{ f.evidence.verification.dynamic_applicable if f.evidence.verification.dynamic_applicable is defined else "N/A" }}{% if f.evidence.verification.downgrade_reason %}；降级原因={{ f.evidence.verification.downgrade_reason }}{% endif %}{% if f.evidence.verification.confirmed_blockers %}；confirmed_blockers={{ f.evidence.verification.confirmed_blockers | join("；") }}{% endif %}</li>{% endif %}
       {% if f.evidence.verification.mcp_server %}<li>MCP Server：<code>{{ f.evidence.verification.mcp_server }}</code></li>{% endif %}
       {% if f.evidence.verification.skill %}<li>Skill：<code>{{ f.evidence.verification.skill.name or f.evidence.verification.skill }}</code></li>{% endif %}
       {% endif %}

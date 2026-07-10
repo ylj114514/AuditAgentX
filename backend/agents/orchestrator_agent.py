@@ -27,11 +27,10 @@ from backend.agents.repo_parser_agent import RepoParserAgent
 from backend.agents.static_scan_agent import StaticScanAgent
 from backend.agents.audit_agent import AuditAgent
 from backend.agents.verify_agent import VerifyAgent
-from backend.verifier.poc_runner import PocRunner
-from backend.verifier.evidence_collector import EvidenceCollector
 from backend.verifier.pipeline import ExploitPipeline
 from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
 from backend.verifier import exploit_validator as judge
+from backend.verifier.context_classifier import apply_context_to_finding
 
 # ACP 通信协议
 from backend.acp.factory import make_message
@@ -304,6 +303,7 @@ class OrchestratorAgent:
                 "start_line": rf.line, "line": rf.line, "code_snippet": rf.code_snippet,
                 "confidence": 0.5, "source": rf.source, "verified": False,
                 "status": "candidate", "message": rf.message,
+                "rule_id": rf.rule_id, "extra": rf.extra,
             })
 
         # 2) LLM 语义审计补充（可发现工具漏报）——ACP 消息驱动
@@ -365,14 +365,11 @@ class OrchestratorAgent:
         self._stage("VerifyAgent", 70)
         agents_enabled = self.config.get("enabled_agents", ["audit", "verify"])
         opts = self.config.get("options", {})
-        use_poc = "poc" in agents_enabled and opts.get("enable_poc", False)
-        use_sandbox = opts.get("enable_sandbox", False)
         enable_exploit = opts.get("enable_exploit", False) or "exploit" in agents_enabled
         enable_dynamic = opts.get("enable_dynamic", False)
         enable_harness = opts.get("enable_harness", False) or "harness" in agents_enabled
         dynamic_target = opts.get("dynamic_target")
 
-        poc_runner = PocRunner(scan_id=self.scan.id) if use_poc else None
         candidates = judge.rank(candidates)
         verify_limit = self._verify_candidate_limit(opts, len(candidates))
         skipped_candidates: list[dict] = []
@@ -440,7 +437,7 @@ class OrchestratorAgent:
                     if sv == "false_positive":
                         c["verified"] = False
                         c["status"] = "false_positive"
-                    elif sv == "needs_review":
+                    elif sv == "needs_review" or vinfo.get("confirmed_blockers"):
                         c["verified"] = False
                         c["status"] = "needs_review"
                     else:
@@ -450,8 +447,13 @@ class OrchestratorAgent:
                     c["confidence"] = float(conf if conf is not None else c.get("confidence", 0.5) or 0.5)
                     if vinfo.get("dynamic_verdict"):
                         c["runtime_verification_status"] = vinfo["dynamic_verdict"]
+                    for key in ("context", "risk_modifier", "downgrade_reason",
+                                "dynamic_applicable", "confirmed_blockers"):
+                        if key in vinfo:
+                            c[key] = vinfo[key]
                     # 保留 verification（含 source/sink/call_path/裁决）供利用与证据链复用
                     c["_verify"] = {**vinfo, "knowledge": reply.payload.get("knowledge") or {}}
+                    apply_context_to_finding(c)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "VerifyAgent 静态复核失败，已降级为 needs_review: %s @ %s",
@@ -493,12 +495,6 @@ class OrchestratorAgent:
         results: list[dict] = [c for c in results_by_index if c is not None]
         results.extend(skipped_candidates)
 
-        for c in results:
-            # PoC 沙箱脚本（可选）
-            if poc_runner and c["status"] == "confirmed":
-                self._stage("PocAgent", 80)
-                c["_poc"] = poc_runner.run(c, use_sandbox=use_sandbox)
-
         results = judge.filter_false_positives(results)
         results = judge.rank(results)
 
@@ -531,14 +527,33 @@ class OrchestratorAgent:
                 },
                 context=dynamic_ctx,
             )
-            reply = self._dispatch_acp(req)
-            results = reply.payload.get("findings") or results
-        else:
-            # 未启用利用模块时，用 PoC 证据兜底证据链
-            for c in results:
-                if c.get("_poc") and not c.get("_evidence"):
-                    c["_evidence"] = EvidenceCollector.build(
-                        c.get("_verify", {}), poc_result=c["_poc"])
+            # 关键降级保障：动态验证阶段（Docker 沙箱 / HTTP 发包 / Harness）任何异常
+            # 都必须在此就地捕获并优雅降级——绝不能让动态失败向上抛到 run() 顶层 except，
+            # 那会把整次扫描标记 failed 并跳过 _persist()，导致已通过静态审计的漏洞一条都存不下来
+            # （用户反馈「docker 一出错就一点漏洞都检测不出来」的根因）。
+            # 沙箱级失败（sandbox_start_failed 等）本就由 DockerProjectRunner 内部优雅处理并如实标注；
+            # 此处兜底的是 dispatch/pipeline 级的意外异常，降级后保留静态结果并如实标注 dynamic_error。
+            try:
+                reply = self._dispatch_acp(req)
+                results = reply.payload.get("findings") or results
+            except Exception as dyn_exc:  # noqa: BLE001
+                logger.exception(
+                    "[%s] 动态验证阶段异常，已优雅降级：保留静态复核结果正常入库，动态证据缺省",
+                    self.scan.id,
+                )
+                self._acp_record(
+                    sender="orchestrator_agent",
+                    receiver="dynamic_analysis_agent",
+                    message_type=ACPMessageType.DYNAMIC_VERIFY_RESULT,
+                    intent="动态验证阶段异常，优雅降级为静态结果",
+                    payload_summary={"error": str(dyn_exc), "degraded_to_static": True},
+                    state=ACPState.FAILED,
+                    error=str(dyn_exc),
+                )
+                for c in results:
+                    # 如实标注：动态阶段未能执行/异常；不伪造任何 http 证据
+                    c.setdefault("runtime_verification_status", "dynamic_error")
+                    c["_dynamic_error"] = str(dyn_exc)[:300]
 
         return results
 
@@ -577,7 +592,10 @@ class OrchestratorAgent:
                 verified=f.get("verified", False), status=f.get("status", "candidate"),
                 fix_suggestion=(f.get("detail") or {}).get("fix_suggestion"),
                 detail_json=json.dumps(
-                    {k: v for k, v in f.items() if k.startswith("_") or k in ("detail",)},
+                    {k: v for k, v in f.items() if k.startswith("_") or k in (
+                        "detail", "context", "risk_modifier", "downgrade_reason",
+                        "false_positive_reason", "dynamic_applicable", "confirmed_blockers",
+                    )},
                     ensure_ascii=False, default=str,
                 ),
             ))

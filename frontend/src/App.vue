@@ -12,7 +12,6 @@
         <el-menu-item index="/">首页</el-menu-item>
         <el-menu-item index="/projects/new">新建项目</el-menu-item>
         <el-menu-item index="/scans">分析工作台</el-menu-item>
-        <el-menu-item index="/analytics">对比分析</el-menu-item>
         <el-menu-item index="/history">查看历史项目</el-menu-item>
       </el-menu>
       <div class="sidebar-note">

@@ -1,7 +1,7 @@
 """DynamicAnalysisAgent 测试（离线：plan 决策 + harness 执行，不依赖 LLM/靶场）。"""
 from pathlib import Path
 
-from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
+from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent, _derive_dynamic_verdict, _dynamic_summary
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "vulnerable_projects" / "demo_flask_app"
 
@@ -47,3 +47,17 @@ def test_run_only_touches_confirmed():
                  "status": "false_positive", "severity": "high"}]
     DynamicAnalysisAgent().run(findings, code_root=DEMO, enable_harness=True)
     assert findings[0].get("_harness") is None
+
+
+def test_mechanism_harness_does_not_count_as_harness_confirmed():
+    harness = {
+        "verdict": "mechanism_confirmed",
+        "dynamically_triggered": True,
+        "verification_level": "template_mechanism",
+        "function_extracted": False,
+        "target_function_called": False,
+    }
+
+    assert _derive_dynamic_verdict({}, harness) == "not_executed"
+    summary = _dynamic_summary([{"_harness": harness}], None)
+    assert summary["harness_confirmed"] == 0

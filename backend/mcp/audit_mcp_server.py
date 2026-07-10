@@ -28,6 +28,7 @@ from backend.skills.harness_tools import (
     extract_function,
     build_template_harness,
     run_harness,
+    _is_builtin_template_harness,
 )
 from backend.dynamic.symbol_resolver import resolve_symbol
 from backend.rag.retriever import SecurityKnowledgeRetriever
@@ -180,6 +181,29 @@ class AuditMCPServer:
                     },
                 },
                 "handler": self._run_fuzzing_harness,
+            },
+            "run_harness_code": {
+                "name": "run_harness_code",
+                "description": (
+                    "Execute one disposable, network-disabled harness-code sandbox and return "
+                    "structured execution evidence. This is the generic sandbox tool; "
+                    "run_fuzzing_harness remains its backwards-compatible alias."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "required": ["code"],
+                    "properties": {
+                        "code": {"type": "string"},
+                        "timeout": {"type": ["integer", "null"]},
+                        "language": {"type": ["string", "null"]},
+                        "source": {"type": ["string", "null"]},
+                        "require_docker": {"type": ["boolean", "null"]},
+                        "scaffold_token": {"type": ["string", "null"]},
+                        "code_root": {"type": ["string", "null"]},
+                        "harness_kind": {"type": ["string", "null"]},
+                    },
+                },
+                "handler": self._run_harness_code,
             },
             # ---------------------------------------------------------------- #
             # 新增工具                                                           #
@@ -334,13 +358,37 @@ class AuditMCPServer:
 
     @staticmethod
     def _run_fuzzing_harness(arguments: dict[str, Any]) -> dict[str, Any]:
+        harness_code = arguments.get("harness_code") or ""
+        source = arguments.get("source") or "llm"
+        if source == "template" and not _is_builtin_template_harness(harness_code):
+            return {
+                "executed": False,
+                "triggered": False,
+                "verdict": "unsafe_harness_blocked",
+                "reason": "unsafe_harness_blocked: unrecognized template harness",
+                "safety": {
+                    "allowed": False,
+                    "blocked_reason": "unrecognized template harness",
+                    "checks": ["BLOCK: source=template but code is not a built-in template"],
+                },
+            }
         return run_harness(
-            arguments.get("harness_code") or "",
+            harness_code,
             timeout=arguments.get("timeout"),
             language=arguments.get("language"),
-            source=arguments.get("source") or "llm",
+            source=source,
             require_docker=arguments.get("require_docker"),
+            scaffold_token=arguments.get("scaffold_token"),
+            code_root=arguments.get("code_root"),
+            harness_kind=arguments.get("harness_kind"),
         )
+
+    @staticmethod
+    def _run_harness_code(arguments: dict[str, Any]) -> dict[str, Any]:
+        """通用一次性 Harness 沙箱；保持漏洞专用工具的兼容性。"""
+        adapted = dict(arguments)
+        adapted["harness_code"] = adapted.pop("code", "")
+        return AuditMCPServer._run_fuzzing_harness(adapted)
 
     @staticmethod
     def _dynamic_http_verify(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -380,6 +428,17 @@ class AuditMCPServer:
                     "records": [],
                 },
                 "reason": "base_url 未配置，未尝试执行动态验证",
+                "skipped": True,
+            }
+
+        from backend.dynamic.target_guard import validate_dynamic_base_url
+        try:
+            base_url = validate_dynamic_base_url(base_url)
+        except ValueError as exc:
+            return {
+                "reproduction_status": "target_blocked",
+                "runtime_evidence": {"request": None, "response": None, "matched_indicator": None, "records": []},
+                "reason": str(exc),
                 "skipped": True,
             }
 

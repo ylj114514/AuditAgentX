@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend.verifier.context_classifier import classify_finding_context
+
 
 RUNTIME_VULN_KEYWORDS = ("sql", "command", "rce", "path", "traversal", "ssrf", "ssti", "upload")
 STATIC_ASSET_PARTS = {
@@ -51,6 +53,8 @@ def build_verification_context(
         "purpose": "Read source lines around the candidate finding.",
         "success": bool(context["code_context"].get("found")),
     })
+    context["context_classification"] = classify_finding_context(
+        candidate, context["code_context"].get("snippet"))
     heuristic = run_heuristic_static_verifier(candidate, context["code_context"])
     context["heuristic_result"] = heuristic
     context["tools_used"].append({
@@ -138,6 +142,21 @@ def _read_code_context(candidate: dict[str, Any], code_root: Path | None, *, rad
 
 def _run_heuristic_verifier(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
     vuln_type = str(candidate.get("type") or candidate.get("vulnerability_type") or "").lower()
+    context = classify_finding_context(candidate, code_context.get("snippet"))
+    if not context.get("allow_confirmed", True) and context.get("risk_modifier") == "false_positive":
+        return _with_call_path({
+            "is_valid": False,
+            "confidence": 0.9,
+            "checks": [{"name": "context_false_positive", "passed": True, "context": context.get("context")}],
+            "false_positive_reason": context.get("reason"),
+            "context": context.get("context"),
+            "risk_modifier": context.get("risk_modifier"),
+            "allow_confirmed": False,
+            "confirmed_blockers": context.get("confirmed_blockers") or [],
+            "runtime_verification_status": "not_runtime_verifiable",
+            "recommended_poc_strategy": "Do not run dynamic verification unless a browser/HTTP sink is identified.",
+        }, candidate, code_context)
+
     asset_fp = _static_asset_false_positive(candidate, vuln_type)
     if asset_fp:
         return _with_call_path(asset_fp, candidate, code_context)
@@ -150,22 +169,22 @@ def _run_heuristic_verifier(candidate: dict[str, Any], code_context: dict[str, A
     checks: list[dict[str, Any]] = []
 
     if "sql" in vuln_type:
-        return _with_call_path(_verify_sql(lowered, checks), candidate, code_context)
+        return _with_context(_with_call_path(_verify_sql(lowered, checks), candidate, code_context), context)
     if "command" in vuln_type or "rce" in vuln_type:
-        return _with_call_path(_verify_command(lowered, checks), candidate, code_context)
+        return _with_context(_with_call_path(_verify_command(lowered, checks), candidate, code_context), context)
     if "path" in vuln_type or "traversal" in vuln_type:
-        return _with_call_path(_verify_path_traversal(lowered, checks), candidate, code_context)
+        return _with_context(_with_call_path(_verify_path_traversal(lowered, checks), candidate, code_context), context)
     if "secret" in vuln_type or "credential" in vuln_type or "key" in vuln_type:
-        return _with_call_path(_verify_secret(text, checks), candidate, code_context)
+        return _with_context(_with_call_path(_verify_secret(text, checks), candidate, code_context), context)
 
     checks.append({"name": "generic_context_present", "passed": bool(text.strip())})
-    return _with_call_path({
+    return _with_context(_with_call_path({
         "is_valid": None,
         "confidence": 0.55,
         "checks": checks,
         "reason": "No type-specific local verifier matched this finding.",
         "runtime_verification_status": "not_runtime_verifiable",
-    }, candidate, code_context)
+    }, candidate, code_context), context)
 
 
 def _local_sast_replay(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +223,19 @@ def _local_sast_replay(candidate: dict[str, Any], code_context: dict[str, Any]) 
 def _with_call_path(result: dict[str, Any], candidate: dict[str, Any],
                     code_context: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("call_path", _build_static_call_path(candidate, code_context, result))
+    return result
+
+
+def _with_context(result: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    result.setdefault("context", context.get("context"))
+    result.setdefault("risk_modifier", context.get("risk_modifier"))
+    result.setdefault("allow_confirmed", context.get("allow_confirmed", True))
+    result.setdefault("confirmed_blockers", context.get("confirmed_blockers") or [])
+    if not context.get("allow_confirmed", True):
+        result.setdefault("downgrade_reason", context.get("reason"))
+        result["confidence"] = min(float(result.get("confidence") or 0.55), 0.65)
+        if context.get("risk_modifier") == "informational":
+            result.setdefault("runtime_verification_status", "not_runtime_verifiable")
     return result
 
 
@@ -279,10 +311,12 @@ def _verify_sql(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
     has_sink = bool(re.search(r"\b(execute|query|cursor\.execute)\s*\(", text))
     concatenates_query = bool(re.search(r"(select|insert|update|delete).*?(\+|f['\"]|format\s*\()", text, re.S))
     parameterized = bool(re.search(r"execute\s*\([^)]*,\s*(\(|\[|\{)", text, re.S))
+    user_input = _has_user_source(text)
     checks.extend([
         {"name": "sql_sink_present", "passed": has_sink},
         {"name": "query_uses_string_concatenation_or_formatting", "passed": concatenates_query},
         {"name": "parameterized_execute_detected", "passed": parameterized},
+        {"name": "attacker_controlled_source_present", "passed": user_input},
     ])
     if parameterized and not concatenates_query:
         return {
@@ -295,16 +329,19 @@ def _verify_sql(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
             "propagation_path": [],
             "recommended_poc_strategy": "No PoC recommended unless a non-parameterized path is found.",
         }
-    if has_sink and concatenates_query:
+    if has_sink and concatenates_query and user_input:
         return {
             "is_valid": True,
-            "confidence": 0.86,
+            "confidence": 0.74,
             "checks": checks,
             "source": "request/user-controlled value",
             "sink": "SQL execution API",
             "propagation_path": ["user input", "string-built SQL query", "execute/query sink"],
+            "evidence_strength": "window_heuristic",
             "recommended_poc_strategy": "Send a boolean or error-based SQL payload to the controlling parameter in a local target.",
         }
+    if has_sink and concatenates_query and not user_input:
+        return _uncertain(checks, "SQL is built dynamically, but no attacker-controlled source was established.")
     return _uncertain(checks, "SQL sink or unsafe query construction was not clearly established.")
 
 
@@ -313,11 +350,13 @@ def _verify_command(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
     shell_true = "shell=true" in text
     dynamic_arg = bool(re.search(r"(\+|format\s*\(|f['\"]|\{.*\})", text))
     safe_list = bool(re.search(r"subprocess\.(run|call|popen)\s*\(\s*\[", text)) and not shell_true
+    user_input = _has_user_source(text)
     checks.extend([
         {"name": "command_execution_sink_present", "passed": has_sink},
         {"name": "shell_true_detected", "passed": shell_true},
         {"name": "dynamic_argument_detected", "passed": dynamic_arg},
         {"name": "safe_argument_list_detected", "passed": safe_list},
+        {"name": "attacker_controlled_source_present", "passed": user_input},
     ])
     if safe_list and not dynamic_arg:
         return {
@@ -330,16 +369,19 @@ def _verify_command(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
             "propagation_path": [],
             "recommended_poc_strategy": "No PoC recommended unless user input reaches a shell string.",
         }
-    if has_sink and (shell_true or dynamic_arg):
+    if has_sink and (shell_true or dynamic_arg) and user_input:
         return {
             "is_valid": True,
-            "confidence": 0.84,
+            "confidence": 0.74,
             "checks": checks,
             "source": "request/user-controlled value",
             "sink": "process execution API",
             "propagation_path": ["user input", "command string/argument", "process execution sink"],
+            "evidence_strength": "window_heuristic",
             "recommended_poc_strategy": "Use a harmless marker command against a local authorized target.",
         }
+    if has_sink and (shell_true or dynamic_arg) and not user_input:
+        return _uncertain(checks, "A dynamic command sink exists, but no attacker-controlled source was established.")
     return _uncertain(checks, "Command sink or user-controlled command construction was not clearly established.")
 
 
@@ -402,6 +444,8 @@ def _verify_secret(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
             "source": "source file literal",
             "sink": "credential/configuration",
             "propagation_path": ["hardcoded literal", "runtime configuration or authentication use"],
+            "deterministic_flow": True,
+            "evidence_strength": "literal_assignment",
             "recommended_poc_strategy": "No exploit execution; validate usage and rotate the credential if real.",
         }
     return _uncertain(checks, "No concrete secret assignment was detected.")
@@ -409,6 +453,15 @@ def _verify_secret(text: str, checks: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _uncertain(checks: list[dict[str, Any]], reason: str) -> dict[str, Any]:
     return {"is_valid": None, "confidence": 0.55, "checks": checks, "reason": reason}
+
+
+def _has_user_source(text: str) -> bool:
+    return bool(re.search(
+        r"(request\.(args|form|values|json|data|files|headers)|args\.get\s*\(|"
+        r"req\.(query|body|params|headers)|\$_(get|post|request|cookie)|"
+        r"getparameter\s*\(|@requestparam|@pathvariable|argv\[|\binput\s*\()",
+        text or "", re.I,
+    ))
 
 
 def _to_int(value: Any) -> int | None:

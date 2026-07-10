@@ -147,11 +147,6 @@ ACPMessage
 - 输入：`message_type=exploit.generate.request`，`payload.finding + payload.verification`
 - 输出：`message_type=exploit.generate.result`，`payload.exploit` 含利用方案，`artifacts` 含利用代码
 
-### ReportAgent.run_acp(request) → reply
-
-- 输入：`message_type=report.request`，`payload.metadata + payload.findings_summary`
-- 输出：`message_type=report.result`，`payload.report` 含执行摘要
-
 ## 消息追踪（ACPTracer）
 
 ```python

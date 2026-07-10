@@ -38,6 +38,7 @@ class ACPMessageType(str, Enum):
     # 动态验证
     DYNAMIC_VERIFY_REQUEST = "dynamic.verify.request"
     DYNAMIC_VERIFY_RESULT = "dynamic.verify.result"
+    DYNAMIC_PROGRESS = "dynamic.progress"
 
     # Harness 验证
     HARNESS_VERIFY_REQUEST = "harness.verify.request"

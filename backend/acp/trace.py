@@ -68,7 +68,7 @@ class ACPTracer:
     def load_by_type(self, message_type: str) -> list[ACPMessage]:
         """仅返回指定 message_type 的消息列表。"""
         return [m for m in self.load_all()
-                if str(m.header.message_type) == message_type]
+                if getattr(m.header.message_type, "value", m.header.message_type) == message_type]
 
     def summary(self) -> list[dict[str, Any]]:
         """返回所有消息的摘要列表（message_id / sender / receiver / type / state / verdict）。"""
