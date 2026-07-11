@@ -19,6 +19,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from backend.config import settings
 from backend.verifier.app_runner import _free_port, _wait_healthy, get_docker_client
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,12 @@ class DockerProjectRunner:
     def __init__(self, code_root: Path, launch_plan: dict | None = None,
                  *, env: dict | None = None, scan_id: str | None = None,
                  trust_project_container_config: bool = False,
-                 build_timeout: int = 600, health_timeout: int = 40) -> None:
+                 build_timeout: int | None = None, health_timeout: int | None = None) -> None:
+        # 未显式传入时读配置：单容器项目默认 90s，镜像构建 900s；compose 另有更长超时。
+        if build_timeout is None:
+            build_timeout = int(getattr(settings, "sandbox_build_timeout", 900))
+        if health_timeout is None:
+            health_timeout = int(getattr(settings, "sandbox_project_health_timeout", 90))
         # Compose 命令会以 code_root 作为 cwd；这里必须先绝对化，否则 `-f` 收到相对
         # 路径时会被 cwd 再拼接一次（data/projects/.../data/projects/...）。
         self.code_root = Path(code_root).resolve()
@@ -178,6 +184,7 @@ class DockerProjectRunner:
         self._compose_file: str | None = None
         self._generated_compose_file_name: str | None = None
         self._compose_selected_target_port: int | None = None
+        self._compose_web_service: str | None = None
         self._generated_dockerfile_name: str | None = None
 
     def __enter__(self) -> "DockerProjectRunner":
@@ -190,7 +197,11 @@ class DockerProjectRunner:
             logger.warning("沙箱依赖安装失败: %s", e)
         except Exception as e:  # noqa: BLE001
             self.metadata["status"] = SANDBOX_START_FAILED
-            self.metadata["logs_excerpt"] = _diagnostic_tail(str(e), 1200)
+            # _run_compose already captured compose logs/ps before raising. Preserve
+            # that primary evidence; only fall back to exception text when no runtime
+            # logs were obtainable.
+            if not self.metadata.get("logs_excerpt"):
+                self.metadata["logs_excerpt"] = _diagnostic_tail(str(e), 1200)
             self.metadata["reason"] = "沙箱构建/启动失败：" + _diagnostic_tail(str(e), 500)
             logger.warning("沙箱启动失败: %s", e)
         return self
@@ -377,7 +388,7 @@ class DockerProjectRunner:
         self._prefetch_compose_images(project)
 
         up_cmd = ["docker", "compose", "-p", project, "-f", self._compose_file,
-                  "up", "-d", "--build"]
+                  "up", "-d", "--build", "--pull", "never"]
         proc = None
         for attempt in range(1, 4):
             try:
@@ -387,6 +398,9 @@ class DockerProjectRunner:
             except FileNotFoundError as e:
                 raise RuntimeError("docker compose CLI 不可用（需 Docker Compose v2）") from e
             except subprocess.TimeoutExpired as e:
+                self.metadata["compose_ps"] = self._compose_ps()
+                self.metadata["logs_excerpt"] = self._compose_logs()
+                self.metadata["last_exception"] = f"TimeoutExpired: {e}"
                 raise RuntimeError(f"docker compose up 超时（>{self.build_timeout}s）") from e
             err = (proc.stderr or proc.stdout or "").strip()
             if proc.returncode == 0 or not _transient_pull_failure(err) or attempt == 3:
@@ -398,6 +412,8 @@ class DockerProjectRunner:
 
         if proc is None or proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
+            self.metadata["compose_ps"] = self._compose_ps()
+            self.metadata["logs_excerpt"] = self._compose_logs()
             low = err.lower()
             if any(k in low for k in ("pip install", "npm install", "could not find",
                                       "no matching distribution", "failed to solve")):
@@ -415,20 +431,48 @@ class DockerProjectRunner:
             self.metadata["logs_excerpt"] = self._compose_logs()
             return
 
-        scheme = "https" if self._compose_selected_target_port == 443 else "http"
+        scheme = _scheme_for_port(self._compose_selected_target_port, self.launch_plan)
         base_url = f"{scheme}://127.0.0.1:{host_port}"
+        self.metadata["scheme"] = scheme
+        self.metadata["selected_service_port"] = self._compose_selected_target_port
+        self.metadata["health_url"] = base_url.rstrip("/") + (self.metadata["health_path"] or "/")
         health_url = base_url.rstrip("/") + (self.metadata["health_path"] or "/")
-        if _wait_healthy(health_url, self.health_timeout):
+        # 多服务 compose 首启动依赖 DB/迁移，动辄数分钟；用更长的 compose 专用超时，
+        # 避免把“仍在启动”误判为“沙箱健康检查失败”。
+        compose_health_timeout = max(self.health_timeout,
+                                     int(getattr(settings, "sandbox_compose_health_timeout", 300)))
+        # 边等健康边盯目标容器是否已崩溃退出：容器 exit(1) 后再干等满超时是纯浪费，
+        # 且真实原因（启动 traceback）远比“Ns 内未通过健康检查”有用。
+        crash = self._compose_target_crash_reason()
+        if crash:
+            self.metadata["status"] = SANDBOX_START_FAILED
+            self.metadata["health_check"] = "failed"
+            self.metadata["reason"] = crash
+            self.metadata["logs_excerpt"] = self._compose_logs()
+            self.metadata["compose_ps"] = self._compose_ps()
+            return
+        healthy, attempts = self._wait_compose_healthy(
+            base_url, compose_health_timeout, crash_probe=self._compose_target_crash_reason)
+        self.metadata["health_attempts"] = attempts
+        crash = crash or self._compose_target_crash_reason()
+        if healthy:
             self.base_url = base_url
             self.metadata.update({
                 "base_url": base_url, "port": host_port,
                 "health_check": "passed", "status": STARTED, "reason": "",
             })
+        elif crash:
+            self.metadata["status"] = SANDBOX_START_FAILED
+            self.metadata["health_check"] = "failed"
+            self.metadata["reason"] = crash
+            self.metadata["logs_excerpt"] = self._compose_logs()
+            self.metadata["compose_ps"] = self._compose_ps()
+            return
         else:
             self.metadata["status"] = HEALTH_CHECK_FAILED
             self.metadata["health_check"] = "failed"
             self.metadata["reason"] = (
-                f"docker compose 服务已启动但 {self.health_timeout}s 内健康检查未通过"
+                f"docker compose 服务已启动但 {compose_health_timeout}s 内健康检查未通过"
                 f"（探测端口 {host_port}，health_path={self.metadata['health_path']}）："
                 "可能 Web 服务尚未就绪、端口映射不对或依赖服务未启动，详见 logs_excerpt。"
             )
@@ -439,7 +483,7 @@ class DockerProjectRunner:
         # `image` and `build` may intentionally coexist: `image` names the result
         # of the local build. Pulling that name first turns valid projects such as
         # VAmPI into a false sandbox_start_failed when the tag is not published.
-        locally_built = self._compose_locally_built_images()
+        locally_built = self._compose_locally_built_images(project)
         cmd = ["docker", "compose", "-p", project, "-f", self._compose_file,
                "config", "--images"]
         proc = subprocess.run(
@@ -499,7 +543,7 @@ class DockerProjectRunner:
                     + _diagnostic_tail(last_error)
                 )
 
-    def _compose_locally_built_images(self) -> set[str]:
+    def _compose_locally_built_images(self, project: str) -> set[str]:
         """Return explicit image tags produced by services that declare ``build``.
 
         Failure to parse is deliberately non-fatal: Compose remains the source of
@@ -511,16 +555,24 @@ class DockerProjectRunner:
                 encoding="utf-8", errors="ignore",
             )) or {}
             services = data.get("services") or {}
-            return {
-                str(service.get("image")).strip()
-                for service in services.values()
-                if isinstance(service, dict) and service.get("build") is not None
-                and str(service.get("image") or "").strip()
-            }
+            images: set[str] = set()
+            for name, service in services.items():
+                if not isinstance(service, dict) or service.get("build") is None:
+                    continue
+                explicit = str(service.get("image") or "").strip()
+                if explicit:
+                    images.add(explicit)
+                else:
+                    # Compose names an unnamed build image <project>-<service>.
+                    # ``config --images`` returns that generated tag, which is still
+                    # a local build output and must never be sent to docker pull.
+                    images.add(f"{project}-{str(name).lower()}")
+            return images
         except Exception as exc:  # noqa: BLE001
             self.metadata["diagnostics"].append(
                 f"compose local-build image detection skipped: {type(exc).__name__}"
             )
+            self.metadata["compose_ps"] = self._compose_ps()
             return set()
 
     def _compose_published_port(self, project: str, port_hint) -> int | None:
@@ -614,6 +666,27 @@ class DockerProjectRunner:
         if not web_service or not target_port:
             raise RuntimeError("Compose 中无法识别可发布的 Web 服务端口")
 
+        # A target Compose may intentionally ship secure and vulnerable variants
+        # (VAmPI), or unrelated developer tools. Start only the selected HTTP service
+        # and its declared dependency closure; this preserves required DB/queue
+        # services while avoiding unrelated containers, image builds and state bleed.
+        selected_services = _compose_dependency_closure(services, web_service)
+        # crAPI-style deployments route browser/API traffic through a separately
+        # named gateway which is not always declared in depends_on. Keep that
+        # service family when the selected target is a web/frontend service.
+        if "crapi" in web_service.lower() or any("gateway" in name.lower() for name in services):
+            selected_services.update(
+                name for name in services
+                if any(token in name.lower() for token in ("gateway", "web", "identity"))
+            )
+        if len(selected_services) < len(services):
+            skipped = sorted(set(services) - selected_services)
+            data["services"] = {name: services[name] for name in selected_services}
+            services = data["services"]
+            self.metadata["diagnostics"].append(
+                "isolated compose omitted unrelated services: " + ", ".join(skipped)
+            )
+
         removed_names = 0
         removed_ports = 0
         for service in services.values():
@@ -631,16 +704,20 @@ class DockerProjectRunner:
                     self.metadata["diagnostics"].append("removed fixed Compose network name")
 
         services[web_service]["ports"] = [f"127.0.0.1::{target_port}"]
+        self._compose_web_service = web_service
         suffix = re.sub(r"[^a-z0-9]", "", self.scan_id.lower())[:12] or "scan"
         generated_name = f"docker-compose.auditagentx.{suffix}.yml"
-        target = self.code_root / generated_name
+        # Keep the isolated file next to the source Compose file. Compose resolves
+        # relative build contexts, env_file, configs and bind mounts relative to this
+        # directory; relocating it to repository root breaks nested deployments.
+        target = (self.code_root / compose_file).parent / generated_name
         target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        self._generated_compose_file_name = generated_name
+        self._generated_compose_file_name = str(target.relative_to(self.code_root))
         self.metadata["diagnostics"].append(
             f"isolated compose generated: removed container_name={removed_names}, "
             f"fixed ports={removed_ports}, exposed {web_service}:*->{target_port}"
         )
-        return generated_name
+        return str(target.relative_to(self.code_root))
 
     def _compose_logs(self) -> str:
         if not (self._compose_project and self._compose_file):
@@ -651,7 +728,111 @@ class DockerProjectRunner:
                  self._compose_file, "logs", "--no-color", "--tail", "50"],
                 cwd=str(self.code_root), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=30)
-            return (proc.stdout or "")[-1500:]
+            return (proc.stdout or proc.stderr or "")[-1500:]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _wait_compose_healthy(base_url: str, timeout: int,
+                              crash_probe=None) -> tuple[bool, list[dict]]:
+        """轮询若干常见健康路径直到就绪或超时；就绪判据与 _wait_healthy 一致（2xx–4xx
+        即服务已在处理 HTTP）。每隔几秒调 crash_probe 检查目标容器是否已崩溃退出，
+        崩溃则立即停止等待（不再干等满超时），由调用方带真实日志报 sandbox_start_failed。"""
+        import httpx
+        attempts: list[dict] = []
+        paths = ("/", "/health", "/actuator/health", "/identity/health_check")
+        deadline = time.time() + timeout
+        next_crash_check = 0.0
+        while time.time() < deadline:
+            now = time.time()
+            if crash_probe is not None and now >= next_crash_check:
+                if crash_probe():
+                    return False, attempts or [{"note": "target container exited during startup"}]
+                next_crash_check = now + 4.0
+            round_attempts = []
+            for path in paths:
+                url = base_url.rstrip("/") + path
+                try:
+                    response = httpx.get(url, timeout=3, trust_env=False, follow_redirects=False)
+                    round_attempts.append({"url": url, "status": response.status_code})
+                    # 服务已在处理 HTTP 请求（含 401/403/404/405）即就绪。
+                    if 200 <= response.status_code < 500:
+                        return True, round_attempts
+                except httpx.HTTPError as exc:
+                    round_attempts.append({"url": url, "error": type(exc).__name__})
+            attempts = round_attempts
+            time.sleep(1)
+        return False, attempts
+
+    def _compose_target_crash_reason(self) -> "str | None":
+        """目标 Web 服务容器是否已异常退出。是则返回含真实启动错误的原因，否则 None。
+
+        用 `compose ps --format json` 读各服务状态：目标服务（或任一构建型服务）处于
+        exited 且退出码非 0，说明应用启动即崩溃（如上游依赖未锁版本导致 import 失败）——
+        应立刻带真实 traceback 报 sandbox_start_failed，而不是干等满健康超时。
+        """
+        if not (self._compose_project and self._compose_file):
+            return None
+        try:
+            proc = subprocess.run(
+                ["docker", "compose", "-p", self._compose_project, "-f", self._compose_file,
+                 "ps", "--all", "--format", "json"],
+                cwd=str(self.code_root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20)
+        except Exception:  # noqa: BLE001
+            return None
+        out = (proc.stdout or "").strip()
+        if not out:
+            return None
+        rows = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except Exception:  # noqa: BLE001  某些版本输出单个 JSON 数组
+                try:
+                    rows.extend(_json.loads(line))
+                except Exception:  # noqa: BLE001
+                    pass
+        target = (self._compose_web_service or "").lower()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            svc = str(row.get("Service") or row.get("Name") or "").lower()
+            state = str(row.get("State") or "").lower()
+            exit_code = row.get("ExitCode")
+            is_target = (target and target in svc) or True  # 任一服务崩溃都值得暴露
+            if is_target and state == "exited" and exit_code not in (0, None):
+                svc_logs = self._service_logs(row.get("Service") or row.get("Name") or "")
+                tail = _diagnostic_tail(svc_logs) or (svc_logs[-400:] if svc_logs else "")
+                return (f"目标容器 {svc or '?'} 启动即退出(exit={exit_code})——应用自身崩溃"
+                        f"（常见：上游依赖未锁版本/缺环境变量/迁移失败）。真实错误：{tail}")
+        return None
+
+    def _service_logs(self, service: str) -> str:
+        if not (service and self._compose_project and self._compose_file):
+            return ""
+        try:
+            proc = subprocess.run(
+                ["docker", "compose", "-p", self._compose_project, "-f", self._compose_file,
+                 "logs", "--no-color", "--tail", "40", str(service)],
+                cwd=str(self.code_root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20)
+            return (proc.stdout or proc.stderr or "")[-2000:]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _compose_ps(self) -> str:
+        if not (self._compose_project and self._compose_file):
+            return ""
+        try:
+            proc = subprocess.run(
+                ["docker", "compose", "-p", self._compose_project, "-f", self._compose_file,
+                 "ps", "--all"], cwd=str(self.code_root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30)
+            return (proc.stdout or proc.stderr or "")[-1200:]
         except Exception:  # noqa: BLE001
             return ""
 
@@ -729,6 +910,7 @@ def _select_compose_web_service(services: dict, port_hint) -> tuple[str | None, 
         for target in dict.fromkeys(targets):
             score = (
                 0 if any(word in str(name).lower() for word in web_words) else 1,
+                _vulnerable_service_priority(name, service),
                 0 if port_hint and target == int(port_hint) else 1,
                 0 if target in common_http else 1,
                 common_http.index(target) if target in common_http else target,
@@ -752,6 +934,40 @@ def _select_compose_web_service(services: dict, port_hint) -> tuple[str | None, 
     return name, target
 
 
+def _vulnerable_service_priority(name: str, service: dict) -> int:
+    """Prefer an explicitly vulnerable target when an educational Compose ships both modes.
+
+    VAmPI intentionally publishes secure and vulnerable instances on the same container
+    port. Choosing the lexical first service silently turns an authorized vulnerability
+    verification campaign into a scan of the secure variant.
+    """
+    if "vulnerable" in str(name).lower():
+        return 0
+    values = service.get("environment") or []
+    if isinstance(values, dict):
+        values = [f"{key}={value}" for key, value in values.items()]
+    return 0 if any(str(item).replace(" ", "").lower() in {"vulnerable=1", "vuln=1"}
+                    for item in values) else 1
+
+
+def _compose_dependency_closure(services: dict, root: str) -> set[str]:
+    """Return ``root`` plus declared depends_on services, without following arbitrary links."""
+    selected: set[str] = set()
+    pending = [root]
+    while pending:
+        name = pending.pop()
+        if name in selected or name not in services:
+            continue
+        selected.add(name)
+        definition = services.get(name) or {}
+        dependencies = definition.get("depends_on") if isinstance(definition, dict) else []
+        if isinstance(dependencies, dict):
+            pending.extend(str(item) for item in dependencies)
+        elif isinstance(dependencies, list):
+            pending.extend(str(item) for item in dependencies)
+    return selected
+
+
 def _compose_port_target(value) -> int | None:
     """解析 Compose 短/长端口语法的容器目标端口。"""
     if isinstance(value, dict):
@@ -767,6 +983,13 @@ def _compose_port_target(value) -> int | None:
         return int(raw.rsplit(":", 1)[-1])
     except ValueError:
         return None
+
+
+def _scheme_for_port(target_port: int | None, launch_plan: dict | None = None) -> str:
+    configured = str((launch_plan or {}).get("scheme") or "").lower()
+    if configured in {"http", "https"}:
+        return configured
+    return "https" if int(target_port or 0) in {443, 8443, 9443} else "http"
 
 
 @contextmanager

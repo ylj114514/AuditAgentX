@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # 调用健壮性：失败重试次数与退避基数（秒）
     llm_max_retries: int = 1
     llm_retry_backoff: float = 1.5
+    # 摘要默认走确定性本地实现；显式开启后才调用 LLM 润色。
+    summary_agent_use_llm: bool = False
 
     # ---- 验证并发 ----
     # VerifyAgent 静态复核、利用生成（LLM）与 Harness（函数级）可并行；
@@ -54,10 +56,16 @@ class Settings(BaseSettings):
     stale_scan_after_seconds: int = 6 * 60 * 60
 
     # ---- 沙箱 ----
-    enable_sandbox: bool = False
     # docker_host 留空则用 docker.from_env() 自动适配平台（Windows npipe / Linux socket）
     docker_host: str = ""
     sandbox_timeout: int = 60
+    # 整项目 Docker 沙箱健康检查超时（秒）。单容器项目起得快；多服务 docker compose
+    # （如 crAPI/VAmPI 依赖 DB 的场景）首启动辄需数分钟，用更长的 compose 专用超时，
+    # 否则会把“还在启动”误判成“沙箱健康检查失败”。
+    sandbox_project_health_timeout: int = 90
+    sandbox_compose_health_timeout: int = 300
+    # 镜像构建超时（首次构建大型项目镜像可能较久）。
+    sandbox_build_timeout: int = 900
 
     # ---- Docker 引擎自启（项目启动时确保 Docker 可用）----
     # 后端启动时若检测到 Docker 引擎未就绪，自动拉起 Docker Desktop 并等待就绪，

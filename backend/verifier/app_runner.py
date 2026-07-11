@@ -56,17 +56,38 @@ def get_docker_client():
     return docker.from_env()
 
 
-def _wait_healthy(base_url: str, timeout: int = 20) -> bool:
+def _wait_healthy(base_url: str, timeout: int = 20, *, extra_paths=None) -> bool:
+    """就绪探测：只要 Web 服务开始处理 HTTP 请求即视为就绪。
+
+    关键修正：真实项目的根路径经常返回 401/403/404/405（VAmPI 的 `/` 就是 404，
+    crAPI 的 nginx 常返回 401/403）——这说明**服务已经在监听并处理请求**，只是根路径
+    不是 2xx。此前只认 2xx/3xx，会把大量已就绪的真实靶场误判成“沙箱健康检查失败”。
+    因此：任何 2xx–4xx 都算就绪；只有连接失败、或 5xx 网关（502/503/504，后端仍在启动）
+    才继续等待。为兼顾“根路径 404 但某常见路径已可用”的项目，可多探几个常见路径。
+    """
     import httpx
 
+    paths = [""] + list(extra_paths or [])
     deadline = time.time() + timeout
+    last_status = None
     while time.time() < deadline:
-        try:
-            # trust_env=False：绕过系统代理，确保直连本地容器端口
-            httpx.get(base_url, timeout=2, trust_env=False)
-            return True
-        except Exception:  # noqa: BLE001
-            time.sleep(0.5)
+        reachable_5xx = False
+        for suffix in paths:
+            url = base_url.rstrip("/") + suffix if suffix else base_url
+            try:
+                # trust_env=False：绕过系统代理，确保直连本地容器端口
+                response = httpx.get(url, timeout=3, trust_env=False, follow_redirects=False)
+                last_status = response.status_code
+                # 服务已在处理 HTTP 请求（含 401/403/404/405）即就绪。
+                if 200 <= response.status_code < 500:
+                    return True
+                # 502/503/504：反向代理在、但后端仍在启动 -> 继续等。
+                if response.status_code in (502, 503, 504):
+                    reachable_5xx = True
+            except Exception:  # noqa: BLE001  连接被拒/超时：服务还没起
+                continue
+        time.sleep(1.0 if reachable_5xx else 0.5)
+    logger.info("健康检查未通过（最后状态=%s，超时=%ss）", last_status, timeout)
     return False
 
 
