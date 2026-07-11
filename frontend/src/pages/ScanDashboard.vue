@@ -245,7 +245,17 @@
             <el-descriptions-item label="回退 Harness 原因" :span="2">{{ dynamicInfo.harnessReason }}</el-descriptions-item>
           </el-descriptions>
 
-          <el-table v-loading="evidenceLoading" :data="dynamicRows" stripe empty-text="暂无动态验证结果，可在漏洞详情中执行按需验证">
+          <el-alert
+            v-if="nonDynamicCount > 0"
+            type="info"
+            show-icon
+            :closable="false"
+            class="dynamic-scope-alert"
+            :title="`${nonDynamicCount} 条 finding 未进入动态验证`"
+            description="这些结果可能属于静态/配置类漏洞、动态策略不适用，或未进入本次动态候选；它们不会混入下方已执行结果，也不代表漏洞不存在。"
+          />
+
+          <el-table v-loading="evidenceLoading" :data="dynamicRows" stripe empty-text="本次没有 finding 真正进入 HTTP、Harness 或项目沙箱验证">
             <el-table-column prop="type" label="漏洞类型" min-width="150" />
             <el-table-column prop="file" label="位置" min-width="220" show-overflow-tooltip />
             <el-table-column label="HTTP 结论" min-width="210">
@@ -425,6 +435,7 @@ import {
   evidenceLevelMeta,
   harnessStatusMeta,
   httpExecutionLabel,
+  httpWasExecuted,
   runtimeStatusMeta,
 } from "../utils/dynamicStatus";
 
@@ -503,14 +514,28 @@ const pagedStaticFindings = computed(() => {
   return staticFindings.value.slice(start, start + pageSize.value);
 });
 const dynamicRows = computed(() => findings.value
-  .map((item) => ({
-    ...item,
-    runtime: evidenceMap.value[item.finding_id]?.runtime,
-    sandbox: evidenceMap.value[item.finding_id]?.sandbox,
-    harness: evidenceMap.value[item.finding_id]?.harness,
-    verification: evidenceMap.value[item.finding_id]?.verification,
-  }))
-  .filter((item) => item.runtime));
+  .map((item) => {
+    const evidence = evidenceMap.value[item.finding_id] || {};
+    return {
+      ...item,
+      runtime: evidence.runtime,
+      sandbox: evidence.sandbox,
+      harness: evidence.harness,
+      verification: evidence.verification,
+    };
+  })
+  .filter((item) => {
+    const runtimeStatus = String(item.runtime?.reproduction_status || "not_executed").toLowerCase();
+    const harnessVerdict = String(item.harness?.verdict || "not_executed").toLowerCase();
+    return Boolean(
+      httpWasExecuted(item.runtime)
+      || item.runtime?.setup_records?.length
+      || runtimeStatus !== "not_executed"
+      || harnessVerdict !== "not_executed"
+      || item.sandbox,
+    );
+  }));
+const nonDynamicCount = computed(() => Math.max(0, findings.value.length - dynamicRows.value.length));
 const exploitRows = computed(() => findings.value
   .map((item) => ({ ...item, exploit: evidenceMap.value[item.finding_id]?.exploit }))
   .filter((item) => item.exploit?.exploit_code));
