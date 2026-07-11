@@ -101,11 +101,23 @@ class HarnessVerifier(BaseAgent):
                 "reason": last_exec.get("reason"),
                 "stdout": (last_exec.get("stdout") or "")[:400],
             })
-            # 停止条件：目标级确认 / 模板或脚手架（确定性，重试无意义）/ 被安全阻止 / 沙箱失败
+            # 停止条件：已证明目标级、被安全阻止或沙箱失败。route/import 型
+            # scaffold 若连真实调用都没有证明（典型为 import 依赖失败），不能把一次失败
+            # 当作结论；下一轮强制尝试不 import 应用的自包含切片。
             exec_verdict = last_exec.get("verdict")
             if (exec_verdict in ("target_confirmed", "mechanism_confirmed",
-                                 "unsafe_harness_blocked", "sandbox_failed")
-                    or harness_source in ("template", "scaffold")):
+                                 "unsafe_harness_blocked", "sandbox_failed")):
+                break
+            failed_route_or_import = (
+                harness_source == "scaffold"
+                and last_exec.get("harness_kind") in ("testclient_route", "import_module")
+                and (not last_exec.get("target_function_called")
+                     or bool(last_exec.get("import_error")))
+            )
+            if failed_route_or_import:
+                continue
+            # 切片、模板及其它确定性脚手架的失败不会靠相同生成器的重试变好。
+            if harness_source in ("template", "scaffold"):
                 break
 
         # 执行级 verdict -> finding 级 verdict
@@ -237,6 +249,20 @@ class HarnessVerifier(BaseAgent):
     # ---------- 内部 ----------
     def _generate(self, finding: dict, func: dict, target_lang: str,
                   previous: dict | None, code_root=None) -> dict:
+        # 运行时后备：route/import 依赖真实应用导入，常会被缺包、环境变量或模块副作用
+        # 阻断。它们未能证明 nonce 调用时，下一次只尝试函数切片；切片不 import app、不装
+        # 依赖、不起服务，仍可保留真实函数体和框架侧 sink 证据。
+        if (previous and func.get("found") and code_root
+                and previous.get("harness_kind") in ("testclient_route", "import_module")
+                and (not previous.get("target_function_called")
+                     or bool(previous.get("import_error")))):
+            slice_h = build_selfcontained_slice_harness(func, finding.get("type"))
+            if slice_h:
+                logger.info("route/import 未证明真实调用，回退【自包含切片复现】(func=%s)",
+                            func.get("function_name"))
+                return {"harness_code": slice_h, "_source": "scaffold", "_language": "python",
+                        "_kind": "selfcontained_slice"}
+
         # 优先使用后端根据 AST 生成的确定性目标脚手架。它真实调用目标函数并由
         # 后端控制 mock/调用/结果字段，因此是唯一可升级 target_confirmed 的来源。
         if not previous and func.get("found"):

@@ -284,6 +284,49 @@ def test_harness_scaffold_is_function_unit_reproduced(monkeypatch, tmp_path):
     assert r["confidence"] <= 0.85
 
 
+def test_route_failure_automatically_falls_back_to_selfcontained_slice(monkeypatch, tmp_path):
+    """route/import 未证明调用时不能停在 not_reproduced：下一 attempt 必须改跑
+    不导入 app 的切片。该测试故意让首次切片不可用，以覆盖历史 route-first 场景。"""
+    from backend.verifier import harness_verifier as verifier_module
+
+    (tmp_path / "app.py").write_text(
+        "def probe():\n"
+        "    return os.system('ping ' + request.args.get('host'))\n",
+        encoding="utf-8",
+    )
+    real_slice = verifier_module.build_selfcontained_slice_harness
+    slice_attempts = []
+
+    def delayed_slice(func, vuln_type):
+        slice_attempts.append(func["function_name"])
+        return None if len(slice_attempts) == 1 else real_slice(func, vuln_type)
+
+    monkeypatch.setattr(verifier_module, "build_selfcontained_slice_harness", delayed_slice)
+    monkeypatch.setattr(verifier_module, "build_route_testclient_harness", lambda func, vt: "route-placeholder")
+
+    executed_kinds = []
+    def fake_mcp_run(self, code, language, source, code_root=None, harness_kind=None):
+        executed_kinds.append(harness_kind)
+        if harness_kind == "testclient_route":
+            return {"verdict": "not_reproduced", "triggered": False,
+                    "target_function_called": False, "import_error": "ModuleNotFoundError: flask",
+                    "verification_level": "none", "backend": "docker"}
+        assert harness_kind == "selfcontained_slice"
+        return {"verdict": "target_confirmed", "triggered": True,
+                "target_function_called": True, "verification_level": "target_specific",
+                "backend": "docker", "sink_name": "os.system", "captured_argument": "AAXSLICE"}
+
+    monkeypatch.setattr(HarnessVerifier, "_mcp_run", fake_mcp_run)
+    result = HarnessVerifier().run(
+        {"type": "Command Injection", "file": "app.py", "start_line": 2, "line": 2},
+        tmp_path, max_retries=1,
+    )
+    assert executed_kinds == ["testclient_route", "selfcontained_slice"]
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][0]["verdict"] == "not_reproduced"
+    assert result["verdict"] == "function_reproduced"
+
+
 def test_selfcontained_slice_covers_direct_injection_without_deps():
     """自包含切片主力：inline 真实函数体 + mock 一切外部依赖 + 桩危险 sink，
     直接型注入（命令/SSTI/代码）无需 import/装依赖/起服务即可复现。本地安全执行（sink 全 mock）。"""
