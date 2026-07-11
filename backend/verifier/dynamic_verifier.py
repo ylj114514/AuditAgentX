@@ -4,18 +4,19 @@
 采集 request / response / log 证据，并根据成功特征判定漏洞是否**可复现**。
 
 设计为 provider 无关：只需要一个可访问的 base_url。
-- Docker 沙箱起服务  -> SandboxAppRunner（sandbox_manager.py）
+- Docker 沙箱起服务  -> DockerAppRunner / DockerProjectRunner
 - 本地授权靶场       -> LocalAppRunner（仅限隔离实验环境）
 """
 from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,10 @@ class DynamicVerifier:
         endpoints : 显式端点路径；缺省用启发式路径
         """
         result = DynamicResult()
+        # Setup/login and mutating endpoints can change shared target state. The
+        # pipeline may provide a disposable target, but this verifier never silently
+        # assumes reset/snapshot semantics it cannot prove.
+        result.state_contamination_possible = bool(exploit.get("setup_requests"))
         if not base_url:
             result.skipped = True
             result.reproduction_status = "not_executed"
@@ -290,6 +295,8 @@ class DynamicVerifier:
                 param = surface["param"]
                 transport = surface["transport"]
                 sibling_values = surface.get("sibling_values") or {}
+                if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                    result.state_contamination_possible = True
                 key = (path, method, param, transport)
                 baseline = baseline_cache.get(key)
                 if baseline is None:
@@ -331,10 +338,18 @@ class DynamicVerifier:
                     vuln_type=str(exploit.get("vuln_type") or ""),
                 )
                 if hit:
+                    # A response from an auth gateway, router, content-type validator
+                    # or proxy is not evidence that the finding's business data flow ran.
+                    # Indicators in those pages/logs are untrusted diagnostics only.
+                    if not _reached_business_logic(rec.status_code or rec.status):
+                        result.logs.append(
+                            f"忽略未进入业务逻辑的响应中的判据: status={rec.status_code or rec.status} indicator={hit!r}"
+                        )
+                        continue
                     # 时间型确认要求第二组独立的 control/attack 采样，避免慢页面自证。
                     if hit.startswith("time-based") and not self._confirm_time_based(
                         base_url, path, param, payload, method, transport, baseline,
-                        request_headers,
+                        request_headers, sibling_values, result,
                     ):
                         result.logs.append("时间型差异未在第二次独立采样中复现，保持未确认")
                         continue
@@ -352,7 +367,7 @@ class DynamicVerifier:
                     return self._finalize(result)
                 boolean_confirmation = self._confirm_boolean_sql(
                     base_url, path, param, payload, method, transport, baseline, rec,
-                    request_headers, str(exploit.get("vuln_type") or ""),
+                    request_headers, str(exploit.get("vuln_type") or ""), sibling_values,
                 )
                 if boolean_confirmation:
                     false_record, repeated_true, boolean_indicator = boolean_confirmation
@@ -636,27 +651,40 @@ class DynamicVerifier:
         return DynamicVerifier._finalize(result)
 
     def _confirm_time_based(self, base_url: str, path: str, param: str, payload: str,
-                            method: str, transport: str, first_baseline: ProbeRecord,
-                            headers: dict | None = None) -> bool:
-        control = self._send(
-            base_url, path, param, _control_value(param), method, transport, "baseline", headers)
-        attack = self._send(
-            base_url, path, param, payload, method, transport, "confirmation", headers)
-        if control.error or attack.error:
-            return False
-        delta = attack.elapsed_ms - control.elapsed_ms
-        # 第一组基线也必须正常，防止慢页面/慢机器制造假差异。
-        return bool(
-            not first_baseline.error
-            and attack.elapsed_ms >= 4500
-            and delta >= 3000
-            and attack.elapsed_ms >= max(4500, control.elapsed_ms * 2)
-        )
+                             method: str, transport: str, first_baseline: ProbeRecord,
+                             headers: dict | None = None, sibling_values: dict | None = None,
+                             result: DynamicResult | None = None) -> bool:
+        # Two independently ordered pairs counter warm-up/cache drift. Persist every
+        # sample so a time verdict can be audited rather than asserted by one delta.
+        samples: list[ProbeRecord] = []
+        for _ in range(2):
+            sequence = [("baseline", _control_value(param)), ("confirmation", payload)]
+            random.SystemRandom().shuffle(sequence)
+            pair: dict[str, ProbeRecord] = {}
+            for role, value in sequence:
+                record = self._send(base_url, path, param, value, method, transport, role,
+                                    headers, sibling_values)
+                pair[role] = record
+                samples.append(record)
+            control, attack = pair["baseline"], pair["confirmation"]
+            if control.error or attack.error:
+                if result is not None:
+                    result.confirmation_records.extend(_public_record(item) for item in samples)
+                return False
+            delta = attack.elapsed_ms - control.elapsed_ms
+            if not (not first_baseline.error and attack.elapsed_ms >= 4500 and delta >= 3000
+                    and attack.elapsed_ms >= max(4500, control.elapsed_ms * 2)):
+                if result is not None:
+                    result.confirmation_records.extend(_public_record(item) for item in samples)
+                return False
+        if result is not None:
+            result.confirmation_records.extend(_public_record(item) for item in samples)
+        return True
 
     def _confirm_boolean_sql(self, base_url: str, path: str, param: str, payload: str,
-                             method: str, transport: str, baseline: ProbeRecord,
-                             first_true: ProbeRecord, headers: dict | None,
-                             vuln_type: str):
+                              method: str, transport: str, baseline: ProbeRecord,
+                              first_true: ProbeRecord, headers: dict | None,
+                              vuln_type: str, sibling_values: dict | None = None):
         """用 baseline/true/false/true 四点对照确认常见布尔 SQL 注入。"""
         if "sql" not in vuln_type.lower() or baseline.error or first_true.error:
             return None
@@ -664,9 +692,9 @@ class DynamicVerifier:
         if not false_payload:
             return None
         false_record = self._send(
-            base_url, path, param, false_payload, method, transport, "boolean_false", headers)
+            base_url, path, param, false_payload, method, transport, "boolean_false", headers, sibling_values)
         repeated_true = self._send(
-            base_url, path, param, payload, method, transport, "confirmation", headers)
+            base_url, path, param, payload, method, transport, "confirmation", headers, sibling_values)
         records = (baseline, first_true, false_record, repeated_true)
         if any(record.error or record.status_code is None for record in records):
             return None
@@ -689,6 +717,8 @@ class DynamicVerifier:
     def _judge(self, rec: ProbeRecord, indicators: list[str], baseline: ProbeRecord,
                 *, vuln_type: str = "") -> str:
         """返回命中的特征串；未命中返回空串。"""
+        if not _reached_business_logic(rec.status_code or rec.status):
+            return ""
         body = rec.response_excerpt or ""
         runtime_log = rec.runtime_log_excerpt or ""
         base_body = baseline.response_excerpt or ""
@@ -789,6 +819,10 @@ class DynamicVerifier:
 
     @staticmethod
     def _finalize(result: DynamicResult) -> DynamicResult:
+        # 复现成立即意味着攻击输入确已到达并触发目标业务逻辑（sink），application_reached
+        # 必为真——否则证据链会自相矛盾（confirmed 却声称没进业务逻辑）。
+        if result.reproducible:
+            result.application_reached = True
         if not result.reproduction_status or result.reproduction_status == "not_executed":
             if result.reproducible:
                 result.reproduction_status = "dynamic_confirmed"
@@ -802,11 +836,24 @@ class DynamicVerifier:
                 result.reproduction_status = result.reason
             else:
                 result.reproduction_status = "inconclusive"
+        if not result.verification_level or result.verification_level == "not_executed":
+            result.verification_level = {
+                "dynamic_confirmed": "endpoint_reproduced",
+                "not_reproduced": "endpoint_not_reproduced",
+                "blocked": "endpoint_blocked",
+                "inconclusive": "endpoint_inconclusive",
+                "connection_failed": "transport_failed",
+                "request_timeout": "transport_failed",
+                "no_probe_executed": "no_probe_executed",
+            }.get(result.reproduction_status, result.reproduction_status or "not_executed")
         # 只保留前若干条记录，避免证据体积过大
         result.records = result.records[:30]
         result.baseline_records = result.baseline_records[:30]
         result.setup_records = result.setup_records[:10]
         result.confirmation_records = result.confirmation_records[:6]
+        # Logs are evidence too. Never leave setup credentials or a sensitive injected
+        # value in an otherwise-redacted DynamicResult waiting for a later collector.
+        result.logs = [_redact_response_excerpt(str(item)) for item in result.logs[:80]]
         return result
 
 
@@ -874,10 +921,15 @@ def _normalize_surfaces(raw_endpoints, hints: list[str], preferred_method: str) 
                     key = (case_path, method, name, transport)
                     if key not in seen:
                         seen.add(key)
+                        # Only required siblings in the same encoding belong in this
+                        # request payload. Optional fields and path/query/header/cookie
+                        # fields must not be silently injected into a JSON/form body.
                         sibling_values = {
                             str(other.get("name")): _minimum_value(other)
                             for other in params
                             if other.get("name") != name
+                            and bool(other.get("required"))
+                            and _parameter_transport(other, method) == transport
                         }
                         cases.append({"path": case_path, "method": method, "param": name,
                                       "transport": transport, "source": surface.get("source", "unknown"),
@@ -907,6 +959,19 @@ def _minimum_value(parameter: dict):
     if name.endswith("id") or name == "id":
         return "1"
     return "AUDITAGENTX_VALID"
+
+
+def _parameter_transport(parameter: dict, method: str) -> str:
+    location = str(parameter.get("location") or "unknown").lower()
+    if location in {"path", "header", "cookie", "multipart"}:
+        return location
+    if location == "json":
+        return "json"
+    if location in {"form", "body"}:
+        return "form"
+    if location == "query" or method == "GET":
+        return "query"
+    return "form"
 
 
 def _surface_specs(raw_endpoints, preferred_method: str) -> list[dict]:
@@ -985,8 +1050,31 @@ def _public_record(record: ProbeRecord) -> dict:
         str(key): ("<redacted>" if _SENSITIVE_FIELD.search(str(key)) else value)
         for key, value in (record.response_headers or {}).items()
     }
+    sensitive_payload = any(
+        _SENSITIVE_FIELD.search(str(key)) and str(value) == str(record.payload)
+        for key, value in (record.params or {}).items()
+    )
+    data["url"] = _redact_url(record.url or "")
+    data["redirect_location"] = _redact_url(record.redirect_location or "")
+    data["payload"] = "<redacted>" if sensitive_payload else _redact_response_excerpt(record.payload or "")
     data["response_excerpt"] = _redact_response_excerpt(record.response_excerpt or "")
+    data["runtime_log_excerpt"] = _redact_response_excerpt(record.runtime_log_excerpt or "")
     return data
+
+
+def _redact_url(value: str) -> str:
+    """Redact sensitive query values while retaining a useful, correlateable URL shape."""
+    try:
+        parsed = urlparse(str(value))
+        if not parsed.query:
+            return str(value)
+        query = [
+            (key, "<redacted>" if _SENSITIVE_FIELD.search(key) else item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return urlunparse(parsed._replace(query=urlencode(query)))
+    except (TypeError, ValueError):
+        return _redact_response_excerpt(str(value or ""))
 
 
 def _redact_response_excerpt(text: str) -> str:
@@ -997,13 +1085,17 @@ def _redact_response_excerpt(text: str) -> str:
         parsed = None
     if parsed is not None:
         return json.dumps(_redact_public_value(parsed), ensure_ascii=False, sort_keys=True)
+    # Redact bearer material first; otherwise the generic ``Authorization:`` rule
+    # only consumes the word "Bearer" and leaves the actual token behind.
+    value = re.sub(
+        r"(?i)bearer\s+[A-Za-z0-9._~+\-/=]{6,}", "Bearer <redacted>", str(text),
+    )
     value = re.sub(
         r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie)"
         r"\s*[:=]\s*([^\s,;]+)",
-        lambda match: f"{match.group(1)}=<redacted>", str(text),
+        lambda match: f"{match.group(1)}=<redacted>", value,
     )
-    return re.sub(
-        r"(?i)bearer\s+[A-Za-z0-9._~+\-/=]{6,}", "Bearer <redacted>", value)
+    return value
 
 
 def _redact_public_value(value):
