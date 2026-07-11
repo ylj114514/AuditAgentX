@@ -4,6 +4,7 @@ name: static-scanning
 version: 1.0
 
 tools:
+- check_static_tool_availability
 - run_semgrep
 - run_gitleaks
 - run_bandit
@@ -11,10 +12,11 @@ tools:
 - run_custom_rules
 
 workflow:
-1. 汇总启用的扫描工具（用户选择 + 始终附加 custom 规则兜底）。
-2. 逐工具在代码根目录执行，产出各自命中。
-3. 将各工具输出归一化为统一的 RawFinding（type/file/line/severity/source/rule_id）。
-4. 合并去重，作为候选漏洞交给 AuditAgent 语义分析与 VerifyAgent 复核。
+1. 通过 check_static_tool_availability 预检启用工具是否安装/可用。
+2. 汇总启用的扫描工具（用户选择 + 始终附加 custom 规则兜底）。
+3. 逐工具在代码根目录执行，产出各自命中。
+4. 将各工具输出归一化为统一的 RawFinding（type/file/line/severity/source/rule_id）。
+5. 合并去重，作为候选漏洞交给 AuditAgent 语义分析与 VerifyAgent 复核。
 
 ## Acceptance Criteria
 

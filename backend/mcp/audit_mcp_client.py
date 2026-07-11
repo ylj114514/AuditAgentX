@@ -12,6 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from backend.mcp.audit_mcp_server import AuditMCPServer
+from backend.scanners.base import RawFinding
+from backend.scanners.registry import consolidate_findings
+
+
+_STATIC_TOOL_TO_SCANNER = {
+    "run_semgrep": "semgrep",
+    "run_bandit": "bandit",
+    "run_gitleaks": "gitleaks",
+    "run_trivy": "trivy",
+    "run_custom_rules": "custom",
+}
 
 
 class AuditMCPClient:
@@ -208,6 +219,101 @@ class AuditMCPClient:
             "harness_result": harness_result,
         }
 
+    def run_static_scanning_skill(
+        self,
+        code_root: Path,
+        enabled_tools: list[str],
+        skill: dict[str, Any],
+        *,
+        max_files: int = 20000,
+        severity_threshold: str = "low",
+        scan_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run StaticScanAgent's Skill through MCP scanner tools.
+
+        This is the missing architecture bridge: StaticScanAgent loads the
+        `static-scanning` Skill, this client validates the Skill tool names
+        against the MCP manifest, then executes each selected scanner through
+        `AuditMCPServer.call_tool()` instead of calling subprocess wrappers
+        directly from the agent.
+        """
+        tool_manifest = self.server.list_tools()
+        allowed_tools = {tool["name"] for tool in tool_manifest}
+        skill_tools = [tool for tool in (skill.get("tools") or []) if tool in _STATIC_TOOL_TO_SCANNER]
+        selected_scanners = set(dict.fromkeys(list(enabled_tools or []) + ["custom"]))
+        selected_skill_tools = [
+            tool for tool in skill_tools
+            if _STATIC_TOOL_TO_SCANNER[tool] in selected_scanners
+        ]
+        missing = [tool for tool in selected_skill_tools if tool not in allowed_tools]
+        if missing:
+            raise ValueError(f"Static scanning Skill references unavailable MCP tools: {', '.join(missing)}")
+
+        all_findings: list[RawFinding] = []
+        scanner_status: list[dict[str, Any]] = []
+        tools_used: list[dict[str, Any]] = []
+
+        preflight: dict[str, Any] = {}
+        if "check_static_tool_availability" in (skill.get("tools") or []):
+            if "check_static_tool_availability" not in allowed_tools:
+                raise ValueError("Static scanning Skill references unavailable MCP tool: check_static_tool_availability")
+            preflight = self._call("check_static_tool_availability", {
+                "enabled_tools": list(selected_scanners),
+            })
+            tools_used.append(_tool_call(
+                "check_static_tool_availability",
+                "Check scanner availability through the MCP server before execution.",
+                preflight,
+                success=True,
+            ))
+
+        for tool_name in selected_skill_tools:
+            scanner_name = _STATIC_TOOL_TO_SCANNER[tool_name]
+            result = self._call(tool_name, {
+                "code_root": str(code_root),
+                "max_files": max_files,
+                "scan_id": scan_id,
+            })
+            status = dict(result.get("scanner_status") or {})
+            scanner_status.append(status)
+            raw_items = result.get("raw_findings") or []
+            all_findings.extend(_raw_finding_from_dict(item) for item in raw_items)
+            tools_used.append(_tool_call(
+                tool_name,
+                f"Run {scanner_name} through the MCP static scanning tool.",
+                {
+                    "scanner_status": status,
+                    "finding_count": len(raw_items),
+                },
+                scanner=scanner_name,
+                success=bool(status.get("success")),
+            ))
+
+        consolidated = consolidate_findings(all_findings)
+        threshold = {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(
+            str(severity_threshold or "low").lower(), 1,
+        )
+        consolidated = [
+            finding for finding in consolidated
+            if {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(
+                str(finding.severity).lower(), 1,
+            ) >= threshold
+        ]
+        return {
+            "architecture": "MCP+Skill",
+            "mcp_server": self.server.server_name,
+            "skill": {
+                "name": skill.get("name"),
+                "version": skill.get("version"),
+                "workflow": skill.get("workflow", []),
+            },
+            "tool_manifest": tool_manifest,
+            "tools_used": tools_used,
+            "preflight": preflight,
+            "raw_findings": [finding.to_dict() for finding in consolidated],
+            "scanner_status": scanner_status,
+        }
+
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.server.call_tool(name, arguments)["structuredContent"]
 
@@ -216,7 +322,7 @@ def _tool_call(name: str, purpose: str, result: dict[str, Any], **extra: Any) ->
     record = {
         "name": name,
         "purpose": purpose,
-        "success": True,
+        "success": bool(extra.pop("success", True)),
         "result_summary": _summarize(result),
     }
     record.update(extra)
@@ -229,3 +335,17 @@ def _summarize(result: dict[str, Any]) -> dict[str, Any]:
         "top_result", "summary", "query",
     )
     return {key: result[key] for key in keys if key in result}
+
+
+def _raw_finding_from_dict(item: dict[str, Any]) -> RawFinding:
+    return RawFinding(
+        type=str(item.get("type") or "unknown"),
+        file=str(item.get("file") or ""),
+        line=int(item.get("line") or 0),
+        severity=str(item.get("severity") or "low"),
+        source=str(item.get("source") or ""),
+        code_snippet=str(item.get("code_snippet") or ""),
+        message=str(item.get("message") or ""),
+        rule_id=str(item.get("rule_id") or ""),
+        extra=dict(item.get("extra") or {}),
+    )

@@ -69,7 +69,7 @@
         />
       </el-card>
       <el-card shadow="never" class="summary-card">
-        <span>漏洞总数</span><strong>{{ findings.length }}</strong><small>高危 {{ highCount }} / 已验证 {{ verifiedCount }}</small>
+        <span>可处置漏洞</span><strong>{{ actionableFindings.length }}</strong><small>高危 {{ highCount }} / 已验证 {{ verifiedCount }} / 非处置结果 {{ informationalCount }}</small>
       </el-card>
       <el-card shadow="never" class="summary-card">
         <span>报告</span><strong>HTML</strong><el-button text type="primary" @click="genReport">生成报告</el-button>
@@ -110,6 +110,22 @@
           <strong class="partition-value">{{ candidateCounts.needsReview }}</strong>
         </div>
       </div>
+    </el-card>
+
+    <el-card v-if="scannerStatuses.length" shadow="never" class="partition-card">
+      <div class="partition-head"><h3>扫描器真实运行状态</h3></div>
+      <el-table :data="scannerStatuses" size="small" stripe>
+        <el-table-column prop="tool" label="工具" width="130" />
+        <el-table-column label="状态" width="130">
+          <template #default="scope">
+            <el-tag :type="scope.row.success ? 'success' : 'danger'">
+              {{ scope.row.success ? '执行成功' : (scope.row.executed ? '执行失败' : '未启动') }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="finding_count" label="原始命中" width="100" />
+        <el-table-column prop="error" label="错误 / 降级原因" min-width="260" show-overflow-tooltip />
+      </el-table>
     </el-card>
 
     <el-alert
@@ -451,7 +467,12 @@ const agentFilters = reactive({
   collapse: true,
 });
 
-const highCount = computed(() => findings.value.filter((item) => ["high", "critical"].includes(String(item.severity).toLowerCase())).length);
+const NON_ACTIONABLE_STATUSES = new Set(["informational", "false_positive", "out_of_scope"]);
+const actionableFindings = computed(() => findings.value.filter(
+  (item) => !NON_ACTIONABLE_STATUSES.has(String(item.status || "").toLowerCase()),
+));
+const informationalCount = computed(() => findings.value.length - actionableFindings.value.length);
+const highCount = computed(() => actionableFindings.value.filter((item) => ["high", "critical"].includes(String(item.severity).toLowerCase())).length);
 const verifiedCount = computed(() => findings.value.filter((item) => item.verified).length);
 const staticFindings = computed(() => findings.value);
 const pagedStaticFindings = computed(() => {
@@ -470,6 +491,7 @@ const exploitRows = computed(() => findings.value
   .filter((item) => item.exploit?.exploit_code));
 
 const stageDetail = computed<Record<string, any>>(() => status.value?.stage_detail || {});
+const scannerStatuses = computed<any[]>(() => stageDetail.value.scanner_status || []);
 
 const DASH = "—";
 function numOrDash(value: any) {
@@ -531,7 +553,7 @@ const hasDynamicInfo = computed(() => {
 const needsReviewCount = computed(() =>
   findings.value.filter((f) => String(f.status || "").toLowerCase().includes("review")).length);
 const candidateCounts = computed(() => ({
-  original: findings.value.length,                              // 原始静态发现数
+  original: numOrDash(stageDetail.value.raw_finding_count),     // 工具原始静态发现数
   sent: numOrDash(stageDetail.value.verify_requests),          // 已送验证
   done: numOrDash(stageDetail.value.verify_results),           // 已完成验证
   needsReview: needsReviewCount.value,                         // 待人工复核
@@ -550,11 +572,11 @@ const progressPartitions = computed(() => {
   const verReq = Number(d.verify_requests || 0);
   const verRes = Number(d.verify_results || 0);
   return [
-    { key: "static", label: "静态扫描", value: String(findings.value.length), hint: "原始发现" },
+    { key: "static", label: "静态扫描", value: String(numOrDash(d.raw_finding_count)), hint: "工具原始发现" },
     { key: "review", label: "静态复核", value: verReq > 0 ? `${verRes}/${verReq}` : String(verRes || 0), hint: "VerifyAgent" },
     { key: "discover", label: "动态发现", value: dynTotal > 0 ? String(dynTotal) : DASH, hint: "送验证候选" },
     { key: "dynamic", label: "动态验证", value: dynTotal > 0 ? `${dynDone}/${dynTotal}` : DASH, hint: d.dynamic_phase || "未开始" },
-    { key: "skipped", label: "失败 / 跳过", value: String(needsReviewCount.value), hint: "待人工复核" },
+    { key: "skipped", label: "未自动定性", value: String(needsReviewCount.value), hint: "待人工复核" },
   ];
 });
 
@@ -1094,6 +1116,7 @@ function statusLabel(status?: string) {
 function findingStatusType(status?: string) {
   const value = String(status || "").toLowerCase();
   if (value.includes("false")) return "info";
+  if (value === "out_of_scope") return "info";
   if (value === "unverified") return "info";           // 检出未验证：中性
   if (value.includes("review")) return "warning";      // needs_review 待人工复核
   if (value.includes("confirm") || value.includes("verified")) return "success";
@@ -1106,7 +1129,9 @@ function findingStatusLabel(status?: string) {
     confirmed: "已确认",
     unverified: "检出未验证",
     needs_review: "需人工复核",
+    informational: "低置信度线索",
     false_positive: "误报排除",
+    out_of_scope: "范围外排除",
     candidate: "候选",
   };
   return map[String(status || "").toLowerCase()] || status || "unknown";
@@ -1187,6 +1212,7 @@ function verdictLabel(verdict?: string, state?: string) {
   const v = String(verdict || "").toLowerCase();
   const labels: Record<string, string> = {
     false_positive: "误报排除",
+    out_of_scope: "范围外排除",
     statically_verified: "静态确认",
     confirmed: "已确认",
     dynamic_confirmed: "动态复现",
@@ -1223,7 +1249,7 @@ function agentMessageLabel(msg: any) {
 
 function verdictTagType(verdict?: string) {
   const v = String(verdict || "").toLowerCase();
-  if (v === "false_positive") return "info";
+  if (v === "false_positive" || v === "out_of_scope") return "info";
   if (v.includes("review")) return "warning";
   if (v.includes("dynamic_confirmed") || v.includes("harness_confirmed")) return "success";
   if (v.includes("confirmed") || v.includes("verified")) return "success";

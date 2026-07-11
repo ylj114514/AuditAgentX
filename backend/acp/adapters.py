@@ -159,6 +159,7 @@ def acp_to_legacy_finding(acp_finding: dict[str, Any]) -> dict[str, Any]:
         "line": location.get("start_line"),
         "code_snippet": code.get("snippet", ""),
         "source": source.get("tool") or source.get("agent", ""),
+        "rule_id": source.get("rule_id", ""),
         "message": acp_finding.get("description", ""),
         "confidence": extra.get("confidence", 0.5),
         "verified": extra.get("verified", False),

@@ -114,6 +114,7 @@ function openScan(scanId: string) {
 function statusType(status?: string) {
   const value = String(status || "").toLowerCase();
   if (value === "failed") return "danger";
+  if (value === "partial_completed") return "warning";
   if (value === "done" || value === "finished") return "success";
   if (value === "running") return "warning";
   return "info";

@@ -14,8 +14,9 @@ from backend.repository.file_tree_builder import build_tree, find_entrypoints
 class RepoParserAgent:
     name = "repo_parser_agent"
 
-    def run(self, code_root: Path) -> dict:
-        files = scan_files(code_root)
+    def run(self, code_root: Path, *, max_files: int | None = None) -> dict:
+        max_files = max_files or getattr(self, "_max_files", 20000)
+        files = scan_files(code_root, max_files=max_files)
         languages, loc = detect_languages(files)
         dep_files, frameworks = parse_dependencies(code_root)
         entrypoints = find_entrypoints(code_root)
@@ -49,6 +50,12 @@ class RepoParserAgent:
                 intent="缺少 code_root，无法解析仓库",
                 state=ACPState.FAILED, error="missing code_root",
             )
+        raw_max_files = request.payload.get("max_files") or 20000
+        try:
+            max_files = max(1, min(int(raw_max_files), 200000))
+        except (TypeError, ValueError):
+            max_files = 20000
+        self._max_files = max_files
         metadata = self.run(Path(code_root_str))
         # 标准元信息（去掉 _ 前缀的内部字段），文件清单单列，避免污染 metadata
         public_meta = {k: v for k, v in metadata.items() if not k.startswith("_")}

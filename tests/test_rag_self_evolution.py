@@ -1,6 +1,6 @@
 """RAG 自进化闭环测试（Q2）。
 
-核心诚信保证：只有**可信标签**（人工 / 动态确认 / 明确误报）才录入知识库；
+核心诚信保证：只有**独立可信标签**（人工 / 动态确认）才录入知识库；
 Agent 自报 / needs_review 一律拒录，避免"循环自欺"把知识库喂脏。
 学到的知识必须能被检索并合并进后续复核。
 """
@@ -46,7 +46,8 @@ def test_reliable_false_positive_signal_is_merged_into_verification(learned_dir)
     fp = {"type": "SQL Injection", "status": "false_positive",
           "false_positive_reason": "使用了参数化查询", "context": "test_fixture",
           "evidence": {"sink": "cursor.execute"}}
-    assert FL.ingest_feedback(fp, "false_positive", "verify_false_positive") is True
+    assert FL.ingest_feedback(fp, "false_positive", "verify_false_positive") is False
+    assert FL.ingest_feedback(fp, "false_positive", "human") is True
 
     R.load_default_items.cache_clear()
     res = R.SecurityKnowledgeRetriever().retrieve(candidate={"type": "SQL Injection"})
@@ -65,4 +66,4 @@ def test_learn_from_scan_only_ingests_reliable_results(learned_dir):
     ]
     counts = FL.learn_from_scan(findings)
     assert counts["true_positive_ingested"] == 1
-    assert counts["false_positive_ingested"] == 1
+    assert counts["false_positive_ingested"] == 0

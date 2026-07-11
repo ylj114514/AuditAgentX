@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.1
     llm_max_tokens: int = 4096
-    llm_timeout: int = 120
+    llm_timeout: int = 60
     # 调用健壮性：失败重试次数与退避基数（秒）
-    llm_max_retries: int = 2
+    llm_max_retries: int = 1
     llm_retry_backoff: float = 1.5
 
     # ---- 验证并发 ----
@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     enable_semgrep: bool = True
     enable_bandit: bool = True
     enable_gitleaks: bool = True
+    enable_trivy: bool = True
+    # 进程被外部 timeout/重启杀掉时，后台任务没有机会写 failed。
+    # 查询扫描状态时超过该时长仍 running/queued 的任务会被标记为 failed。
+    stale_scan_after_seconds: int = 6 * 60 * 60
 
     # ---- 沙箱 ----
     enable_sandbox: bool = False

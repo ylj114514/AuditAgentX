@@ -69,6 +69,8 @@ def _sink_reaching_params(fn: ast.AST) -> dict[str, tuple[str, str, int]]:
                 src = ast.unparse(arg)
             except Exception:  # noqa: BLE001
                 continue
+            if tr.has_sanitizer(src):
+                continue
             if not tr.has_injection_marker(src):     # 必须是拼接/格式化上下文
                 continue
             for p in params:
@@ -77,24 +79,30 @@ def _sink_reaching_params(fn: ast.AST) -> dict[str, tuple[str, str, int]]:
     return reaching
 
 
-def _tainted_vars(fn: ast.AST) -> set[str]:
-    """函数内：被用户输入(source)污染的局部变量（含经其它污染变量传播，取不动点）。"""
-    assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)]
+def _tainted_vars(fn: ast.AST, before_line: int | None = None) -> set[str]:
+    """按源码顺序计算调用点之前的局部污点；净化和安全重赋值会断链。"""
+    assigns = [n for n in ast.walk(fn) if isinstance(n, (ast.Assign, ast.AnnAssign))]
+    assigns.sort(key=lambda node: getattr(node, "lineno", 0))
     tainted: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for a in assigns:
-            try:
-                src = ast.unparse(a.value)
-            except Exception:  # noqa: BLE001
-                continue
-            if tr.has_source(src) or any(
-                    re.search(r"\b" + re.escape(t) + r"\b", src) for t in tainted):
-                for tgt in a.targets:
-                    if isinstance(tgt, ast.Name) and tgt.id not in tainted:
-                        tainted.add(tgt.id)
-                        changed = True
+    for assignment in assigns:
+        if before_line is not None and getattr(assignment, "lineno", 0) >= before_line:
+            break
+        try:
+            src = ast.unparse(assignment.value)
+        except Exception:  # noqa: BLE001
+            continue
+        targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        is_tainted = (not tr.has_sanitizer(src)) and (
+            tr.has_source(src) or any(
+                re.search(r"\b" + re.escape(name) + r"\b", src) for name in tainted
+            )
+        )
+        for name in names:
+            if is_tainted:
+                tainted.add(name)
+            else:
+                tainted.discard(name)
     return tainted
 
 
@@ -102,7 +110,8 @@ def _arg_is_tainted(arg: ast.AST, tainted: set[str]) -> bool:
     if isinstance(arg, ast.Name) and arg.id in tainted:
         return True
     try:
-        return tr.has_source(ast.unparse(arg))
+        text = ast.unparse(arg)
+        return tr.has_source(text) and not tr.has_sanitizer(text)
     except Exception:  # noqa: BLE001
         return False
 
@@ -132,11 +141,18 @@ def analyze_python_interproc(rel: str, text: str) -> list[RawFinding]:
     findings: list[RawFinding] = []
     seen: set[tuple] = set()
     for caller, fn in funcs.items():
-        tainted = _tainted_vars(fn)
         for node in ast.walk(fn):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            if not isinstance(node, ast.Call):
                 continue
-            callee = node.func.id
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif (isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in {"self", "cls"}):
+                callee = node.func.attr
+            else:
+                continue
+            tainted = _tainted_vars(fn, before_line=node.lineno)
             reaching = sink_params.get(callee)
             if not reaching or callee == caller:
                 continue

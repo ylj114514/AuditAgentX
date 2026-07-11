@@ -40,7 +40,8 @@ class ScanOptions(BaseModel):
     dynamic_target: dict[str, Any] | None = None  # 动态靶场配置 {mode,...}
     max_verify_workers: int | None = None  # VerifyAgent 静态复核并发数；为空则使用后端配置
     max_verify_candidates: int | None = None  # 最多送入 VerifyAgent LLM 复核的候选数
-    max_files: int = 500
+    include_test_findings: bool = False  # 默认只审计生产代码；需要时显式纳入 sample/tests/docs
+    max_files: int = 20000
     severity_threshold: str = "low"
 
 
@@ -49,7 +50,7 @@ class ScanCreate(BaseModel):
     scan_type: str = "full"
     # 扫描模式：quick（仅静态）| standard（+语义审计+复核）| deep（+Docker 沙箱动态验证）
     scan_mode: str | None = None
-    enabled_tools: list[str] = ["semgrep", "gitleaks"]
+    enabled_tools: list[str] = ["semgrep", "bandit", "gitleaks", "trivy"]
     enabled_agents: list[str] = ["audit", "verify"]
     options: ScanOptions = ScanOptions()
 

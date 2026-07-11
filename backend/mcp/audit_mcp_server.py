@@ -5,7 +5,7 @@ verification. The in-process server is used by tests and the backend runtime;
 `backend.mcp.stdio_server` can expose the same tools through the official MCP
 SDK when that optional dependency is installed.
 
-工具清单（共 9 个）：
+工具清单：
   原有 7 个：
     read_code_context, run_sast_replay, verify_source_sink,
     build_evidence_chain, extract_target_function,
@@ -32,6 +32,7 @@ from backend.skills.harness_tools import (
 )
 from backend.dynamic.symbol_resolver import resolve_symbol
 from backend.rag.retriever import SecurityKnowledgeRetriever
+from backend.scanners.registry import run_scanner_tool, static_tool_preflight
 
 
 class AuditMCPServer:
@@ -262,6 +263,47 @@ class AuditMCPServer:
                     },
                 },
                 "handler": self._resolve_symbol,
+            },
+            "run_semgrep": {
+                "name": "run_semgrep",
+                "description": "Run Semgrep SAST scanning through the MCP tool boundary.",
+                "input_schema": _static_scanner_schema(),
+                "handler": self._run_semgrep,
+            },
+            "run_bandit": {
+                "name": "run_bandit",
+                "description": "Run Bandit Python security scanning through the MCP tool boundary.",
+                "input_schema": _static_scanner_schema(),
+                "handler": self._run_bandit,
+            },
+            "run_gitleaks": {
+                "name": "run_gitleaks",
+                "description": "Run Gitleaks secret scanning through the MCP tool boundary.",
+                "input_schema": _static_scanner_schema(),
+                "handler": self._run_gitleaks,
+            },
+            "run_trivy": {
+                "name": "run_trivy",
+                "description": "Run Trivy dependency/secret/IaC scanning through the MCP tool boundary.",
+                "input_schema": _static_scanner_schema(),
+                "handler": self._run_trivy,
+            },
+            "run_custom_rules": {
+                "name": "run_custom_rules",
+                "description": "Run AuditAgentX built-in offline static rules through the MCP tool boundary.",
+                "input_schema": _static_scanner_schema(),
+                "handler": self._run_custom_rules,
+            },
+            "check_static_tool_availability": {
+                "name": "check_static_tool_availability",
+                "description": "Check whether static scanner tools are installed/available without executing a scan.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "enabled_tools": {"type": ["array", "null"]},
+                    },
+                },
+                "handler": self._check_static_tool_availability,
             },
         }
 
@@ -507,3 +549,66 @@ class AuditMCPServer:
             arguments.get("symbol") or "",
             max_defs=int(arguments.get("max_defs") or 3),
         )
+
+    @staticmethod
+    def _run_static_scanner(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run one static scanner as an MCP tool and return structured output."""
+        code_root = arguments.get("code_root")
+        if not code_root:
+            return {
+                "raw_findings": [],
+                "scanner_status": {
+                    "tool": tool, "available": False, "executed": False,
+                    "success": False, "error": "missing_code_root", "finding_count": 0,
+                },
+            }
+        findings, status = run_scanner_tool(
+            tool,
+            Path(code_root),
+            max_files=int(arguments.get("max_files") or 20000),
+            scan_id=arguments.get("scan_id"),
+        )
+        return {
+            "raw_findings": [finding.to_dict() for finding in findings],
+            "scanner_status": status,
+        }
+
+    @staticmethod
+    def _run_semgrep(arguments: dict[str, Any]) -> dict[str, Any]:
+        return AuditMCPServer._run_static_scanner("semgrep", arguments)
+
+    @staticmethod
+    def _run_bandit(arguments: dict[str, Any]) -> dict[str, Any]:
+        return AuditMCPServer._run_static_scanner("bandit", arguments)
+
+    @staticmethod
+    def _run_gitleaks(arguments: dict[str, Any]) -> dict[str, Any]:
+        return AuditMCPServer._run_static_scanner("gitleaks", arguments)
+
+    @staticmethod
+    def _run_trivy(arguments: dict[str, Any]) -> dict[str, Any]:
+        return AuditMCPServer._run_static_scanner("trivy", arguments)
+
+    @staticmethod
+    def _run_custom_rules(arguments: dict[str, Any]) -> dict[str, Any]:
+        return AuditMCPServer._run_static_scanner("custom", arguments)
+
+    @staticmethod
+    def _check_static_tool_availability(arguments: dict[str, Any]) -> dict[str, Any]:
+        checks = static_tool_preflight(arguments.get("enabled_tools") or None)
+        return {
+            "tools": checks,
+            "all_available": all(item.get("available") for item in checks),
+        }
+
+
+def _static_scanner_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["code_root"],
+        "properties": {
+            "code_root": {"type": "string"},
+            "max_files": {"type": ["integer", "null"], "default": 20000},
+            "scan_id": {"type": ["string", "null"]},
+        },
+    }

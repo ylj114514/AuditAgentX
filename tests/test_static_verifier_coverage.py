@@ -16,10 +16,10 @@ def _verdict(vtype: str, snippet: str):
 
 def test_deterministic_weak_crypto_and_random_are_confirmed():
     """弱加密/弱随机是确定性缺陷（无需污点源）-> 直接确认，不塞人工。"""
-    assert _verdict("Weak Cryptography", "h = hashlib.md5(data).hexdigest()") is True
+    assert _verdict("Weak Cryptography", "password_hash = hashlib.md5(password).hexdigest()") is True
     assert _verdict("Weak Cryptography", "c = Cipher.getInstance('DES/ECB/PKCS5Padding')") is True
     assert _verdict("Weak Randomness", "token = random.randint(1000, 9999)") is True
-    assert _verdict("Weak Randomness", "x = Math.random()") is True
+    assert _verdict("Weak Randomness", "x = Math.random()") is not True
     # 用安全随机则不确认
     assert _verdict("Weak Randomness", "token = secrets.token_hex(16)") is not True
 

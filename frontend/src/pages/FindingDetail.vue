@@ -290,8 +290,10 @@ const VERDICT_LABELS: Record<string, string> = {
   confirmed_dynamic: "动态复现",   // 兼容历史数据的旧拼写
   statically_verified: "静态确认",
   needs_review: "需人工复核",
+  informational: "低置信度线索",
   not_reproduced: "未复现",
   false_positive: "误报排除",
+  out_of_scope: "范围外排除",
   inconclusive: "无法判定",
   not_executed: "未执行",
   not_runtime_verifiable: "不适合动态验证",
@@ -374,6 +376,7 @@ function findingStatusLabel(status?: string) {
     confirmed: "已确认",
     unverified: "检出未验证",
     needs_review: "需人工复核",
+    informational: "低置信度线索",
     false_positive: "误报排除",
     candidate: "候选",
     statically_verified: "静态确认",

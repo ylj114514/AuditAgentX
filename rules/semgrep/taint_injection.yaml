@@ -20,12 +20,16 @@ rules:
     pattern-sanitizers:
       - pattern: int(...)
       - pattern: float(...)
-      - patterns:
-          - pattern: $CUR.execute($SQL, ...)
     pattern-sinks:
-      - pattern: $CUR.execute(...)
-      - pattern: $CUR.executemany(...)
-      - pattern: $DB.query(...)
+      - patterns:
+          - pattern: $CUR.execute($QUERY, ...)
+          - focus-metavariable: $QUERY
+      - patterns:
+          - pattern: $CUR.executemany($QUERY, ...)
+          - focus-metavariable: $QUERY
+      - patterns:
+          - pattern: $DB.query($QUERY, ...)
+          - focus-metavariable: $QUERY
 
   - id: auditagentx-python-command-injection-taint
     languages: [python]
@@ -45,9 +49,9 @@ rules:
       - pattern: re.escape(...)
     pattern-sinks:
       - pattern: os.system(...)
-      - pattern: subprocess.call(...)
-      - pattern: subprocess.run(...)
-      - pattern: subprocess.Popen(...)
+      - pattern: subprocess.call(..., shell=True, ...)
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.Popen(..., shell=True, ...)
       - pattern: os.popen(...)
 
   - id: auditagentx-python-path-traversal-taint
@@ -66,5 +70,6 @@ rules:
       - pattern: os.path.basename(...)
       - pattern: werkzeug.utils.secure_filename(...)
     pattern-sinks:
-      - pattern: open(...)
-      - pattern: open($PATH, ...)
+      - patterns:
+          - pattern: open($PATH, ...)
+          - focus-metavariable: $PATH

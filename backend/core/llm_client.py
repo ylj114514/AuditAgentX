@@ -34,6 +34,10 @@ class LLMClient:
                 api_key=settings.llm_api_key,
                 base_url=settings.llm_base_url,
                 timeout=settings.llm_timeout,
+                # Retry exactly once in this wrapper. The SDK's hidden retries
+                # otherwise multiply with our loop (3 x 3 attempts per finding)
+                # and make a four-worker verification stage appear frozen.
+                max_retries=0,
             )
         return self._client
 

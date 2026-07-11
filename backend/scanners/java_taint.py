@@ -10,8 +10,8 @@
     ...
     String sql = "SELECT ... '" + param + "'";   // 拼接
     statement.executeQuery(sql);                  // sink（跨多行、跨变量）
-其安全用例则用 `bar = cond ? "常量" : param` 三元打断污点——本模块据此做「污点断链」判定，
-从而区分真漏洞与安全用例（而非见 sink 就报）。
+三元表达式只要任一可达分支含攻击者输入就仍是污点；真正的安全用例必须让所有分支
+都成为常量或经过正确的上下文净化。
 
 覆盖类别：SQL 注入 / 命令注入 / 路径遍历 / XSS / Trust Boundary / LDAP 注入 / XPath 注入。
 javalang 缺失或解析失败时优雅返回 []（不影响其它扫描器）。
@@ -200,38 +200,58 @@ class _MethodTaint:
                 self.source_containers.add(tgt.member)
 
     # ---- 计算污点变量集合（不动点）----
-    def compute_tainted(self) -> None:
-        self._collect_source_containers()
-        self.tainted |= self.source_containers
+    def compute_tainted(self, upto_line: int | None = None) -> None:
+        """按源码顺序计算指定 sink 之前的污点状态；重赋安全值/净化值会断链。"""
+        self.tainted = set()
+        self.source_containers = set()
         m = self.method
-        changed = True
-        while changed:
-            changed = False
-            for _, decl in m.filter(jt.LocalVariableDeclaration):
-                for d in decl.declarators:
+        events = []
+        for cls in (jt.LocalVariableDeclaration, jt.Assignment,
+                    jt.EnhancedForControl, jt.MethodInvocation):
+            events.extend(node for _, node in m.filter(cls))
+        events.sort(key=lambda node: (_pos_line(node), 0 if isinstance(
+            node, (jt.LocalVariableDeclaration, jt.Assignment)) else 1))
+        for event in events:
+            line = _pos_line(event)
+            if upto_line is not None and line and line > upto_line:
+                break
+            if isinstance(event, jt.LocalVariableDeclaration):
+                for d in event.declarators:
+                    if self._is_direct_source(d.initializer):
+                        self.source_containers.add(d.name)
                     if d.initializer is not None and self.expr_tainted(d.initializer):
-                        changed |= self._add(d.name)
-            for _, asg in m.filter(jt.Assignment):
-                tgt = asg.expressionl
+                        self._add(d.name)
+                    else:
+                        self.tainted.discard(d.name)
+                        self.source_containers.discard(d.name)
+            elif isinstance(event, jt.Assignment):
+                tgt = event.expressionl
                 name = getattr(tgt, "member", None) if isinstance(tgt, jt.MemberReference) else None
-                if name and self.expr_tainted(asg.value):
-                    changed |= self._add(name)
-            for _, ctrl in m.filter(jt.EnhancedForControl):
-                if self.expr_tainted(ctrl.iterable):
-                    var = getattr(ctrl, "var", None)
+                if not name:
+                    continue
+                if self._is_direct_source(event.value):
+                    self.source_containers.add(name)
+                if self.expr_tainted(event.value):
+                    self._add(name)
+                else:
+                    self.tainted.discard(name)
+                    self.source_containers.discard(name)
+            elif isinstance(event, jt.EnhancedForControl):
+                if self.expr_tainted(event.iterable):
+                    var = getattr(event, "var", None)
                     for d in getattr(var, "declarators", []) or []:
-                        changed |= self._add(d.name)
-            for _, mi in m.filter(jt.MethodInvocation):
-                if mi.member in CONTAINER_WRITE and mi.qualifier:
-                    root = _qual_root(mi.qualifier)
-                    if root and any(self.expr_tainted(a) for a in (mi.arguments or [])):
-                        changed |= self._add(root)
+                        self._add(d.name)
+            elif event.member in CONTAINER_WRITE and event.qualifier:
+                root = _qual_root(event.qualifier)
+                if root and any(self.expr_tainted(a) for a in (event.arguments or [])):
+                    self._add(root)
 
     # ---- 检出 sink ----
     def find_sinks(self):
         results = []  # (vuln_type, severity, line, sink_desc)
         m = self.method
         for _, mi in m.filter(jt.MethodInvocation):
+            self.compute_tainted(_pos_line(mi))
             member = mi.member
             args_tainted = any(self.expr_tainted(a) for a in (mi.arguments or []))
             if member in SQL_MEMBERS and args_tainted:
@@ -242,6 +262,8 @@ class _MethodTaint:
                 results.append(("LDAP Injection", "high", _pos_line(mi), member))
             elif member in XPATH_MEMBERS and args_tainted:
                 results.append(("XPath Injection", "high", _pos_line(mi), member))
+            elif member in PATH_MEMBERS and args_tainted:
+                results.append(("Path Traversal", "medium", _pos_line(mi), member))
             elif member in TRUSTBOUND_MEMBERS and args_tainted:
                 results.append(("Trust Boundary Violation", "medium", _pos_line(mi), member))
             # XSS：response.getWriter().print/println/write/format(污点)
@@ -251,6 +273,7 @@ class _MethodTaint:
                             and any(self.expr_tainted(a) for a in (s.arguments or [])):
                         results.append(("XSS", "medium", _pos_line(mi), f"getWriter().{s.member}"))
         for _, cc in m.filter(jt.ClassCreator):
+            self.compute_tainted(_pos_line(cc))
             leaf = _type_leaf(cc.type)
             if not any(self.expr_tainted(a) for a in (cc.arguments or [])):
                 continue
@@ -274,9 +297,6 @@ def analyze_java(rel: str, text: str) -> list[RawFinding]:
     seen: set[tuple] = set()
     for _, method in tree.filter(jt.MethodDeclaration):
         analyzer = _MethodTaint(method)
-        analyzer.compute_tainted()
-        if not analyzer.tainted:
-            continue
         for vuln_type, sev, line, sink_desc in analyzer.find_sinks():
             key = (rel, vuln_type, line)
             if key in seen:

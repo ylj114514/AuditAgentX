@@ -116,6 +116,48 @@ def main() -> None:
             "max_defs": max_defs,
         })["structuredContent"]
 
+    @mcp.tool()
+    def run_semgrep(code_root: str, max_files: int | None = 20000, scan_id: str | None = None) -> dict:
+        """静态扫描：通过 MCP 执行 Semgrep。"""
+        return bridge.call_tool("run_semgrep", {
+            "code_root": code_root, "max_files": max_files, "scan_id": scan_id,
+        })["structuredContent"]
+
+    @mcp.tool()
+    def run_bandit(code_root: str, max_files: int | None = 20000, scan_id: str | None = None) -> dict:
+        """静态扫描：通过 MCP 执行 Bandit。"""
+        return bridge.call_tool("run_bandit", {
+            "code_root": code_root, "max_files": max_files, "scan_id": scan_id,
+        })["structuredContent"]
+
+    @mcp.tool()
+    def run_gitleaks(code_root: str, max_files: int | None = 20000, scan_id: str | None = None) -> dict:
+        """静态扫描：通过 MCP 执行 Gitleaks。"""
+        return bridge.call_tool("run_gitleaks", {
+            "code_root": code_root, "max_files": max_files, "scan_id": scan_id,
+        })["structuredContent"]
+
+    @mcp.tool()
+    def run_trivy(code_root: str, max_files: int | None = 20000, scan_id: str | None = None) -> dict:
+        """静态扫描：通过 MCP 执行 Trivy。"""
+        return bridge.call_tool("run_trivy", {
+            "code_root": code_root, "max_files": max_files, "scan_id": scan_id,
+        })["structuredContent"]
+
+    @mcp.tool()
+    def run_custom_rules(code_root: str, max_files: int | None = 20000, scan_id: str | None = None) -> dict:
+        """静态扫描：通过 MCP 执行 AuditAgentX 内置规则。"""
+        return bridge.call_tool("run_custom_rules", {
+            "code_root": code_root, "max_files": max_files, "scan_id": scan_id,
+        })["structuredContent"]
+
+    @mcp.tool()
+    def check_static_tool_availability(enabled_tools: list | None = None) -> dict:
+        """静态扫描工具预检：只检查安装/可用性，不执行扫描。"""
+        return bridge.call_tool("check_static_tool_availability", {
+            "enabled_tools": enabled_tools,
+        })["structuredContent"]
+
     mcp.run()
 
 

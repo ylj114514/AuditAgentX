@@ -173,6 +173,14 @@ CASES: list[dict] = [
         "public class T {\n"
         "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
         "    String param = request.getParameter(\"id\");\n"
+        "    String bar = cond ? \"safe_constant\" : \"other_safe_constant\";\n"
+        "    String sql = \"SELECT * FROM users WHERE id='\" + bar + \"'\";\n"
+        "    conn.createStatement().executeQuery(sql);\n"
+        "  }\n}\n"},
+    {"name": "java_sqli_ternary_vuln.java", "type": "sqli", "vuln": True, "code":
+        "public class T {\n"
+        "  public void doPost(HttpServletRequest request, HttpServletResponse response) {\n"
+        "    String param = request.getParameter(\"id\");\n"
         "    String bar = cond ? \"safe_constant\" : param;\n"
         "    String sql = \"SELECT * FROM users WHERE id='\" + bar + \"'\";\n"
         "    conn.createStatement().executeQuery(sql);\n"
@@ -184,15 +192,17 @@ CASES: list[dict] = [
     {"name": "java_crypto_safe.java", "type": "weakcrypto", "vuln": False, "code":
         "class C { void f() { javax.crypto.Cipher.getInstance(\"AES/GCM/NoPadding\"); } }\n"},
     {"name": "java_rand_vuln.java", "type": "weakrand", "vuln": True, "code":
-        "class R { float f() { return new java.util.Random().nextFloat(); } }\n"},
+        "class R { int token() { return new java.util.Random().nextInt(); } }\n"},
     {"name": "java_rand_safe.java", "type": "weakrand", "vuln": False, "code":
         "class R { int f() { return new java.security.SecureRandom().nextInt(); } }\n"},
 
     # ---- 跨语言弱哈希（PHP / Go）----
     {"name": "php_md5_vuln.php", "type": "weakhash", "vuln": True, "code":
-        "<?php\n$h = md5($password);\n"},
+        "<?php\n$passwordHash = md5($password);\n"},
     {"name": "go_md5_vuln.go", "type": "weakhash", "vuln": True, "code":
-        "package main\nimport \"crypto/md5\"\nfunc f() { h := md5.New(); _ = h }\n"},
+        "package main\nimport \"crypto/md5\"\nfunc f() { passwordDigest := md5.New(); _ = passwordDigest }\n"},
+    {"name": "go_md5_checksum_safe.go", "type": "weakhash", "vuln": False, "code":
+        "package main\nimport \"crypto/md5\"\nfunc checksum() { fileChecksum := md5.New(); _ = fileChecksum }\n"},
 ]
 
 

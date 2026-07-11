@@ -133,6 +133,14 @@ _ALIASES = {
     # Semgrep/Bandit SSTI 规则 ID：render_template_string 拼接可控输入即 SSTI，
     # 子串 "template-string" 可同时命中 render-template-string / dangerous-template-string。
     "template-string": "ssti", "template_string": "ssti",
+    # 新扫描器名称复用已有、且 CWE/playbook/remediation 完整的策略，避免孤儿类型。
+    "header injection": "crlf injection", "log injection": "code injection",
+    "regex injection": "code injection", "permissive cors": "cors misconfiguration",
+    "jwt signature verification disabled": "auth bypass",
+    "insecure cookie": "missing security header", "weak randomness": "insecure random",
+    "dependency vulnerability": "outdated dependency",
+    "tls certificate validation disabled": "insecure configuration",
+    "risky security-sensitive import": "insecure configuration",
 }
 
 # 默认策略（未匹配到规则时）：优先尝试 harness（函数级，无需靶场）

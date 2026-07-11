@@ -19,6 +19,13 @@ SECRET_FIXTURE_PARTS = {
     "sample-keys", "sample_config_files", "sample-config-files", "testdata",
 }
 WORKFLOW_PREFIX = ".github/workflows/"
+THIRD_PARTY_PREFIXES = (
+    "thinkphp/library/", "extend/qiniu/", "extend/upyun/",
+)
+_BUNDLED_ASSET_NAME_RE = re.compile(
+    r"^(?:jquery(?:[-.][0-9.]+)?|video(?:\.min)?|member-formvalidator(?:[-.][0-9.]+)?)\.js$",
+    re.I,
+)
 
 _SHELL_OUTPUT_RE = re.compile(r"\b(echo|printf|cat|logger)\b", re.I)
 _WEB_OUTPUT_RE = re.compile(
@@ -60,11 +67,38 @@ def classify_finding_context(finding: dict[str, Any], snippet: str | None = None
     if _is_workflow_path(file_path):
         return _workflow_context(file_path, text)
 
+    if any(file_path.startswith(prefix) for prefix in THIRD_PARTY_PREFIXES):
+        return _blocked(
+            "third_party_source",
+            "out_of_scope",
+            "Bundled framework/SDK source is not project-owned remediation scope; track it through SCA/version upgrades.",
+            dynamic_applicable=False,
+        )
+
+    asset_name = PurePosixPath(file_path).name
+    if _BUNDLED_ASSET_NAME_RE.match(asset_name):
+        return _blocked(
+            "bundled_frontend_library",
+            "out_of_scope",
+            "Bundled/minified frontend library is not project-owned source; upgrade the library instead of reviewing generated findings.",
+            dynamic_applicable=False,
+        )
+
     if "xss" in vuln_type and _is_non_web_output(file_path, text):
         return _blocked(
             "non_web_output",
             "false_positive",
             "XSS requires browser/HTML/JS/HTTP response output; shell/CLI output is not an XSS sink.",
+            dynamic_applicable=False,
+        )
+
+    matched_line = str(finding.get("code_snippet") or finding.get("vulnerable_code") or "")
+    if "xss" in vuln_type and re.search(r"\$_SERVER\s*\[\s*['\"]SERVER_SOFTWARE['\"]\s*\]|\bPHP_OS\b", matched_line, re.I) \
+            and not re.search(r"HTTP_HOST|HTTP_(?:USER_AGENT|REFERER)|QUERY_STRING", matched_line, re.I):
+        return _blocked(
+            "trusted_server_metadata",
+            "false_positive",
+            "PHP_OS/SERVER_SOFTWARE are server-controlled metadata, not attacker-controlled HTML input.",
             dynamic_applicable=False,
         )
 
@@ -82,6 +116,19 @@ def classify_finding_context(finding: dict[str, Any], snippet: str | None = None
         )
 
     if ("path" in vuln_type or "traversal" in vuln_type) and _PATH_SINK_RE.search(text):
+        if (file_path.startswith("contrib/cmake/") or "/contrib/cmake/" in file_path) \
+                and re.search(r"(?:sys\.)?argv\[", text, re.I) \
+                and not re.search(r"request|_GET|_POST|req\.|args\.get", text, re.I):
+            return _blocked(
+                "trusted_build_cli",
+                "false_positive",
+                "CMake helper consumes an operator-supplied build directory; no remote/untrusted trust boundary reaches the file read.",
+                dynamic_applicable=False,
+            )
+        # The cheap preclassification pass only has the matched sink line. Do
+        # not create a permanent blocker until the verifier has read context.
+        if snippet is None:
+            return result
         if not _USER_SOURCE_RE.search(text):
             return _blocked(
                 "missing_source_to_sink",

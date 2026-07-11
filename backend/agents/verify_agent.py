@@ -81,20 +81,28 @@ class VerifyAgent(BaseAgent):
     def _merge_verdict(candidate: dict[str, Any], tool_context: dict[str, Any],
                        llm_result: dict[str, Any]) -> dict[str, Any]:
         heuristic = tool_context.get("heuristic_result", {}) or {}
-        local_valid = heuristic.get("is_valid")
-        llm_valid = llm_result.get("is_valid") if isinstance(llm_result, dict) else None
+        local_valid = _normalize_bool(heuristic.get("is_valid"))
+        llm_valid = _normalize_bool(llm_result.get("is_valid") if isinstance(llm_result, dict) else None)
 
         verdict = dict(llm_result)
+        verdict["is_valid"] = llm_valid
         if local_valid is False and llm_valid is True:
             # 冲突：LLM 明确确认为漏洞，本地启发式却判为"安全模式"。
             # 安全审计中"漏报"比"误报"更危险，故不让 naive 正则静默否决 LLM——
             # 保留为待人工复核并记录分歧，而不是直接丢成 false_positive。
-            verdict["is_valid"] = True
-            verdict["needs_review"] = True
-            verdict["heuristic_disagreement"] = (
-                heuristic.get("false_positive_reason") or heuristic.get("reason")
-                or "本地启发式判为安全，但 LLM 判为漏洞，需人工复核。"
-            )
+            if _strong_local_rejection(heuristic):
+                verdict["is_valid"] = False
+                verdict["needs_review"] = False
+                verdict["false_positive_reason"] = (
+                    heuristic.get("false_positive_reason") or heuristic.get("reason")
+                )
+            else:
+                verdict["is_valid"] = True
+                verdict["needs_review"] = True
+                verdict["heuristic_disagreement"] = (
+                    heuristic.get("false_positive_reason") or heuristic.get("reason")
+                    or "本地启发式判为安全，但 LLM 判为漏洞，需人工复核。"
+                )
         elif local_valid is False:
             # LLM 未明确确认（不确定/缺失/报错），且本地启发式命中明确安全信号 -> 判误报
             verdict["is_valid"] = False
@@ -104,8 +112,22 @@ class VerifyAgent(BaseAgent):
                 or heuristic.get("reason")
                 or "Local verification tools rejected this candidate."
             )
-        elif "is_valid" not in verdict or verdict.get("_error"):
-            verdict["is_valid"] = True if local_valid is None else bool(local_valid)
+        elif local_valid is True and llm_valid is False:
+            verdict["is_valid"] = True
+            # Independent verifiers disagree. Only an exact weak hash used in
+            # password/authentication state is deterministic enough to prevail;
+            # generic window heuristics remain reviewable.
+            verdict["needs_review"] = heuristic.get("evidence_strength") != "authentication_hash"
+            verdict["heuristic_disagreement"] = (
+                verdict.get("false_positive_reason") or
+                "本地静态验证确认漏洞，但 LLM 判为误报，保留本地证据并标记分歧。"
+            )
+            verdict["confidence"] = min(_bounded_float(verdict.get("confidence"), default=0.5), 0.75)
+        elif local_valid is True:
+            verdict["is_valid"] = True
+        elif verdict.get("_error") or llm_valid is None:
+            verdict["is_valid"] = None
+            verdict["needs_review"] = True
 
         if not verdict.get("confidence"):
             verdict["confidence"] = heuristic.get("confidence", candidate.get("confidence", 0.5))
@@ -133,26 +155,23 @@ class VerifyAgent(BaseAgent):
             else:
                 verdict["needs_review"] = True
 
-        if _requires_manual_review(candidate, tool_context, heuristic, verdict):
-            blocker = "No deterministic local verifier or SAST replay matched this finding; LLM-only confirmation remains needs_review."
-            verdict["needs_review"] = True
-            verdict["confidence"] = min(verdict["confidence"], 0.75)
-            verdict["confirmed_blockers"] = _dedupe_list(
-                list(verdict.get("confirmed_blockers") or []) + [blocker]
-            )
-            verdict.setdefault("downgrade_reason", blocker)
-
         for field in ("source", "sink", "propagation_path", "recommended_poc_strategy", "call_path"):
             if not verdict.get(field) and heuristic.get(field):
                 verdict[field] = heuristic[field]
 
-        if not verdict.get("evidence_chain"):
-            verdict["evidence_chain"] = tool_context.get("evidence_chain") or {
-                "tool_calls": tool_context.get("tools_used", []),
-                "call_path": verdict.get("call_path", []),
-                "checks": heuristic.get("checks", []),
-                "sast_replay": tool_context.get("sast_replay", {}),
+        tool_evidence_chain = tool_context.get("evidence_chain") or {
+            "tool_calls": tool_context.get("tools_used", []),
+            "call_path": verdict.get("call_path", []),
+            "checks": heuristic.get("checks", []),
+            "sast_replay": tool_context.get("sast_replay", {}),
+        }
+        if verdict.get("evidence_chain") and isinstance(verdict.get("evidence_chain"), dict):
+            verdict["evidence_chain"] = {
+                **tool_evidence_chain,
+                "llm_assessment": verdict.get("evidence_chain"),
             }
+        else:
+            verdict["evidence_chain"] = tool_evidence_chain
         verdict["tool_calls"] = tool_context.get("tools_used", [])
 
         knowledge = _knowledge_from_tool_context(tool_context)
@@ -182,6 +201,15 @@ class VerifyAgent(BaseAgent):
         verdict["runtime_verification_status"] = dynamic_verdict
         verdict["_dynamic_result"] = dynamic_result
         verdict["_harness_result"] = harness_result
+
+        if _requires_manual_review(candidate, tool_context, heuristic, verdict):
+            blocker = "No deterministic local verifier or SAST replay matched this finding; LLM-only confirmation remains needs_review."
+            verdict["needs_review"] = True
+            verdict["confidence"] = min(verdict["confidence"], 0.75)
+            verdict["confirmed_blockers"] = _dedupe_list(
+                list(verdict.get("confirmed_blockers") or []) + [blocker]
+            )
+            verdict.setdefault("downgrade_reason", blocker)
 
         if not verdict.get("required_runtime_conditions"):
             verdict["required_runtime_conditions"] = _runtime_conditions(candidate, heuristic)
@@ -238,11 +266,11 @@ class VerifyAgent(BaseAgent):
                       enable_harness=enable_harness, base_url=base_url, endpoints=endpoints)
 
         # 静态裁决 + 动态裁决 -> 综合裁决
-        is_valid = vr.get("is_valid", True)
+        is_valid = _normalize_bool(vr.get("is_valid"))
         needs_review = bool(vr.get("needs_review"))
         if is_valid is False:
             static_verdict = "false_positive"
-        elif needs_review:
+        elif needs_review or is_valid is not True:
             static_verdict = "needs_review"   # LLM 确认但本地启发式有异议，交人工复核（不静默丢弃）
         else:
             static_verdict = "confirmed"
@@ -332,6 +360,37 @@ def _bounded_float(value: Any, *, default: float) -> float:
     return max(0.0, min(parsed, 1.0))
 
 
+def _normalize_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "yes", "y", "1", "valid", "confirmed"}:
+            return True
+        if text in {"false", "no", "n", "0", "invalid", "false_positive", "fp"}:
+            return False
+    return None
+
+
+def _strong_local_static_evidence(heuristic: dict[str, Any]) -> bool:
+    if heuristic.get("deterministic_flow"):
+        return True
+    if heuristic.get("verification_level") == "local_static_verified":
+        return True
+    if heuristic.get("is_valid") is True and heuristic.get("source") and heuristic.get("sink"):
+        return bool(heuristic.get("propagation_path") or heuristic.get("call_path"))
+    return False
+
+
+def _strong_local_rejection(heuristic: dict[str, Any]) -> bool:
+    return heuristic.get("evidence_strength") in {
+        "no_hardcoded_literal", "non_credential_literal", "protocol_nonce",
+        "non_security_random_use", "safe_deserialization_loader",
+    }
+
+
 def _knowledge_from_tool_context(tool_context: dict[str, Any]) -> dict[str, Any]:
     knowledge = tool_context.get("knowledge_result") or {}
     playbook = tool_context.get("playbook_result") or {}
@@ -387,7 +446,7 @@ def _requires_manual_review(candidate: dict[str, Any], tool_context: dict[str, A
     dynamic_verdict = verdict.get("dynamic_verdict") or verdict.get("runtime_verification_status")
     if dynamic_verdict in {"dynamic_confirmed", "harness_confirmed", "harness_target_confirmed"}:
         return False
-    if heuristic.get("deterministic_flow"):
+    if _strong_local_static_evidence(heuristic):
         return False
     extra = candidate.get("extra") or {}
     analysis = str(extra.get("analysis") or candidate.get("analysis") or "")

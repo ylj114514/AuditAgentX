@@ -7,7 +7,8 @@
 可信来源（RELIABLE_LABEL_SOURCES）：
     - human                : 人工在前端标注（黄金 ground truth）
     - dynamic_confirmed    : 框架侧动态确认（nonce / HTTP 真实复现），有独立证据
-    - verify_false_positive: VerifyAgent / context_classifier 明确判 false_positive（带理由）
+    自动 VerifyAgent 结论不是独立真值，不能反向训练自身。误报只接受人工标注；
+    真实漏洞可接受运行时独立复现。
 
 学到的知识写入 data/rag_feedback/learned_feedback.json（gitignore，不污染 curated 知识），
 retriever.load_default_items 会自动加载它并用于后续检索。
@@ -22,7 +23,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-RELIABLE_LABEL_SOURCES = {"human", "dynamic_confirmed", "verify_false_positive"}
+RELIABLE_LABEL_SOURCES = {"human", "dynamic_confirmed"}
 _LEARNED_FILE = "learned_feedback.json"
 
 
@@ -119,8 +120,8 @@ def ingest_feedback(finding: dict, label: str, label_source: str) -> bool:
 def learn_from_scan(findings: list[dict]) -> dict:
     """扫描结束后自动从**可信**结果自进化：
       - dynamically_verified=True -> true_positive（来源 dynamic_confirmed）
-      - status=false_positive     -> false_positive（来源 verify_false_positive）
-    Agent 自己 needs_review / unverified 的一律不录。返回计数。
+    Agent 自己的 false_positive / needs_review / unverified 一律不录，避免
+    “自己判定 -> 写入知识库 -> 下次用自己的结论增强置信度”的反馈回路。
     """
     tp = fp = 0
     for f in findings or []:
@@ -128,8 +129,6 @@ def learn_from_scan(findings: list[dict]) -> dict:
         ver = ev.get("verification") or {}
         if f.get("dynamically_verified") or ver.get("dynamically_verified"):
             tp += 1 if ingest_feedback(f, "true_positive", "dynamic_confirmed") else 0
-        elif f.get("status") == "false_positive":
-            fp += 1 if ingest_feedback(f, "false_positive", "verify_false_positive") else 0
     if tp or fp:
         logger.info("扫描自进化：录入真实确认 %d 条 / 误报 %d 条", tp, fp)
     return {"true_positive_ingested": tp, "false_positive_ingested": fp}

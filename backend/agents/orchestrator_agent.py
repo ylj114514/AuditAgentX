@@ -28,9 +28,10 @@ from backend.agents.static_scan_agent import StaticScanAgent
 from backend.agents.audit_agent import AuditAgent
 from backend.agents.verify_agent import VerifyAgent
 from backend.verifier.pipeline import ExploitPipeline
+from backend.verifier.evidence_collector import EvidenceCollector
 from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent
 from backend.verifier import exploit_validator as judge
-from backend.verifier.context_classifier import apply_context_to_finding
+from backend.verifier.context_classifier import apply_context_to_finding, classify_finding_context
 
 # ACP 通信协议
 from backend.acp.factory import make_message
@@ -202,9 +203,20 @@ class OrchestratorAgent:
             except Exception:  # noqa: BLE001
                 logger.exception("[%s] RAG 自进化录入失败（已忽略）", self.scan.id)
 
-            self.scan.status = "done"
+            scanner_failures = [
+                item for item in (self.config.get("scanner_status") or [])
+                if item.get("tool") in set(self.config.get("enabled_tools") or [])
+                and not item.get("success")
+            ]
+            self.scan.status = "partial_completed" if scanner_failures else "done"
             self.scan.progress = 100
-            self.scan.current_stage = "finished"
+            self.scan.current_stage = "finished_with_tool_failures" if scanner_failures else "finished"
+            if scanner_failures:
+                summary = "; ".join(
+                    f"{item.get('tool')}: {item.get('error') or 'failed'}"
+                    for item in scanner_failures
+                )
+                self.scan.error = f"部分扫描器未成功执行: {summary}"[:1000]
             self.scan.finished_at = datetime.utcnow()
             self.db.commit()
 
@@ -218,7 +230,8 @@ class OrchestratorAgent:
                     "total_findings": len(confirmed),
                     "confirmed": sum(1 for f in confirmed if f.get("status") == "confirmed"),
                 },
-                state=ACPState.SUCCESS,
+                state=ACPState.SKIPPED if scanner_failures else ACPState.SUCCESS,
+                error=self.scan.error if scanner_failures else None,
             )
         except ScanCancelled as e:
             logger.info("扫描 %s 已取消: %s", self.scan.id, e)
@@ -268,7 +281,10 @@ class OrchestratorAgent:
             receiver="repo_parser_agent",
             message_type=ACPMessageType.PARSE_REQUEST,
             intent="解析代码仓库元信息",
-            payload={"code_root": str(code_root)},
+            payload={
+                "code_root": str(code_root),
+                "max_files": (self.config.get("options") or {}).get("max_files"),
+            },
         )
         reply = self._dispatch_acp(req)
         metadata = dict(reply.payload.get("metadata") or {})
@@ -286,15 +302,25 @@ class OrchestratorAgent:
 
     def _static_scan(self, code_root: Path) -> list:
         self._stage("StaticScanAgent", 35)
-        tools = self.config.get("enabled_tools", ["semgrep", "gitleaks"])
+        tools = self.config.get("enabled_tools", ["semgrep", "bandit", "gitleaks", "trivy"])
         # ACP 消息驱动：orchestrator --static_scan.request--> StaticScanAgent.run_acp
         req = self._make_request(
             receiver="static_scan_agent",
             message_type=ACPMessageType.STATIC_SCAN_REQUEST,
             intent=f"启动静态扫描，工具: {tools}",
-            payload={"code_root": str(code_root), "enabled_tools": tools},
+            payload={
+                "code_root": str(code_root), "enabled_tools": tools,
+                "max_files": (self.config.get("options") or {}).get("max_files") or 20000,
+                "severity_threshold": (self.config.get("options") or {}).get("severity_threshold") or "low",
+            },
         )
         reply = self._dispatch_acp(req)
+        self.config["scanner_status"] = reply.payload.get("scanner_status") or []
+        self.config["raw_finding_count"] = len(
+            reply.payload.get("raw_findings") or reply.payload.get("_raw") or []
+        )
+        self.scan.config_json = json.dumps(self.config, ensure_ascii=False, default=str)
+        self.db.commit()
         # run_acp 在 payload.raw_findings 中保留原始 RawFinding dict；_raw 仅作旧别名
         raw_dicts = reply.payload.get("raw_findings") or reply.payload.get("_raw") or []
         return [_raw_finding_from_dict(d) for d in raw_dicts]
@@ -309,7 +335,8 @@ class OrchestratorAgent:
             candidates.append({
                 "type": rf.type, "severity": rf.severity, "file": rf.file,
                 "start_line": rf.line, "line": rf.line, "code_snippet": rf.code_snippet,
-                "confidence": 0.5, "source": rf.source, "verified": False,
+                "confidence": float((rf.extra or {}).get("confidence", 0.5) or 0.5),
+                "source": rf.source, "verified": False,
                 "status": "candidate", "message": rf.message,
                 "rule_id": rf.rule_id, "extra": rf.extra,
             })
@@ -378,7 +405,51 @@ class OrchestratorAgent:
         enable_harness = opts.get("enable_harness", False) or "harness" in agents_enabled
         dynamic_target = opts.get("dynamic_target")
 
-        candidates = judge.rank(candidates)
+        # 在昂贵的 VerifyAgent/LLM 之前，对所有候选执行廉价且确定性的项目范围分流。
+        # 以前先截 Top-N，导致测试/样例代码和低置信度单规则告警在截断后被统一写成
+        # needs_review；这正是大型真实项目人工复核数失控的根因。
+        preclassified: list[dict] = []
+        verify_candidates: list[dict] = []
+        include_test_findings = bool(opts.get("include_test_findings", False))
+        for original in candidates:
+            c = dict(original)
+            context = classify_finding_context(c)
+            apply_context_to_finding(c, context)
+            excluded_by_scope = context.get("risk_modifier") == "out_of_scope"
+            if ((context.get("context") == "test_fixture" and not include_test_findings)
+                    or excluded_by_scope):
+                c["verified"] = False
+                c["status"] = "out_of_scope"
+                c["false_positive_reason"] = context.get("reason") or (
+                    "默认生产代码扫描不包含 sample/test/demo/docs/fixture；"
+                    "如需审计测试资产请设置 include_test_findings=true。"
+                )
+                c["_verify"] = {
+                    "static_verdict": "out_of_scope",
+                    "final_verdict": "out_of_scope",
+                    "confidence": c.get("confidence", 0.5),
+                    "false_positive_reason": c["false_positive_reason"],
+                    "excluded_by_scope": True,
+                }
+                preclassified.append(c)
+            elif self._is_low_confidence_advisory(c):
+                c["verified"] = False
+                c["status"] = "informational"
+                c["_verify"] = {
+                    "static_verdict": "informational",
+                    "final_verdict": "informational",
+                    "confidence": c.get("confidence", 0.5),
+                    "detail": (
+                        "单一静态规则的低置信度线索；缺少交叉工具或数据流证据，"
+                        "保留用于搜索，不进入漏洞人工复核队列。"
+                    ),
+                    "low_confidence_advisory": True,
+                }
+                preclassified.append(c)
+            else:
+                verify_candidates.append(c)
+
+        candidates = judge.rank(verify_candidates)
         verify_limit = self._verify_candidate_limit(opts, len(candidates))
         skipped_candidates: list[dict] = []
         if "verify" in agents_enabled and verify_limit < len(candidates):
@@ -440,7 +511,7 @@ class OrchestratorAgent:
                     )
                     reply = self._dispatch_acp(req)
                     vinfo = reply.payload.get("verification") or {}
-                    sv = vinfo.get("static_verdict")
+                    sv = str(vinfo.get("static_verdict") or "").lower()
                     # needs_review（LLM 确认但本地启发式有异议）不能当成 confirmed，保留为待人工复核
                     if sv == "false_positive":
                         c["verified"] = False
@@ -448,9 +519,16 @@ class OrchestratorAgent:
                     elif sv == "needs_review" or vinfo.get("confirmed_blockers"):
                         c["verified"] = False
                         c["status"] = "needs_review"
-                    else:
+                    elif sv == "confirmed":
                         c["verified"] = True
                         c["status"] = "confirmed"
+                    else:
+                        c["verified"] = False
+                        c["status"] = "needs_review"
+                        vinfo.setdefault(
+                            "confirmed_blockers",
+                            [f"VerifyAgent returned unknown static_verdict={sv or '<missing>'}"],
+                        )
                     conf = reply.status.confidence
                     c["confidence"] = float(conf if conf is not None else c.get("confidence", 0.5) or 0.5)
                     if vinfo.get("dynamic_verdict"):
@@ -502,10 +580,9 @@ class OrchestratorAgent:
 
         results: list[dict] = [c for c in results_by_index if c is not None]
         results.extend(skipped_candidates)
+        results.extend(preclassified)
 
-        results = judge.filter_false_positives(results)
         results = judge.rank(results)
-
         # 2) 漏洞自动利用 + 动态验证（PDF 模块③；含 DeepAudit 式 Fuzzing Harness）
         if enable_exploit or enable_dynamic or enable_harness:
             self._stage("ExploitAgent/DynamicVerify", 88)
@@ -563,24 +640,58 @@ class OrchestratorAgent:
                     c.setdefault("runtime_verification_status", "dynamic_error")
                     c["_dynamic_error"] = str(dyn_exc)[:300]
 
+        self.config["result_counts"] = {
+            status: sum(1 for item in results if item.get("status") == status)
+            for status in (
+                "confirmed", "needs_review", "false_positive", "out_of_scope",
+                "informational", "unverified",
+            )
+        }
+        self.scan.config_json = json.dumps(self.config, ensure_ascii=False, default=str)
+        if hasattr(self, "db"):
+            self.db.commit()
         return results
+
+    @staticmethod
+    def _is_low_confidence_advisory(candidate: dict) -> bool:
+        """Keep noisy low-confidence rules visible without calling them reviewable vulnerabilities."""
+        rule_id = str(candidate.get("rule_id") or (candidate.get("extra") or {}).get("rule_id") or "").upper()
+        finding_type = str(candidate.get("type") or "").lower()
+        message = str(candidate.get("message") or "").lower()
+        if rule_id in {"DS-0026"} or "healthcheck" in finding_type or "healthcheck" in message:
+            return True
+        try:
+            confidence = float(candidate.get("confidence", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            confidence = 0.5
+        if confidence >= 0.5:
+            return False
+        if str(candidate.get("severity") or "low").lower() in {"high", "critical"}:
+            return False
+        sources = candidate.get("corroborating_sources") or (candidate.get("extra") or {}).get("corroborating_sources") or []
+        if len({str(source).lower() for source in sources if source}) > 1:
+            return False
+        extra = candidate.get("extra") or {}
+        if extra.get("taint_flow") or candidate.get("taint_flow"):
+            return False
+        return str(candidate.get("source") or "").lower() in {"semgrep", "custom-taint"}
 
     @staticmethod
     def _mark_verify_skipped(candidate: dict, limit: int, total: int) -> dict:
         c = dict(candidate)
         conf = float(c.get("confidence", 0.5) or 0.5)
         c["verified"] = False
-        c["status"] = "needs_review"
+        c["status"] = "unverified"
         c["confidence"] = conf
         c["_verify"] = {
-            "static_verdict": "needs_review",
+            "static_verdict": "unverified",
             "dynamic_verdict": "not_executed",
-            "final_verdict": "needs_review",
+            "final_verdict": "unverified",
             "confidence": conf,
             "false_positive_reason": (
                 f"超过本次 VerifyAgent 自动复核上限，仅自动复核 Top {limit}/{total} 个候选。"
             ),
-            "detail": "为控制 Standard/Deep 模式耗时，该候选保留为待人工复核。",
+            "detail": "为控制 Standard/Deep 模式耗时，该候选未自动复核；标记为 unverified，而非待人工验证。",
             "skipped_by_budget": True,
         }
         return c
@@ -603,11 +714,15 @@ class OrchestratorAgent:
                     {k: v for k, v in f.items() if k.startswith("_") or k in (
                         "detail", "context", "risk_modifier", "downgrade_reason",
                         "false_positive_reason", "dynamic_applicable", "confirmed_blockers",
+                        "rule_id", "message", "extra", "corroborating_sources",
+                        "corroborating_evidence", "duplicate_count",
                     )},
                     ensure_ascii=False, default=str,
                 ),
             ))
             ev = f.get("_evidence")
+            if not ev and f.get("_verify"):
+                ev = EvidenceCollector.build(f.get("_verify") or {})
             if ev:
                 self.db.add(Evidence(
                     id=ids.evidence_id(), finding_id=fid,

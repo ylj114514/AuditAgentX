@@ -149,11 +149,18 @@ class AuditAgent(BaseAgent):
                           limit: int) -> list[dict]:
         seen: set[str] = set()
         snippets: list[dict] = []
+        root = code_root.resolve()
         for f in raw_findings:
             if f.file in seen or len(snippets) >= limit:
                 continue
             seen.add(f.file)
-            fp = code_root / f.file
+            try:
+                fp = (root / f.file).resolve()
+                fp.relative_to(root)
+                if fp.is_symlink():
+                    continue
+            except (OSError, ValueError):
+                continue
             if not fp.exists():
                 snippets.append({"file": f.file, "code": f.code_snippet})
                 continue

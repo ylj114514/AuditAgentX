@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import or_
@@ -120,6 +120,11 @@ def list_scans(q: str | None = None, limit: int = 50,
     # 用布尔表达式而非 NULLS FIRST，保证跨 SQLite 版本可移植。
     rows = (query.order_by((Scan.started_at.is_(None)).desc(), Scan.started_at.desc())
             .limit(max(1, min(limit, 200))).all())
+    changed = False
+    for scan, _project in rows:
+        changed = _mark_stale_scan_if_needed(scan) or changed
+    if changed:
+        db.commit()
     scans = [{
         "scan_id": scan.id,
         "project_id": scan.project_id,
@@ -140,6 +145,8 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)) -> ScanStatus:
     scan = db.get(Scan, scan_id)
     if not scan:
         raise HTTPException(404, "scan not found")
+    if _mark_stale_scan_if_needed(scan):
+        db.commit()
     return ScanStatus(
         scan_id=scan.id, project_id=scan.project_id, status=scan.status,
         progress=scan.progress, current_stage=scan.current_stage,
@@ -170,13 +177,15 @@ def cancel_scan(scan_id: str, db: Session = Depends(get_db)) -> dict:
     scan = db.get(Scan, scan_id)
     if not scan:
         raise HTTPException(404, "scan not found")
-    if scan.status in {"done", "finished", "failed", "cancelled"}:
+    if scan.status in {"done", "finished", "failed", "cancelled", "partial_completed"}:
         return {"scan_id": scan.id, "status": scan.status}
     scan.status = "cancelled"
     scan.error = "用户已请求停止扫描"
     scan.finished_at = datetime.utcnow()
     db.commit()
-    return {"scan_id": scan.id, "status": "cancelled"}
+    from backend.scanners.base import cancel_scan_processes
+    terminated = cancel_scan_processes(scan_id)
+    return {"scan_id": scan.id, "status": "cancelled", "terminated_scanners": terminated}
 
 
 @router.get("/{scan_id}/agent-messages")
@@ -228,6 +237,9 @@ def _scan_stage_detail(scan: Scan) -> dict:
         ),
         "launch_plan": (opts.get("dynamic_target") or {}).get("launch_plan") or {},
         "elapsed_seconds": None,
+        "scanner_status": config.get("scanner_status") or [],
+        "raw_finding_count": config.get("raw_finding_count"),
+        "result_counts": config.get("result_counts") or {},
     }
     if scan.started_at:
         end = scan.finished_at or datetime.utcnow()
@@ -268,3 +280,28 @@ def _scan_stage_detail(scan: Scan) -> dict:
             "dynamic_target_status": None,
         })
     return detail
+
+
+def _mark_stale_scan_if_needed(scan: Scan) -> bool:
+    """Mark orphaned running scans failed after a conservative timeout.
+
+    FastAPI BackgroundTasks run in the server process. If that process or an
+    external script is killed by a wrapper timeout, OrchestratorAgent cannot run
+    its normal exception/finally path, leaving DB rows stuck at running forever.
+    This recovery is intentionally conservative and only runs during status
+    reads; it never deletes scan data.
+    """
+    if scan.status not in {"queued", "running"} or not scan.started_at:
+        return False
+    stale_after = max(3600, int(getattr(settings, "stale_scan_after_seconds", 21600) or 21600))
+    if datetime.utcnow() - scan.started_at <= timedelta(seconds=stale_after):
+        return False
+    scan.status = "failed"
+    scan.current_stage = scan.current_stage or "stale_scan_recovery"
+    scan.progress = min(int(scan.progress or 0), 99)
+    scan.error = (
+        f"扫描任务超过 {stale_after} 秒仍未收尾，可能被外部 timeout、进程重启或手动终止；"
+        "已由状态查询恢复为 failed，未删除任何 findings/reports。"
+    )
+    scan.finished_at = datetime.utcnow()
+    return True

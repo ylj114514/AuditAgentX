@@ -11,11 +11,11 @@ def test_static_scan_agent_records_tool_calls(tmp_path: Path):
     agent = StaticScanAgent()
     agent.run(tmp_path, ["custom"])
     tools = {call["tool"] for call in agent.tool_calls}
-    assert "custom" in tools
+    assert "run_custom_rules" in tools
     assert any("SQL injection" in call["purpose"] for call in agent.tool_calls)
 
 
-def test_verify_agent_confirms_unsafe_sql_with_local_tools(monkeypatch, tmp_path: Path):
+def test_verify_agent_keeps_unproven_parameter_origin_for_review(monkeypatch, tmp_path: Path):
     (tmp_path / "app.py").write_text(
         "\n".join([
             "def user(uid, cur):",
@@ -34,7 +34,7 @@ def test_verify_agent_confirms_unsafe_sql_with_local_tools(monkeypatch, tmp_path
         "confidence": 0.5,
     }, code_root=tmp_path)
 
-    assert result["is_valid"] is True
+    assert result["is_valid"] is None
     assert result["needs_review"] is True
     assert not result.get("source")
     assert not result.get("sink")
@@ -76,7 +76,7 @@ def test_mcp_server_exposes_verification_tools(tmp_path: Path):
     assert context["knowledge_result"]["top_result"]["cwe_id"] == "CWE-89"
     assert context["code_context"]["found"] is True
     assert context["heuristic_result"]["is_valid"] is None
-    assert "attacker-controlled source" in context["heuristic_result"]["reason"]
+    assert "not proven to reach" in context["heuristic_result"]["reason"]
     assert isinstance(context["evidence_chain"]["call_path"], list)
 
 

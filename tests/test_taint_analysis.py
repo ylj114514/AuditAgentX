@@ -169,8 +169,8 @@ def test_java_weak_crypto_hash_random_literal():
     scanner = CustomRuleScanner()
     weak = scanner._scan_file("C.java", [
         'javax.crypto.Cipher.getInstance("DES/CBC/PKCS5Padding");',
-        'java.security.MessageDigest.getInstance("MD5");',
-        'float r = new java.util.Random().nextFloat();',
+        'String tokenHash = java.security.MessageDigest.getInstance("MD5").digest(token);',
+        'float tokenNonce = new java.util.Random().nextFloat();',
     ])
     types = {f.type for f in weak}
     assert "Weak Cryptography" in types, "Java 弱加密(DES)漏检"
@@ -195,9 +195,9 @@ def test_multilang_weak_primitives_and_xss():
         return {f.type for f in scanner._scan_file(name, lines)
                 if (f.extra or {}).get("confidence", 1.0) >= 0.5}
 
-    assert "Weak Hash" in types("a.php", ["$h = md5($pw);"])
-    assert "Weak Hash" in types("b.go", ["h := md5.New()"])
-    assert "Weak Randomness" in types("c.php", ["$t = mt_rand();"])
+    assert "Weak Hash" in types("a.php", ["$passwordHash = md5($password);"])
+    assert "Weak Hash" in types("b.go", ["passwordDigest := md5.New()"])
+    assert "Weak Randomness" in types("c.php", ["$sessionToken = mt_rand();"])
     assert "Insecure Cookie" in types("d.py", ["SESSION_COOKIE_SECURE = False"])
     # 服务端 XSS：Node / C#（源 + 拼接）
     assert "XSS" in types("e.js", ['app.get("/p",(req,res)=>{res.send("<h1>"+req.query.n);});'])
@@ -234,17 +234,15 @@ def test_tainted_sql_flagged_with_source():
     assert sqli[0].extra["analysis"] == "taint"
 
 
-def test_sink_without_source_downgraded():
-    """有拼接但窗口内无用户可控 source -> 降级低置信，不算高危。"""
+def test_sink_without_source_is_suppressed():
+    """有拼接但没有到达 sink 的用户可控 source，不应污染候选池。"""
     scanner = CustomRuleScanner()
     findings = scanner._scan_file("t.py", [
         "x = 'admin'",
         "cur.execute('select * from u where id=' + x)",    # 拼接但 x 非 source
     ])
     sqli = [f for f in findings if f.type == "SQL Injection"]
-    assert len(sqli) == 1
-    assert sqli[0].severity == "low"
-    assert sqli[0].extra["confidence"] < 0.5
+    assert not sqli
 
 
 def test_placeholder_secret_skipped():
