@@ -359,6 +359,40 @@ def test_semgrep_workspace_truncation_marks_scan_partial(monkeypatch, tmp_path: 
     assert "source file limit" in scanner.degraded_reason
 
 
+def test_semgrep_marks_large_file_skip_as_incomplete_coverage(monkeypatch, tmp_path: Path):
+    (tmp_path / "app.py").write_text("VALUE = " + "1" * 600_000, encoding="utf-8")
+    monkeypatch.setattr(SemgrepScanner, "available", lambda self: True)
+
+    scanner = SemgrepScanner()
+    scanner.run(tmp_path)
+
+    assert scanner.workspace_status["skipped_large_files"] == 1
+    assert scanner.workspace_status["truncated"] is True
+    assert "file size limit" in scanner.degraded_reason
+
+
+def test_semgrep_marks_zero_rule_batches_as_incomplete_coverage(monkeypatch, tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+    monkeypatch.setattr(SemgrepScanner, "available", lambda self: True)
+
+    scanner = SemgrepScanner()
+    findings = scanner.run(tmp_path)
+
+    assert findings == []
+    assert scanner.workspace_status["coverage_status"] == "not_scanned"
+    assert "no applicable rule batches" in scanner.degraded_reason
+    assert scanner.batch_status == [{
+        "name": "planning",
+        "config": None,
+        "command_count": 0,
+        "target_file_count": 1,
+        "success": False,
+        "partial_results": False,
+        "error": "no applicable rule batches",
+        "finding_count": 0,
+    }]
+
+
 def test_non_production_scope_is_shared_by_secret_parser(tmp_path: Path):
     source = tmp_path / "tests" / "config.py"
     source.parent.mkdir()

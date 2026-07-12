@@ -54,6 +54,27 @@ class SemgrepScanner(BaseScanner):
                 scan_root, rules_root, max_files=max_files,
                 include_test_findings=include_test_findings,
             )
+            self.batch_status = []
+            if not batches:
+                copied_files = int(workspace_status.get("copied_files") or 0)
+                coverage_status = "not_scanned" if copied_files else "not_applicable"
+                reason = "no applicable rule batches"
+                workspace_status["coverage_status"] = coverage_status
+                workspace_status["reason"] = _append_batch_error(
+                    workspace_status.get("reason"), reason,
+                )
+                self.degraded_reason = f"semgrep {workspace_status['reason']}"
+                self.batch_status.append({
+                    "name": "planning",
+                    "config": None,
+                    "command_count": 0,
+                    "target_file_count": copied_files,
+                    "success": False,
+                    "partial_results": False,
+                    "error": reason,
+                    "finding_count": 0,
+                })
+                return []
             # 关键：强制 UTF-8。中文 Windows 默认 GBK，semgrep 读含 UTF-8 规则文件会崩（exit 2）
             env = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
             findings: list[RawFinding] = []
@@ -62,7 +83,6 @@ class SemgrepScanner(BaseScanner):
                 batch_errors.append(f"workspace: {workspace_status['reason']}")
             completed_batches = 0
             seen: set[tuple[str, str, int, str]] = set()
-            self.batch_status = []
 
             for batch in batches:
                 commands = _build_semgrep_commands(batch, scan_root)
@@ -171,12 +191,13 @@ def _prepare_ascii_semgrep_workspace(target: Path, custom_rules_dir: Path, *,
             shutil.copy2(target, scan_root / target.name)
             workspace_status = {
                 "copied_files": 1, "copied_bytes": size, "skipped_large_files": 0,
-                "truncated": False, "reason": None,
+                "truncated": False, "reason": None, "coverage_status": "complete",
             }
         else:
             workspace_status = {
                 "copied_files": 0, "copied_bytes": 0, "skipped_large_files": 1,
                 "truncated": True, "reason": f"target exceeds {max_file_bytes} byte file limit",
+                "coverage_status": "partial",
             }
     else:
         workspace_status = _copy_semgrep_sources(
@@ -251,12 +272,17 @@ def _copy_semgrep_sources(target: Path, destination: Path, *, max_files: int,
             copied_bytes += size
         if truncated:
             break
+    if skipped_large:
+        large_file_reason = f"source file size limit skipped {skipped_large} file(s)"
+        reason = _append_batch_error(reason, large_file_reason)
+        truncated = True
     return {
         "copied_files": copied,
         "copied_bytes": copied_bytes,
         "skipped_large_files": skipped_large,
         "truncated": truncated,
         "reason": reason,
+        "coverage_status": "partial" if truncated else "complete",
     }
 
 
