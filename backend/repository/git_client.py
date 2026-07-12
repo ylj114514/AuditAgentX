@@ -5,12 +5,19 @@ import logging
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
+from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 _FULL_COMMIT = re.compile(r"[0-9a-fA-F]{40}")
+_GITHUB_REPOSITORY_PART = re.compile(r"[A-Za-z0-9_.-]+")
+_MAX_GITHUB_ARCHIVE_BYTES = 1024 * 1024 * 1024
+_MAX_GITHUB_ARCHIVE_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def prepare_workspace(project_id: str, source_type: str, url: str | None,
@@ -57,7 +64,8 @@ def _git_clone(url: str, dest: Path, branch: str | None) -> None:
             result = _run_git(command)
             if result.returncode != 0:
                 _remove_workspace(dest)
-                raise RuntimeError(_format_clone_error(result, url, dest, branch=branch))
+                _clone_after_git_failure(result, url, dest, branch)
+                return
         observed = _decode_output(result.stdout).strip()
         if observed.lower() != branch.lower():
             _remove_workspace(dest)
@@ -77,17 +85,104 @@ def _git_clone(url: str, dest: Path, branch: str | None) -> None:
     if first.returncode == 0:
         return
 
-    if branch:
-        logger.warning("clone 指定分支 %s 失败，回退仓库默认分支: %s", branch, url)
-        _remove_workspace(dest)
-        fallback = _run_git([
-            "git", "-c", "http.version=HTTP/1.1", "clone", "-v", "--depth=1", "--", url, str(dest),
-        ])
-        if fallback.returncode == 0:
-            return
-        raise RuntimeError(_format_clone_error(fallback, url, dest, branch=None))
+    _remove_workspace(dest)
+    _clone_after_git_failure(first, url, dest, branch)
 
-    raise RuntimeError(_format_clone_error(first, url, dest, branch=branch))
+
+def _clone_after_git_failure(result: subprocess.CompletedProcess[bytes], url: str,
+                             dest: Path, branch: str | None) -> None:
+    """Preserve the requested revision when Git transport cannot retrieve GitHub."""
+    requested_ref = branch or "HEAD"
+    try:
+        _clone_github_archive(url, dest, requested_ref)
+    except Exception as exc:  # noqa: BLE001  Retain the original Git failure for diagnosis.
+        _remove_workspace(dest)
+        git_error = _format_clone_error(result, url, dest, branch=branch)
+        raise RuntimeError(
+            f"{git_error}\nGitHub archive fallback failed for requested ref "
+            f"{requested_ref}: {_safe_error_text(exc)}"
+        ) from exc
+    logger.warning(
+        "git transport failed; retrieved GitHub archive at requested ref %s: %s", requested_ref, url,
+    )
+
+
+def _clone_github_archive(url: str, dest: Path, ref: str) -> None:
+    """Download and safely unpack GitHub's archive for exactly ``ref``.
+
+    This is intentionally a GitHub-only transport fallback.  It must never turn
+    a requested branch/commit into an unrecorded default-branch checkout.
+    """
+    archive_url = _github_archive_url(url, ref)
+    if not archive_url:
+        raise ValueError("archive fallback is only available for github.com HTTPS repository URLs")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="auditagentx_github_", dir=str(dest.parent)) as temp_dir:
+        staging = Path(temp_dir)
+        archive_path = staging / "source.tar.gz"
+        extracted_root = staging / "extracted"
+        _download_github_archive(archive_url, archive_path)
+        _extract_github_archive(archive_path, extracted_root)
+        roots = [path for path in extracted_root.iterdir() if path.is_dir()]
+        if len(roots) != 1:
+            raise RuntimeError("GitHub archive must contain exactly one repository root directory")
+        shutil.move(str(roots[0]), str(dest))
+
+
+def _github_archive_url(url: str, ref: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"github.com", "www.github.com"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2:
+        return None
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not (_GITHUB_REPOSITORY_PART.fullmatch(owner) and _GITHUB_REPOSITORY_PART.fullmatch(repo)):
+        return None
+    return (
+        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/tarball/{quote(str(ref), safe='')}"
+    )
+
+
+def _download_github_archive(url: str, destination: Path) -> None:
+    timeout = int(getattr(settings, "git_clone_timeout", 600))
+    request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "AuditAgentX"})
+    copied = 0
+    with urlopen(request, timeout=timeout) as response, destination.open("wb") as output:  # noqa: S310 GitHub URL is constructed above.
+        while chunk := response.read(1024 * 1024):
+            copied += len(chunk)
+            if copied > _MAX_GITHUB_ARCHIVE_BYTES:
+                raise RuntimeError(f"archive exceeds {_MAX_GITHUB_ARCHIVE_BYTES} byte download limit")
+            output.write(chunk)
+    if copied == 0:
+        raise RuntimeError("GitHub archive response was empty")
+
+
+def _extract_github_archive(archive_path: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    resolved_destination = destination.resolve()
+    extracted_bytes = 0
+    with tarfile.open(archive_path, mode="r:*") as archive:
+        for member in archive.getmembers():
+            member_path = Path(member.name)
+            if (member_path.is_absolute() or ".." in member_path.parts or member.issym()
+                    or member.islnk() or member.isdev() or not (member.isdir() or member.isfile())):
+                raise RuntimeError(f"unsafe archive member: {member.name}")
+            try:
+                (resolved_destination / member_path).resolve().relative_to(resolved_destination)
+            except ValueError as exc:
+                raise RuntimeError(f"unsafe archive path: {member.name}") from exc
+            extracted_bytes += max(0, member.size)
+            if extracted_bytes > _MAX_GITHUB_ARCHIVE_EXTRACTED_BYTES:
+                raise RuntimeError(f"archive exceeds {_MAX_GITHUB_ARCHIVE_EXTRACTED_BYTES} byte extraction limit")
+            archive.extract(member, path=destination, set_attrs=False, numeric_owner=False)
+
+
+def _safe_error_text(exc: Exception) -> str:
+    return " ".join(str(exc or exc.__class__.__name__).split())[:500]
 
 
 def workspace_commit(path: Path) -> str | None:
