@@ -609,6 +609,7 @@ class OrchestratorAgent:
                     "enable_dynamic": enable_dynamic,
                     "enable_harness": enable_harness,
                     "dynamic_target": dynamic_target,
+                    "max_dynamic_candidates": opts.get("max_dynamic_candidates"),
                 },
             )
             req = self._make_request(
@@ -622,6 +623,7 @@ class OrchestratorAgent:
                     "enable_dynamic": enable_dynamic,
                     "enable_harness": enable_harness,
                     "dynamic_target": dynamic_target,
+                    "max_dynamic_candidates": opts.get("max_dynamic_candidates"),
                 },
                 context=dynamic_ctx,
             )

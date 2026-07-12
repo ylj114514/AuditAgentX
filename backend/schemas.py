@@ -40,6 +40,9 @@ class ScanOptions(BaseModel):
     dynamic_target: dict[str, Any] | None = None  # 动态靶场配置 {mode,...}
     max_verify_workers: int | None = None  # VerifyAgent 静态复核并发数；为空则使用后端配置
     max_verify_candidates: int | None = None  # 最多送入 VerifyAgent LLM 复核的候选数
+    # 最多对多少条候选执行「生成利用 + 动态验证」；为空则用后端默认(20)。用户可按需
+    # 调大以覆盖更多注入类候选（代价：更多 HTTP/Harness 执行，扫描更慢）。
+    max_dynamic_candidates: int | None = None
     include_test_findings: bool = False  # 默认只审计生产代码；需要时显式纳入 sample/tests/docs
     max_files: int = 20000
     severity_threshold: str = "low"

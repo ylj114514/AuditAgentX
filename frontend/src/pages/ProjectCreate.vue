@@ -118,6 +118,21 @@
             <p class="deep-hint">默认由系统自动识别并生成受限启动方案。Compose 始终先经过安全策略检查；只有你勾选此项，才会直接执行项目自己的 Dockerfile。</p>
           </el-form-item>
 
+          <el-form-item label="动态验证候选数上限 max_dynamic_candidates">
+            <el-input-number
+              v-model="deep.max_dynamic_candidates"
+              :min="1"
+              :max="500"
+              :step="10"
+              controls-position="right"
+            />
+            <p class="deep-hint">
+              最多对多少条候选执行「生成利用代码 + 动态验证」。默认 20。调大可覆盖更多注入类
+              候选（如 DVWA 的 SQLi/命令注入会拿到利用代码和动态结论），代价是每条都要起 Docker /
+              发 HTTP / 跑 Harness，扫描更慢。建议按项目注入类漏洞数量设置（如 DVWA 设 60）。
+            </p>
+          </el-form-item>
+
           <el-collapse v-model="advancedOpen" class="advanced-collapse">
             <el-collapse-item name="override">
               <template #title>
@@ -189,6 +204,7 @@ const verifyBudget = reactive({
 const advancedOpen = ref<string[]>([]); // 默认折叠「高级覆盖」，避免误导用户以为必填
 const deep = reactive({
   trust_project_container_config: false,
+  max_dynamic_candidates: 20,
   override: {
     install_command: "",
     run_command: "",
@@ -265,6 +281,7 @@ async function submit() {
       options.max_verify_workers = verifyBudget.max_verify_workers;
     }
     if (scanMode.value === "deep") {
+      options.max_dynamic_candidates = deep.max_dynamic_candidates;
       options.dynamic_target = {
         mode: "docker_project",
         auto_start_docker: true,

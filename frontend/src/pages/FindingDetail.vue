@@ -9,7 +9,7 @@
       <div class="title-actions">
         <el-button type="success" plain :loading="labeling==='true_positive'" @click="labelFinding('true_positive')">标记为真漏洞</el-button>
         <el-button type="warning" plain :loading="labeling==='false_positive'" @click="labelFinding('false_positive')">标记为误报</el-button>
-        <el-button :disabled="!evidence" @click="showEvidenceDialog = true">查看证据链</el-button>
+        <el-button :disabled="!evidence" @click="showEvidenceDialog = true">原始 JSON（审计用）</el-button>
         <el-button type="primary" plain :disabled="!evidence" @click="exportEvidence">导出证据链</el-button>
         <el-button @click="router.back()">返回</el-button>
       </div>
@@ -31,13 +31,41 @@
         <el-tab-pane label="静态分析" name="static">
           <div class="tab-intro"><h2>静态代码证据</h2><p>展示漏洞位置、代码片段、source/sink 和修复建议。</p></div>
           <pre class="code-block"><code>{{ detail.vulnerable_code || "暂无代码片段" }}</code></pre>
-          <el-descriptions :column="2" border class="evidence-desc">
-            <el-descriptions-item label="Source">{{ detail.source || evidence?.source || "N/A" }}</el-descriptions-item>
-            <el-descriptions-item label="Sink">{{ detail.sink || evidence?.sink || "N/A" }}</el-descriptions-item>
-            <el-descriptions-item label="数据流" :span="2">
-              <pre class="mini-pre">{{ displayDataFlow }}</pre>
-            </el-descriptions-item>
-            <el-descriptions-item label="修复建议" :span="2">{{ detail.fix_suggestion || "建议结合漏洞类型进行输入校验、参数化查询或最小权限加固。" }}</el-descriptions-item>
+
+          <!-- 证据链：一句话叙述 + source→传播→sink 时间线，中文可读，不放 JSON -->
+          <div class="chain-card">
+            <h3 class="chain-title">漏洞证据链</h3>
+            <p v-if="chainNarrative" class="chain-narrative">{{ chainNarrative }}</p>
+            <div class="chain-endpoints">
+              <div class="chain-endpoint source">
+                <span class="chain-badge">污染源 Source</span>
+                <span class="chain-text">{{ sourceText }}</span>
+              </div>
+              <div class="chain-arrow">↓ 数据流传播</div>
+              <div class="chain-endpoint sink">
+                <span class="chain-badge danger">危险汇聚 Sink</span>
+                <span class="chain-text">{{ sinkText }}</span>
+              </div>
+            </div>
+
+            <el-timeline v-if="flowSteps.length" class="chain-timeline">
+              <el-timeline-item
+                v-for="step in flowSteps"
+                :key="step.index"
+                :timestamp="step.location"
+                placement="top"
+              >
+                <span class="step-stage">{{ step.stage }}</span>
+                <span v-if="step.detail" class="step-detail">：{{ step.detail }}</span>
+              </el-timeline-item>
+            </el-timeline>
+            <p v-else class="chain-empty">
+              该 finding 暂无逐步数据流（可能是配置/密钥类漏洞，或静态跨过程分析未生成路径）。
+            </p>
+          </div>
+
+          <el-descriptions :column="1" border class="evidence-desc fix-desc">
+            <el-descriptions-item label="修复建议">{{ detail.fix_suggestion || "建议结合漏洞类型进行输入校验、参数化查询或最小权限加固。" }}</el-descriptions-item>
           </el-descriptions>
         </el-tab-pane>
 
@@ -271,6 +299,57 @@ const displayDataFlow = computed(() => {
   return typeof value === "string" ? value : safeStringify(value);
 });
 
+// ---------- 证据链：把 source/sink/数据流对象渲染成中文可读文字，不给用户看 JSON ----------
+function fmtLoc(obj: any): string {
+  if (!obj || typeof obj !== "object") return "";
+  const file = obj.file || obj.path || obj.filename || "";
+  const line = obj.line ?? obj.start_line ?? obj.lineno;
+  if (file && line != null) return `${file} 第 ${line} 行`;
+  if (file) return String(file);
+  return line != null ? `第 ${line} 行` : "";
+}
+function locToText(v: any): string {
+  if (v == null || v === "") return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    const parts: string[] = [];
+    if (v.variable) parts.push(`变量 ${v.variable}`);
+    if (v.function) parts.push(`危险调用 ${v.function}()`);
+    if (v.parameter) parts.push(`参数 ${v.parameter}`);
+    const loc = fmtLoc(v);
+    if (loc) parts.push(`（${loc}）`);
+    return parts.join(" ").trim();
+  }
+  return String(v);
+}
+const sourceText = computed(() => locToText(detail.value?.source ?? evidence.value?.source) || "未标注污染源（source）");
+const sinkText = computed(() => locToText(detail.value?.sink ?? evidence.value?.sink) || "未标注危险汇聚点（sink）");
+const STAGE_LABELS: Record<string, string> = {
+  source: "污染源", propagation: "传播", propagate: "传播", assignment: "赋值传播",
+  call: "函数调用", sink: "危险汇聚", taint: "污点引入", return: "返回传播",
+};
+const flowSteps = computed(() => {
+  const raw = detail.value?.data_flow?.length
+    ? detail.value.data_flow
+    : (evidence.value?.data_flow?.length ? evidence.value.data_flow : evidence.value?.call_path);
+  if (!Array.isArray(raw) || raw.length === 0) return [] as any[];
+  return raw.map((step: any, i: number) => ({
+    index: i + 1,
+    stage: STAGE_LABELS[String(step.stage || "").toLowerCase()] || step.stage || `步骤 ${i + 1}`,
+    location: fmtLoc(step),
+    detail: typeof step.detail === "string" ? step.detail
+      : (step.code || step.variable || locToText(step) || ""),
+  }));
+});
+const chainNarrative = computed(() => {
+  const src = detail.value?.source ?? evidence.value?.source;
+  const snk = detail.value?.sink ?? evidence.value?.sink;
+  if (!src && !snk && flowSteps.value.length === 0) return "";
+  const n = flowSteps.value.length;
+  const hop = n > 0 ? `经 ${n} 步数据流传播` : "经数据流";
+  return `用户可控输入（${sourceText.value}）${hop}，最终流入危险操作（${sinkText.value}）。`;
+});
+
 const hasStaticEvidenceChain = computed(() => {
   const chain = evidence.value?.static_evidence_chain;
   return !!chain && Object.keys(chain).length > 0;
@@ -451,6 +530,30 @@ onMounted(load);
 .harness-block { margin-top: 20px; }
 .harness-block h3 { margin: 0 0 4px; color: #162235; }
 .harness-note { color: #667085; margin: 0 0 12px; font-size: 13px; }
+.chain-card { margin: 18px 0; padding: 18px 20px; border: 1px solid #dbe6f2; border-radius: 16px;
+  background: linear-gradient(180deg, #f8fbff, #f2f7fd); }
+.chain-title { margin: 0 0 10px; font-size: 16px; color: #162235; font-weight: 700; }
+.chain-narrative { margin: 0 0 14px; color: #334155; line-height: 1.75; font-size: 14px;
+  padding: 10px 14px; background: #eef4fb; border-left: 3px solid #3b82f6; border-radius: 8px; }
+.chain-endpoints { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+.chain-endpoint { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chain-badge { font-size: 12px; font-weight: 600; color: #fff; background: #3b82f6;
+  padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.chain-badge.danger { background: #ef4444; }
+.chain-text { color: #1e293b; font-size: 14px; font-family: "SFMono-Regular", Consolas, monospace; }
+.chain-arrow { color: #64748b; font-size: 13px; margin-left: 6px; }
+.chain-timeline { margin-top: 6px; padding-top: 6px; }
+.step-stage { font-weight: 600; color: #1d4ed8; }
+.step-detail { color: #475467; }
+.chain-empty { color: #94a3b8; font-size: 13px; margin: 4px 0 0; }
+.fix-desc { margin-top: 4px; }
+@media (prefers-color-scheme: dark) {
+  .chain-card { background: linear-gradient(180deg, #182234, #141d2c); border-color: #2b3a4f; }
+  .chain-title { color: #e8eef6; }
+  .chain-narrative { background: #1b2942; color: #cdd8e8; border-left-color: #3b82f6; }
+  .chain-text { color: #dbe4f0; }
+  .step-detail { color: #9fb0c6; }
+}
 .flow-block { margin-top: 16px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: linear-gradient(180deg, #fff, #fbfdff); }
 .flow-block h3 { margin: 0 0 8px; color: #162235; }
 .flow-block ol { margin: 0; padding-left: 20px; color: #475467; line-height: 1.8; }
