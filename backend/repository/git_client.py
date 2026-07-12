@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+_FULL_COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def prepare_workspace(project_id: str, source_type: str, url: str | None,
@@ -42,6 +44,26 @@ def _git_clone(url: str, dest: Path, branch: str | None) -> None:
     exit code(128) 而看不到真正 stderr。直接用 subprocess 捕获 bytes 后容错解码，
     错误信息更稳定，也更利于前端展示。
     """
+    if branch and _FULL_COMMIT.fullmatch(branch):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        commands = [
+            ["git", "init", str(dest)],
+            ["git", "-C", str(dest), "remote", "add", "origin", url],
+            ["git", "-C", str(dest), "fetch", "--depth=1", "origin", branch],
+            ["git", "-C", str(dest), "checkout", "--detach", "FETCH_HEAD"],
+            ["git", "-C", str(dest), "rev-parse", "HEAD"],
+        ]
+        for command in commands:
+            result = _run_git(command)
+            if result.returncode != 0:
+                _remove_workspace(dest)
+                raise RuntimeError(_format_clone_error(result, url, dest, branch=branch))
+        observed = _decode_output(result.stdout).strip()
+        if observed.lower() != branch.lower():
+            _remove_workspace(dest)
+            raise RuntimeError(f"固定 commit 校验失败: requested={branch}, observed={observed or 'missing'}")
+        return
+
     args = ["git", "clone", "-v", "--depth=1"]
     if branch:
         args.extend(["--branch", branch])
@@ -61,6 +83,14 @@ def _git_clone(url: str, dest: Path, branch: str | None) -> None:
         raise RuntimeError(_format_clone_error(fallback, url, dest, branch=None))
 
     raise RuntimeError(_format_clone_error(first, url, dest, branch=branch))
+
+
+def workspace_commit(path: Path) -> str | None:
+    result = _run_git(["git", "-C", str(path), "rev-parse", "HEAD"])
+    if result.returncode != 0:
+        return None
+    commit = _decode_output(result.stdout).strip()
+    return commit if _FULL_COMMIT.fullmatch(commit) else None
 
 
 def _run_git(args: list[str]) -> subprocess.CompletedProcess[bytes]:

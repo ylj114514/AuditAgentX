@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "repository": "https://github.com/digininja/DVWA",
+      "commit_sha": "d45ba3c4e7efa7f023f25f58ab4af9912c887057",
+      "tree_sha": "31e86b89bdc025adc8047304fd83bb5930d21b40",
+      "resolved_at": "2026-07-11",
+      "provenance": [
+        "https://github.com/digininja/DVWA/tree/d45ba3c4e7efa7f023f25f58ab4af9912c887057/vulnerabilities",
+        "https://github.com/digininja/DVWA/blob/d45ba3c4e7efa7f023f25f58ab4af9912c887057/dvwa/includes/dvwaPage.inc.php"
+      ],
+      "labels": [
+        {
+          "id": "dvwa-api-command-injection-high",
+          "label": "true_positive",
+          "vulnerability_type": "Command Injection",
+          "aliases": ["OS Command Injection", "tainted-exec"],
+          "path": "vulnerabilities/api/src/HealthController.php",
+          "role": "primary_implementation",
+          "rationale": "Official DVWA API help documents command injection in the high-level health controller.",
+          "references": ["https://github.com/digininja/DVWA/blob/d45ba3c4e7efa7f023f25f58ab4af9912c887057/vulnerabilities/api/help/help.php"]
+        },
+        {
+          "id": "dvwa-exec-low",
+          "label": "true_positive",
+          "vulnerability_type": "Command Injection",
+          "aliases": ["OS Command Injection", "tainted-exec"],
+          "path": "vulnerabilities/exec/source/low.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the low command-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-exec-medium",
+          "label": "true_positive",
+          "vulnerability_type": "Command Injection",
+          "aliases": ["OS Command Injection", "tainted-exec"],
+          "path": "vulnerabilities/exec/source/medium.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the medium command-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-exec-high",
+          "label": "true_positive",
+          "vulnerability_type": "Command Injection",
+          "aliases": ["OS Command Injection", "tainted-exec"],
+          "path": "vulnerabilities/exec/source/high.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the high command-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-sqli-low",
+          "label": "true_positive",
+          "vulnerability_type": "SQL Injection",
+          "aliases": ["tainted-sql-string", "sql-injection"],
+          "path": "vulnerabilities/sqli/source/low.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the low SQL-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-sqli-medium",
+          "label": "true_positive",
+          "vulnerability_type": "SQL Injection",
+          "aliases": ["tainted-sql-string", "sql-injection"],
+          "path": "vulnerabilities/sqli/source/medium.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the medium SQL-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-sqli-high",
+          "label": "true_positive",
+          "vulnerability_type": "SQL Injection",
+          "aliases": ["tainted-sql-string", "sql-injection"],
+          "path": "vulnerabilities/sqli/source/high.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the high SQL-injection implementation vulnerable."
+        },
+        {
+          "id": "dvwa-xss-reflected-low",
+          "label": "true_positive",
+          "vulnerability_type": "Reflected XSS",
+          "aliases": ["Cross-Site Scripting", "XSS", "tainted-html-string"],
+          "path": "vulnerabilities/xss_r/source/low.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the low reflected-XSS implementation vulnerable."
+        },
+        {
+          "id": "dvwa-xss-stored-low",
+          "label": "true_positive",
+          "vulnerability_type": "Stored XSS",
+          "aliases": ["Cross-Site Scripting", "XSS", "tainted-html-string"],
+          "path": "vulnerabilities/xss_s/source/low.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the low stored-XSS implementation vulnerable."
+        },
+        {
+          "id": "dvwa-file-inclusion-low",
+          "label": "true_positive",
+          "vulnerability_type": "File Inclusion",
+          "aliases": ["Path Traversal", "tainted-filename"],
+          "path": "vulnerabilities/fi/source/low.php",
+          "role": "primary_implementation",
+          "rationale": "DVWA declares the low file-inclusion implementation vulnerable."
+        },
+        {
+          "id": "dvwa-sqli-impossible",
+          "label": "false_positive",
+          "vulnerability_type": "SQL Injection",
+          "aliases": ["tainted-sql-string", "sql-injection"],
+          "path": "vulnerabilities/sqli/source/impossible.php",
+          "role": "mitigation_reference",
+          "rationale": "The official impossible level mitigates the declared SQL-injection lesson with parameterized SQL."
+        },
+        {
+          "id": "dvwa-exec-impossible",
+          "label": "false_positive",
+          "vulnerability_type": "Command Injection",
+          "aliases": ["OS Command Injection", "tainted-exec"],
+          "path": "vulnerabilities/exec/source/impossible.php",
+          "role": "mitigation_reference",
+          "rationale": "The official impossible level validates the address and avoids shell command construction for the declared lesson."
+        },
+        {
+          "id": "dvwa-xss-reflected-impossible",
+          "label": "false_positive",
+          "vulnerability_type": "Reflected XSS",
+          "aliases": ["Cross-Site Scripting", "XSS", "tainted-html-string"],
+          "path": "vulnerabilities/xss_r/source/impossible.php",
+          "role": "mitigation_reference",
+          "rationale": "The official impossible level encodes output for the declared reflected-XSS lesson."
+        }
+      ],
+      "excluded_modules": [
+        {
+          "module": "bac",
+          "reason": "Disabled module with contradictory upstream documentation; excluded pending review."
+        }
+      ]
+    }
+  ]
+}

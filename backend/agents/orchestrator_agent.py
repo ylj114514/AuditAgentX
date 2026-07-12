@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.core import ids
 from backend.models import Project, Scan, Finding, Evidence
-from backend.repository.git_client import prepare_workspace
+from backend.repository.git_client import prepare_workspace, workspace_commit
 from backend.agents.repo_parser_agent import RepoParserAgent
 from backend.agents.static_scan_agent import StaticScanAgent
 from backend.agents.audit_agent import AuditAgent
@@ -193,6 +193,16 @@ class OrchestratorAgent:
             raw = self._static_scan(code_root)
             candidates = self._audit(metadata, raw, code_root)
             confirmed = self._verify_and_poc(candidates, code_root)
+            try:
+                from backend.rag.ground_truth import calibrate_findings
+                commit = workspace_commit(code_root)
+                calibration = calibrate_findings(confirmed, self.project.url or "", commit or "")
+                if calibration["matched"]:
+                    self.config["ground_truth_calibration"] = calibration
+                    self.config["ground_truth_commit"] = commit
+                    self.scan.config_json = json.dumps(self.config, ensure_ascii=False, default=str)
+            except Exception:  # noqa: BLE001
+                logger.exception("[%s] 固定 commit ground truth 校准失败（已忽略）", self.scan.id)
             self._persist(confirmed)
 
             # RAG 自进化：仅从**可信结果**（动态确认 TP / 明确误报 FP）归纳进知识库，

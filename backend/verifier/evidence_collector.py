@@ -475,6 +475,7 @@ def apply_product_evidence_policy(evidence: dict, *, status: str | None = None,
 
     blockers = verification.get("confirmed_blockers") or []
     exploit = result.get("exploit") or {}
+    ground_truth = result.get("ground_truth") or {}
     source, sink = result.get("source"), result.get("sink")
     call_path = result.get("call_path") or []
     data_flow = result.get("data_flow") or []
@@ -489,6 +490,7 @@ def apply_product_evidence_policy(evidence: dict, *, status: str | None = None,
         or len(call_path) >= 2
         or len(data_flow) >= 2
         or verification.get("dynamically_verified")
+        or (ground_truth.get("label") == "true_positive" and ground_truth.get("references"))
     )
     evidence_complete = bool(confirmed and not blockers and has_location and has_trace)
     diagnostic = (
