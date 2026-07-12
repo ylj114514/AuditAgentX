@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 4096
+    # 推理模型（如 deepseek-v4-flash）会先花一部分 completion 预算做隐藏推理，
+    # 4096 下较长的 verify_agent JSON 会被 finish_reason=length 截断、解析失败被静默丢弃。
+    # 8192 给推理+正文留足余量。
+    llm_max_tokens: int = 8192
     llm_timeout: int = 60
     # 调用健壮性：失败重试次数与退避基数（秒）
     llm_max_retries: int = 1

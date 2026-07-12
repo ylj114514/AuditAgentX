@@ -65,7 +65,17 @@ class LLMClient:
             if use_json:
                 kwargs["response_format"] = {"type": "json_object"}
             resp = client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content or ""
+            choice = resp.choices[0]
+            # 推理模型（deepseek-v4-flash 等）会先耗掉一部分 completion 预算做隐藏推理，
+            # 输出较长时会撞上 max_tokens 上限被从中间截断，导致 JSON 解析失败、结论被静默丢弃。
+            # 这里显式暴露截断，便于定位「明明有 key 却拿不到有效结论」的问题（对应调大 llm_max_tokens）。
+            if getattr(choice, "finish_reason", None) == "length":
+                logger.warning(
+                    "LLM 输出因 max_tokens=%s 上限被截断(finish_reason=length)，"
+                    "JSON 可能不完整、解析失败后结论会被丢弃；建议调大 llm_max_tokens。",
+                    settings.llm_max_tokens,
+                )
+            return choice.message.content or ""
 
         max_retries = int(getattr(settings, "llm_max_retries", 2))
         backoff = float(getattr(settings, "llm_retry_backoff", 1.5))
