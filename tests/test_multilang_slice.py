@@ -13,7 +13,9 @@ import pytest
 from backend.skills.harness_tools import (
     build_selfcontained_slice_harness_js,
     build_selfcontained_slice_harness_php,
+    build_selfcontained_slice_harness_ruby,
     build_selfcontained_slice_harness_multilang,
+    extract_function,
     NONCE_PLACEHOLDER,
     TARGET_INVOKED_MARKER,
 )
@@ -25,6 +27,10 @@ def _js_func(name, code):
 
 def _php_func(name, code):
     return {"language": "php", "function_name": name, "found": True, "function_code": code}
+
+
+def _ruby_func(name, code):
+    return {"language": "ruby", "function_name": name, "found": True, "function_code": code}
 
 
 # --------------------------- 结构性断言 ---------------------------
@@ -60,6 +66,28 @@ def test_js_builder_emits_nonce_and_function():
     assert "_SINKS" in h
 
 
+def test_ruby_builder_emits_nonce_and_method():
+    code = "def do_ping(host)\n  system('ping ' + host)\nend"
+    h = build_selfcontained_slice_harness_ruby(_ruby_func("do_ping", code), "command injection")
+    assert h is not None
+    assert NONCE_PLACEHOLDER in h
+    assert "do_ping" in h
+    assert "module Kernel" in h              # sink 被 monkeypatch
+
+
+def test_ruby_extraction_handles_nested_end():
+    """def...end 提取需正确跳过内层 if...end，不能提前闭合。"""
+    import tempfile
+    from pathlib import Path
+    src = ("def find_user(uid)\n  if uid.nil?\n    return nil\n  end\n"
+           "  User.where(\"id = #{uid}\").first\nend\n")
+    d = tempfile.mkdtemp()
+    (Path(d) / "app.rb").write_text(src, encoding="utf-8")
+    r = extract_function(Path(d), "app.rb", 5)   # where 那行
+    assert r["found"] and r["function_name"] == "find_user" and r["language"] == "ruby"
+    assert "User.where" in r["function_code"] and r["function_code"].strip().endswith("end")
+
+
 def test_multilang_dispatch_by_language():
     php = build_selfcontained_slice_harness_multilang(
         _php_func("do_ping", "function do_ping($t){ return shell_exec('ping '.$t); }"), "command injection")
@@ -67,6 +95,9 @@ def test_multilang_dispatch_by_language():
     js = build_selfcontained_slice_harness_multilang(
         _js_func("ping", "function ping(req){ require('child_process').exec('x'+req.query.h); }"), "command injection")
     assert js and js[1] == "javascript"
+    rb = build_selfcontained_slice_harness_multilang(
+        _ruby_func("do_ping", "def do_ping(h)\n  system('ping ' + h)\nend"), "command injection")
+    assert rb and rb[1] == "ruby"
     # 编译型语言不适用切片
     java = build_selfcontained_slice_harness_multilang(
         {"language": "java", "function_name": "f", "found": True, "function_code": "void f(){}"}, "sqli")

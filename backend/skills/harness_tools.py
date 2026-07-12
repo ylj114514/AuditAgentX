@@ -329,14 +329,19 @@ def _extract_regex(text: str, rel: str, line: int, lang: str, max_lines: int) ->
     elif lang == "php":
         func_start = re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)*function\s+&?\s*[A-Za-z_]\w*\s*\(", re.I)
         name_re = re.compile(r"function\s+&?\s*([A-Za-z_]\w*)", re.I)
+    elif lang == "ruby":
+        # def name / def self.name / def name(args) / def name arg1, arg2
+        func_start = re.compile(r"^\s*def\s+(?:self\.)?[A-Za-z_]\w*[!?=]?")
+        name_re = re.compile(r"def\s+(?:self\.)?([A-Za-z_]\w*[!?=]?)")
     else:
         return _blank_extract(rel, line, f"unsupported_regex_language:{lang}")
 
-    # 从目标行向上逐一考察候选函数头；只有目标行确实落在括号配对范围内才接受。
+    end_finder = _ruby_function_end if lang == "ruby" else _brace_function_end
+    # 从目标行向上逐一考察候选函数头；只有目标行确实落在函数边界内才接受。
     for i in range(idx, max(-1, idx - max_lines), -1):
         if not func_start.match(lines[i]):
             continue
-        end = _brace_function_end(lines, i, max_lines)
+        end = end_finder(lines, i, max_lines)
         if end is None or not (i <= idx < end):
             continue
         match = name_re.search(lines[i])
@@ -398,6 +403,34 @@ def _brace_function_end(lines: list[str], start: int, max_lines: int) -> int | N
                 if depth < 0:
                     return None
             pos += 1
+    return None
+
+
+def _ruby_function_end(lines: list[str], start: int, max_lines: int) -> int | None:
+    """返回 Ruby ``def ... end`` 函数右 end 后的行号（0-based exclusive）。
+
+    轻量启发式：按块关键字（def/class/module/begin/case + 行首 if/unless/while/until/for
+    + 尾随 do）与 ``end`` 做深度匹配。行首条件才算块（``x if y`` 这种尾随修饰符不算），
+    并粗略剥离 # 注释。复杂结构（heredoc 等）不猜测，回退 None。
+    """
+    lead_cond = {"if", "unless", "while", "until", "for"}
+    block_kw = ("class", "module", "begin", "case")
+    depth = 0
+    end_limit = min(len(lines), start + max_lines)
+    for i in range(start, end_limit):
+        code = re.sub(r"#.*$", "", lines[i])         # 去行尾注释（不处理 # 在字符串内的罕见情形）
+        stripped = code.strip()
+        opens = len(re.findall(r"\bdef\b", code))
+        for kw in block_kw:
+            opens += len(re.findall(r"\b" + kw + r"\b", code))
+        first = stripped.split(None, 1)[0] if stripped else ""
+        if first in lead_cond:
+            opens += 1
+        opens += len(re.findall(r"\bdo\b(\s*\|[^|]*\|)?\s*$", code))   # 块 do..end
+        ends = len(re.findall(r"\bend\b", code))
+        depth += opens - ends
+        if i > start and depth <= 0:
+            return i + 1
     return None
 
 
@@ -1045,6 +1078,135 @@ def build_selfcontained_slice_harness_js(func: dict, vuln_type: str) -> "str | N
     )
 
 
+def _classify_ruby_sink(code: str) -> "tuple[str, str] | None":
+    """识别 Ruby 切片可拦截的危险 sink（对齐 taint_rules 的 Ruby sink）。"""
+    if (re.search(r"(?<![.\w])(system|exec|spawn)\s*[( ]|IO\.popen|Open3\.\w+|"
+                  r"Process\.(spawn|run|start)|Kernel\.system|%x", code) or "`" in code):
+        return "command", "system"
+    if re.search(r"\.(execute|exec_query|select_all|find_by_sql|where)\b|\.query\s*\(", code):
+        return "sqli", "execute"
+    if re.search(r"(File|IO)\.(read|open)\b|(?<![.\w])open\s*\(|send_file", code):
+        return "path", "File.read"
+    return None
+
+
+# monkeypatch 前奏：记录器 + 遮蔽 Kernel/IO/File/Open3/Process 危险方法 + Shellwords 净化清污点 +
+# AAXMock 万能替身（to_s/to_str/[] 产出 marker、sink 方法记录）+ const_missing 兜底未定义常量
+# （如 Rails 的 User 模型）。判定只看 sink 首参，参数化查询/绑定参数正确判安全。
+_RUBY_SHADOW_PRELUDE = r'''require 'json'
+$__rec = []
+def __aax_push(sink, args)
+  first = args.empty? ? '' : args[0].to_s
+  full = (args.map { |x| x.to_s }).join(' ')
+  $__rec << [sink.to_s, first, full]
+  ''
+end
+module Kernel
+  def system(*a); __aax_push('system', a); true; end
+  def exec(*a); __aax_push('exec', a); nil; end
+  def spawn(*a); __aax_push('spawn', a); 0; end
+  def `(cmd); __aax_push('backtick', [cmd]); ''; end
+  def open(*a); __aax_push('open', a); nil; end
+end
+class << IO
+  def popen(*a); __aax_push('IO.popen', a); nil; end
+  def read(*a); __aax_push('IO.read', a); ''; end
+end
+class << File
+  def read(*a); __aax_push('File.read', a); ''; end
+  def open(*a); __aax_push('File.open', a); nil; end
+end
+module Open3
+  def self.capture2(*a); __aax_push('Open3.capture2', a); ['', nil]; end
+  def self.capture2e(*a); __aax_push('Open3.capture2e', a); ['', nil]; end
+  def self.capture3(*a); __aax_push('Open3.capture3', a); ['', '', nil]; end
+  def self.popen3(*a); __aax_push('Open3.popen3', a); nil; end
+end
+module Process
+  def self.spawn(*a); __aax_push('Process.spawn', a); 0; end
+end
+module Shellwords
+  def self.escape(s); 'safe'; end
+  def self.join(a); 'safe'; end
+end
+class AAXMock
+  SINK = [:execute, :query, :exec_query, :select_all, :select, :find_by_sql, :where, :from, :order, :group, :raw]
+  def method_missing(name, *args, &blk)
+    __aax_push(name.to_s, args) if SINK.include?(name)
+    AAXMock.new
+  end
+  def respond_to_missing?(*); true; end
+  def to_s; $__marker; end
+  def to_str; $__marker; end
+  def to_i; 0; end
+  def to_f; 0.0; end
+  def [](*a); $__marker; end
+  def coerce(o); [o.to_s, $__marker]; end
+end
+class Object
+  def self.const_missing(name); AAXMock.new; end
+end
+'''
+
+
+def build_selfcontained_slice_harness_ruby(func: dict, vuln_type: str) -> "str | None":
+    """Ruby 自包含切片：monkeypatch Kernel/IO/File/Open3 危险方法为记录器、AAXMock 万能替身 +
+    const_missing 兜底未定义常量，以污点入参调用真实方法，观察 marker 是否到达 sink 首参。
+    仅顶层方法（class 实例方法需真实 receiver，返回 None）。"""
+    code = _dedent_code((func or {}).get("function_code") or "")
+    fname = (func or {}).get("function_name")
+    if not code or not fname or normalize_language(func.get("language")) != "ruby":
+        return None
+    if (func or {}).get("class_name"):
+        return None
+    classified = _classify_ruby_sink(code)
+    if not classified:
+        return None
+    sink_kind, sink_name = classified
+
+    mdef = re.search(r"def\s+(?:self\.)?" + re.escape(fname) + r"([^\n]*)", code)
+    nparams = 0
+    if mdef:
+        rest = mdef.group(1).strip()
+        inner = rest[1:rest.find(")")] if rest.startswith("(") and ")" in rest else (
+            "" if rest.startswith("(") else rest)
+        nparams = len([p for p in inner.split(",") if p.strip() and "=" not in p.split(":")[0]])
+    nparams = max(0, min(nparams, 8))
+    marker = _slice_marker()
+    nonce = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
+    import json as _json
+    return (
+        "$__marker = " + _json.dumps(marker) + "\n"
+        "$__nonce = " + _json.dumps(nonce) + "\n"
+        + _RUBY_SHADOW_PRELUDE +
+        "# ==== inline 项目真实目标方法 ====\n"
+        + code + "\n"
+        "$__err = ''\n"
+        "begin\n"
+        "  if respond_to?(:" + fname + ", true)\n"
+        "    puts $__nonce\n"
+        "    __args = Array.new(" + str(nparams) + ") { AAXMock.new }\n"
+        "    send(:" + fname + ", *__args)\n"
+        "  end\n"
+        "rescue Exception => e\n"
+        "  $__err = e.class.to_s + ': ' + e.message.to_s\n"
+        "end\n"
+        "__trig = false; __cap = nil; __sink = nil\n"
+        "$__rec.each do |s, first, full|\n"
+        "  if first.to_s.include?($__marker)\n"
+        "    __trig = true; __cap = full.to_s[0, 200]; __sink = s; break\n"
+        "  end\n"
+        "end\n"
+        "puts 'AUDITAGENTX_RESULT_JSON=' + JSON.generate({\n"
+        "  'triggered' => __trig, 'sink_called' => (!$__rec.empty?),\n"
+        "  'sink_name' => (__sink || " + _json.dumps(sink_name) + "),\n"
+        "  'captured_argument' => __cap, 'payload' => (__trig ? $__marker : nil),\n"
+        "  'trigger_detail' => (__trig ? '自包含切片：攻击者可控输入经真实 Ruby 方法逻辑到达危险 sink' : (__err.empty? ? '未命中 sink' : __err))\n"
+        "})\n"
+        "puts(__trig ? 'AUDITAGENTX_VULN_TRIGGERED' : 'AUDITAGENTX_NO_TRIGGER')\n"
+    )
+
+
 def build_selfcontained_slice_harness_multilang(func: dict, vuln_type: str) -> "tuple[str, str] | None":
     """按语言分发多语言自包含切片，返回 (harness_code, language)；不适用返回 None。
     Python 由原生 AST 版 build_selfcontained_slice_harness 负责，这里只处理其它解释型语言。"""
@@ -1055,6 +1217,9 @@ def build_selfcontained_slice_harness_multilang(func: dict, vuln_type: str) -> "
     if lang == "javascript":
         h = build_selfcontained_slice_harness_js(func, vuln_type)
         return (h, "javascript") if h else None
+    if lang == "ruby":
+        h = build_selfcontained_slice_harness_ruby(func, vuln_type)
+        return (h, "ruby") if h else None
     return None
 
 
