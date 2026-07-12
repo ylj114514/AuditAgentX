@@ -159,6 +159,7 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
         data_flow=json.dumps(evidence.get("data_flow"), ensure_ascii=False, default=str),
         poc_result=json.dumps({
             "exploit": evidence.get("exploit"),
+            "attack_plan": evidence.get("attack_plan"),
             "runtime": evidence.get("runtime"),
             "call_path": evidence.get("call_path"),
             "harness": evidence.get("harness"),
@@ -279,6 +280,7 @@ def _decode_evidence(ev: Evidence) -> dict:
     poc = _loads(ev.poc_result)
     if isinstance(poc, dict) and ("exploit" in poc or "runtime" in poc):
         exploit = poc.get("exploit")
+        attack_plan = poc.get("attack_plan")
         runtime = poc.get("runtime")
         call_path = poc.get("call_path")
         harness = poc.get("harness")
@@ -290,6 +292,7 @@ def _decode_evidence(ev: Evidence) -> dict:
         sandbox = poc.get("sandbox")
     else:
         exploit = None
+        attack_plan = None
         runtime = None
         call_path = None
         harness = None
@@ -308,6 +311,7 @@ def _decode_evidence(ev: Evidence) -> dict:
         "data_flow": _loads(ev.data_flow),
         "call_path": call_path,
         "exploit": exploit,
+        "attack_plan": attack_plan,
         "runtime": runtime,
         "harness": harness,
         "sandbox": sandbox,

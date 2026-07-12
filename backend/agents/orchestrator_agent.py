@@ -596,6 +596,22 @@ class OrchestratorAgent:
         results.extend(preclassified)
 
         results = judge.rank(results)
+        # Every statically confirmed finding gets a deterministic, localhost-only
+        # attack plan even when it is outside this run's dynamic budget. The plan
+        # is explicitly pending runtime validation and never substitutes for PoC.
+        from backend.agents.exploit_agent import build_authorized_attack_plan
+        for finding in results:
+            if finding.get("status") != "confirmed":
+                continue
+            existing = finding.get("_exploit") or {}
+            plan = build_authorized_attack_plan(finding, existing)
+            if plan:
+                finding.setdefault("_exploit", dict(existing))
+                finding["_exploit"].setdefault("exploit_code", plan["code"])
+                finding["_exploit"].setdefault("payloads", plan["payloads"])
+                finding["_exploit"].setdefault("success_indicators", plan["success_indicators"])
+                finding["_exploit"].setdefault("trigger_location", plan["trigger_location"])
+                finding["_exploit"]["attack_plan_status"] = plan["plan_status"]
         # 2) 漏洞自动利用 + 动态验证（PDF 模块③；含 DeepAudit 式 Fuzzing Harness）
         if enable_exploit or enable_dynamic or enable_harness:
             self._stage("ExploitAgent/DynamicVerify", 88)
@@ -758,6 +774,7 @@ class OrchestratorAgent:
                     data_flow=json.dumps(ev.get("data_flow"), ensure_ascii=False, default=str),
                     poc_result=json.dumps({
                         "exploit": ev.get("exploit"),
+                        "attack_plan": ev.get("attack_plan"),
                         "runtime": ev.get("runtime"),
                         "call_path": ev.get("call_path"),
                         "harness": ev.get("harness"),

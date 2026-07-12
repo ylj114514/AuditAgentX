@@ -157,6 +157,30 @@ def test_report_actionable_metrics_require_confirmed_complete_evidence():
     assert "exploit_code" not in by_id["f-function"]["evidence"]["exploit"]
 
 
+def test_report_keeps_static_confirmed_attack_plan_separate_from_confirmed_poc():
+    finding = _confirmed_finding()
+    finding["_evidence"].pop("poc_file")
+    finding["_evidence"]["verification"] = {
+        "static_verdict": "confirmed", "final_verdict": "statically_verified",
+        "dynamically_verified": False,
+    }
+    finding["_evidence"]["attack_plan"] = {
+        "plan_status": "static_confirmed_pending_runtime",
+        "label": "静态已确认；待运行验证",
+        "code": "print('authorized local plan')",
+        "execution_scope": "localhost_only",
+    }
+
+    ctx = report_builder.build_context(
+        {"name": "demo"}, {"id": "scan-report", "status": "done"}, [finding], {},
+    )
+
+    plan = ctx["findings"][0]["evidence"]["attack_plan"]
+    assert plan["plan_status"] == "static_confirmed_pending_runtime"
+    assert plan["code"] == "print('authorized local plan')"
+    assert "poc_file" not in ctx["findings"][0]["evidence"]
+
+
 def test_report_does_not_make_confirmed_complete_without_a_location():
     finding = _confirmed_finding()
     finding["file"] = None

@@ -140,6 +140,7 @@ def _decode_report_evidence(ev: Evidence) -> dict:
     poc = _decode_json(ev.poc_result)
     if isinstance(poc, dict) and ("exploit" in poc or "runtime" in poc):
         exploit = poc.get("exploit")
+        attack_plan = poc.get("attack_plan")
         runtime = poc.get("runtime")
         call_path = poc.get("call_path")
         harness = poc.get("harness")
@@ -151,6 +152,7 @@ def _decode_report_evidence(ev: Evidence) -> dict:
         knowledge = poc.get("knowledge")
     else:
         exploit = None
+        attack_plan = None
         runtime = None
         call_path = None
         harness = None
@@ -168,6 +170,7 @@ def _decode_report_evidence(ev: Evidence) -> dict:
         "data_flow": _decode_json(ev.data_flow),
         "call_path": call_path,
         "exploit": exploit,
+        "attack_plan": attack_plan,
         "runtime": runtime,
         "harness": harness,
         "sandbox": sandbox,

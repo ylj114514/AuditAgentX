@@ -126,6 +126,10 @@ def build_context(project: dict, scan: dict, findings: list[dict],
                 exploit.pop(key, None)
             if exploit:
                 evidence["exploit"] = exploit
+            attack_plan = dict(evidence.get("attack_plan") or {})
+            attack_plan.pop("code", None)
+            if attack_plan:
+                evidence["attack_plan"] = attack_plan
             harness = dict(evidence.get("harness") or {})
             harness.pop("harness_code", None)
             if harness:

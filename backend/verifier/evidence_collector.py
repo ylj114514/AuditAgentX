@@ -90,7 +90,7 @@ def build_static_evidence_chain(finding: dict) -> dict:
         verify_result["sink"] = derived["sink"]
     if not verify_result.get("propagation_path"):
         verify_result["propagation_path"] = derived["data_flow"]
-    return EvidenceCollector.build(verify_result)
+    return EvidenceCollector.build(verify_result, exploit=finding.get("_exploit") or {})
 
 
 def _build_call_path(verify_result: dict, exploit: dict) -> list[dict]:
@@ -191,6 +191,7 @@ class EvidenceCollector:
             "verification_method": exploit.get("verification_method"),
             "impact": exploit.get("impact"),
         })
+        attack_plan = _build_attack_plan_evidence(exploit, runtime)
         runtime = _redact_sensitive(runtime)
         harness_evidence = _redact_sensitive(harness_evidence)
         sandbox = _redact_sensitive(sandbox)
@@ -205,6 +206,8 @@ class EvidenceCollector:
             "call_path": call_path,
             # 利用证据（PDF 模块③要求）
             "exploit": exploit_evidence,
+            # 静态已确认 finding 的本地授权攻击计划；与已确认 PoC 分离，不能据此声称已利用。
+            "attack_plan": attack_plan,
             # 动态运行时证据
             "runtime": runtime,
             # Docker 沙箱环境证据（Deep 模式 docker_project）
@@ -527,6 +530,28 @@ def _normalize_skill(skill):
     if isinstance(skill, str) and skill:
         return {"name": skill, "version": None}
     return {"name": "", "version": None}
+
+
+def _build_attack_plan_evidence(exploit: dict, runtime: dict) -> dict | None:
+    """Keep a generated local plan distinct from framework-confirmed replay evidence."""
+    if not exploit or not exploit.get("exploit_code"):
+        return None
+    try:
+        from backend.agents.exploit_agent import build_authorized_attack_plan
+        finding = {
+            "type": exploit.get("vuln_type"),
+            "file": str(exploit.get("trigger_location") or "").split(":", 1)[0],
+            "line": None,
+        }
+        plan = build_authorized_attack_plan(finding, exploit)
+    except Exception:  # noqa: BLE001 - evidence collection must remain non-fatal
+        plan = None
+    if not plan:
+        return None
+    if runtime.get("reproducible"):
+        plan["plan_status"] = "framework_confirmed_replay"
+        plan["label"] = "框架已确认请求复放"
+    return _redact_sensitive(plan)
 
 
 def apply_product_evidence_policy(evidence: dict, *, status: str | None = None,
