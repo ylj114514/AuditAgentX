@@ -64,6 +64,7 @@ _LANG_RUNTIMES = {
     "python": {"local": None, "image": "python:3.11-slim", "ext": "py", "inline": ["python", "-c"]},
     "javascript": {"local": "node", "image": "node:20-slim", "ext": "js", "inline": ["node", "-e"]},
     "php": {"local": "php", "image": "php:8.2-cli", "ext": "php", "inline": ["php", "-r"]},
+    "ruby": {"local": "ruby", "image": "ruby:3.1-slim", "ext": "rb", "inline": ["ruby", "-e"]},
 }
 
 # 语言/文件后缀 -> 归一化语言（未知一律回退 python，模板 Harness 均为 Python）
@@ -73,6 +74,7 @@ _LANG_ALIASES = {
     "ts": "javascript", "tsx": "javascript", "typescript": "javascript",
     "node": "javascript", "javascript": "javascript", "ecmascript": "javascript",
     "php": "php", "php5": "php", "php7": "php", "php8": "php", "phtml": "php",
+    "rb": "ruby", "ruby": "ruby", "erb": "ruby", "rake": "ruby",
 }
 
 
@@ -850,6 +852,212 @@ def build_selfcontained_slice_harness(func: dict, vuln_type: str) -> "str | None
     )
 
 
+# ===========================================================================
+# 多语言自包含切片（DeepAudit 式，扩展到解释型语言）
+#
+# 思路与 Python 版完全一致：inline 真实函数体 + 把危险 sink 打桩为「只记录参数的
+# 记录器」+ 注入攻击者可控污点 marker，观察 marker 是否经真实函数逻辑到达 sink；
+# **不 import 整个 app、不装依赖、不起服务**。仅换成各语言原生的「运行时替换 sink」机制：
+#   - PHP  ：命名空间函数遮蔽（namespace function shadowing）——命名空间内未限定调用的
+#            内置函数会优先解析到同命名空间里我们定义的同名遮蔽函数（php-mock 同款技术）。
+#   - JS   ：注入自定义 require + Proxy mock；污点用 Proxy（toPrimitive 产出 marker）。
+#   - Ruby ：monkeypatch Kernel 危险方法 + method_missing 万能 mock（下一轮接入提取）。
+# 编译型语言（Java/Go/C#/C++/Rust）无法运行时替换 sink，切片不适用，仍走静态污点 + semgrep +
+# （Web）HTTP 动态验证。
+# ===========================================================================
+
+
+def _slice_marker() -> str:
+    return "AAXSLICE_" + secrets.token_hex(6)
+
+
+def _classify_php_sink(code: str) -> "tuple[str, str] | None":
+    """识别 PHP 切片可拦截的**过程式**危险 sink（对象方法 sink 需真实对象，不在此列）。"""
+    if re.search(r"(?<![\w>])(system|exec|shell_exec|passthru|popen|proc_open)\s*\(", code, re.I):
+        m = re.search(r"(?<![\w>])(system|exec|shell_exec|passthru|popen|proc_open)\s*\(", code, re.I)
+        return "command", (m.group(1).lower() if m else "system")
+    if re.search(r"(?<![\w>])(mysqli_query|mysqli_multi_query|mysqli_real_query|mysql_query|"
+                 r"pg_query|pg_query_params|sqlite_query)\s*\(", code, re.I):
+        m = re.search(r"(?<![\w>])(mysqli_query|mysql_query|pg_query|sqlite_query)\s*\(", code, re.I)
+        return "sqli", (m.group(1).lower() if m else "mysqli_query")
+    if re.search(r"(?<![\w>])(file_get_contents|readfile|fopen|file|fgets|fread)\s*\(", code, re.I):
+        m = re.search(r"(?<![\w>])(file_get_contents|readfile|fopen|file)\s*\(", code, re.I)
+        return "path", (m.group(1).lower() if m else "file_get_contents")
+    if re.search(r"(?<![\w>])unserialize\s*\(", code, re.I):
+        return "deserialization", "unserialize"
+    return None
+
+
+# 命名空间遮蔽前奏：定义记录器 + 遮蔽常见过程式危险 sink + 污点超全局的 ArrayAccess 替身。
+# 命名空间内对 system()/mysqli_query() 等的**未限定**调用会优先命中这里的同名函数（PHP 函数
+# 解析规则：先查当前命名空间，未定义才回退全局）。真实项目里绝大多数就是未限定调用。
+_PHP_SHADOW_PRELUDE = r'''namespace AAX;
+$GLOBALS['__aax_rec'] = array();
+function __aax_rec($sink, $arg){
+    if (is_array($arg)) { $t = @implode(' ', array_map('strval', $arg)); }
+    else { $t = (string)$arg; }
+    $GLOBALS['__aax_rec'][] = array($sink, $t);
+    return '';
+}
+function system($c, &$r = null){ return __aax_rec('system', $c); }
+function exec($c, &$o = null, &$r = null){ return __aax_rec('exec', $c); }
+function shell_exec($c){ return __aax_rec('shell_exec', $c); }
+function passthru($c, &$r = null){ __aax_rec('passthru', $c); }
+function popen($c, $m){ __aax_rec('popen', $c); return false; }
+function proc_open($c, $ds, &$p, $cwd = null, $env = null, $o = null){ __aax_rec('proc_open', $c); return false; }
+function mysqli_query($l, $q, $m = 0){ return __aax_rec('mysqli_query', $q); }
+function mysqli_multi_query($l, $q){ return __aax_rec('mysqli_multi_query', $q); }
+function mysqli_real_query($l, $q){ return __aax_rec('mysqli_real_query', $q); }
+function mysql_query($q, $l = null){ return __aax_rec('mysql_query', $q); }
+function pg_query($c, $q = null){ return __aax_rec('pg_query', $q === null ? $c : $q); }
+function pg_query_params($c, $q, $p = null){ return __aax_rec('pg_query_params', $q); }
+function sqlite_query($d, $q, $x = null){ return __aax_rec('sqlite_query', $q); }
+function file_get_contents($f, $u = false, $c = null, $o = 0, $l = null){ return __aax_rec('file_get_contents', $f); }
+function fopen($f, $m, $u = false, $c = null){ __aax_rec('fopen', $f); return false; }
+function readfile($f, $u = false, $c = null){ return __aax_rec('readfile', $f); }
+function file($f, $fl = 0, $c = null){ __aax_rec('file', $f); return array(); }
+function unserialize($s, $o = array()){ return __aax_rec('unserialize', $s); }
+// 标准净化/转义函数遮蔽为「清除污点」：返回不含 marker 的安全值。这样代码一旦正确
+// 净化，marker 就不会抵达 sink -> 正确判为未触发（避免把安全的参数化/转义误报为漏洞）。
+function escapeshellarg($s){ return "''"; }
+function escapeshellcmd($s){ return ''; }
+function mysqli_real_escape_string($l, $s = null){ return ''; }
+function mysql_real_escape_string($s, $l = null){ return ''; }
+function mysqli_escape_string($l, $s = null){ return ''; }
+function pg_escape_string($a, $b = null){ return ''; }
+function pg_escape_literal($a, $b = null){ return ''; }
+function addslashes($s){ return ''; }
+function quotemeta($s){ return ''; }
+function intval($s, $base = 10){ return 0; }
+function basename($s, $suffix = ''){ return 'safe'; }
+function realpath($s){ return '/safe'; }
+class __AaxTaint implements \ArrayAccess {
+    public function offsetExists($o): bool { return true; }
+    public function offsetGet($o): mixed { return $GLOBALS['__aax_marker']; }
+    public function offsetSet($o, $v): void {}
+    public function offsetUnset($o): void {}
+}
+'''
+
+
+def build_selfcontained_slice_harness_php(func: dict, vuln_type: str) -> "str | None":
+    """PHP 自包含切片：命名空间函数遮蔽 stub 危险 sink，污点超全局 + 参数灌入攻击 marker，
+    观察 marker 是否经真实 PHP 函数体到达 sink。仅过程式函数（class 方法需真实对象，返回 None）。"""
+    code = _dedent_code((func or {}).get("function_code") or "")
+    fname = (func or {}).get("function_name")
+    if not code or not fname or normalize_language(func.get("language")) != "php":
+        return None
+    if (func or {}).get("class_name"):
+        return None
+    classified = _classify_php_sink(code)
+    if not classified:
+        return None
+    sink_kind, sink_name = classified
+
+    m = re.search(r"function\s+&?\s*" + re.escape(fname) + r"\s*\(([^)]*)\)", code, re.I)
+    nparams = len([p for p in m.group(1).split(",") if p.strip()]) if (m and m.group(1).strip()) else 0
+    marker = _slice_marker()
+    nonce = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
+    import json as _json
+    fqn = "'AAX\\\\" + fname + "'"   # PHP 单引号串 'AAX\<fname>'（\\ 在单引号里即一个反斜杠）
+    return (
+        _PHP_SHADOW_PRELUDE +
+        "$GLOBALS['__aax_marker'] = " + _json.dumps(marker) + ";\n"
+        "$_GET = new __AaxTaint(); $_POST = new __AaxTaint(); $_REQUEST = new __AaxTaint();\n"
+        "$_COOKIE = new __AaxTaint(); $_FILES = new __AaxTaint(); $_SERVER = new __AaxTaint();\n"
+        "// ==== inline 项目真实目标函数（命名空间内，未限定 sink 调用命中上面的遮蔽函数）====\n"
+        + code + "\n"
+        "$__aax_err = '';\n"
+        "$__fn = " + fqn + ";\n"
+        "$__args = array();\n"
+        "for ($__i = 0; $__i < " + str(nparams) + "; $__i++) { $__args[] = $GLOBALS['__aax_marker']; }\n"
+        "try {\n"
+        "    if (function_exists($__fn)) { echo " + _json.dumps(nonce) + " . \"\\n\"; call_user_func_array($__fn, $__args); }\n"
+        "} catch (\\Throwable $e) { $__aax_err = get_class($e) . ': ' . $e->getMessage(); }\n"
+        "$__trig = false; $__cap = null; $__sink = null;\n"
+        "foreach ($GLOBALS['__aax_rec'] as $__r) {\n"
+        "    if (strpos($__r[1], $GLOBALS['__aax_marker']) !== false) { $__trig = true; $__cap = substr($__r[1], 0, 200); $__sink = $__r[0]; break; }\n"
+        "}\n"
+        "echo 'AUDITAGENTX_RESULT_JSON=' . json_encode(array(\n"
+        "  'triggered' => $__trig, 'sink_called' => (count($GLOBALS['__aax_rec']) > 0),\n"
+        "  'sink_name' => ($__sink !== null ? $__sink : " + _json.dumps(sink_name) + "),\n"
+        "  'captured_argument' => $__cap, 'payload' => ($__trig ? $GLOBALS['__aax_marker'] : null),\n"
+        "  'trigger_detail' => ($__trig ? '自包含切片：攻击者可控输入经真实 PHP 函数逻辑到达危险 sink' : ($__aax_err !== '' ? $__aax_err : '未命中 sink（可能经净化/方法级 sink/需真实对象）'))\n"
+        ")) . \"\\n\";\n"
+        "echo $__trig ? 'AUDITAGENTX_VULN_TRIGGERED' : 'AUDITAGENTX_NO_TRIGGER';\n"
+    )
+
+
+def _classify_js_sink(code: str) -> "tuple[str, str] | None":
+    """识别 JS 切片可拦截的危险 sink（经 require mock / 污点 Proxy 记录）。"""
+    if re.search(r"\.(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)\s*\(", code) or "child_process" in code:
+        m = re.search(r"\.(exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(", code)
+        return "command", (m.group(1) if m else "exec")
+    if re.search(r"\.(query|run|execute|prepare)\s*\(", code):
+        m = re.search(r"\.(query|run|execute)\s*\(", code)
+        return "sqli", (m.group(1) if m else "query")
+    if re.search(r"\b(unserialize|deserialize)\s*\(|node-serialize", code):
+        return "deserialization", "unserialize"
+    return None
+
+
+def build_selfcontained_slice_harness_js(func: dict, vuln_type: str) -> "str | None":
+    """JavaScript 自包含切片：注入自定义 require（返回记录型 Proxy mock）+ 污点 Proxy，
+    inline 真实函数体并以污点入参调用，观察 marker 是否经真实逻辑到达危险 sink。"""
+    code = _dedent_code((func or {}).get("function_code") or "")
+    fname = (func or {}).get("function_name")
+    if not code or not fname or normalize_language(func.get("language")) != "javascript":
+        return None
+    classified = _classify_js_sink(code)
+    if not classified:
+        return None
+    sink_kind, sink_name = classified
+    marker = _slice_marker()
+    nonce = TARGET_INVOKED_MARKER + NONCE_PLACEHOLDER
+    import json as _json
+    return (
+        "const _rec = [];\n"
+        "const _marker = " + _json.dumps(marker) + ";\n"
+        "const _nonce = " + _json.dumps(nonce) + ";\n"
+        "let _err = '';\n"
+        "function _coerce(x){ let s; try { s = (typeof x === 'string') ? x : JSON.stringify(x); } catch(e){ s = undefined; } if (s === undefined) { try { s = String(x); } catch(e2){ s = '<arg>'; } } return s; }\n"
+        "// 记录 sink 调用：primary=首参（拼接进命令/查询的字符串），full=全部参数（仅展示）。\n"
+        "// 判定只看 primary——参数化查询把值放进绑定参数数组（非首参）是安全的，不应误报。\n"
+        "function _push(sink, args){ try { var arr = Array.prototype.slice.call(args); _rec.push([sink, _coerce(arr.length ? arr[0] : ''), arr.map(_coerce).join(' ')]); } catch(e){ _rec.push([sink, '<arg>', '<arg>']); } }\n"
+        "function _sinkfn(name){ return function(){ _push(name, arguments); return ''; }; }\n"
+        "const _SINKS = new Set(['exec','execSync','execFile','execFileSync','spawn','spawnSync','fork','query','run','execute','unserialize','deserialize']);\n"
+        "function _mock(path){ return new Proxy(function(){}, { get: function(t, prop){ if (typeof prop === 'symbol'){ if (prop === Symbol.toPrimitive) return function(){ return _marker; }; return undefined; } if (_SINKS.has(prop)) return _sinkfn(prop); return _mock(path + '.' + String(prop)); }, apply: function(){ return _mock(path + '()'); }, construct: function(){ return _mock('new ' + path); } }); }\n"
+        "// 污点源代表攻击者可控输入（req/params/body 等）：任意取属性/下标都链式返回污点，\n"
+        "// 参与字符串拼接时经 Symbol.toPrimitive 产出 marker。刻意不在此识别 sink——否则\n"
+        "// req.query.x 里的 'query' 会被误当 DB sink 截断（sink 只在 require mock 里识别）。\n"
+        "const _taint = new Proxy(function(){}, { get: function(t, prop){ if (typeof prop === 'symbol'){ if (prop === Symbol.toPrimitive) return function(){ return _marker; }; return undefined; } if (prop === 'toString' || prop === 'valueOf') return function(){ return _marker; }; return _taint; }, apply: function(){ return _marker; }, construct: function(){ return _taint; } });\n"
+        "(function(require, module, exports, process, global, __dirname, __filename){\n"
+        "// ==== inline 项目真实目标函数 ====\n"
+        + code + "\n"
+        "try {\n"
+        "  if (typeof " + fname + " === 'function') { console.log(_nonce); " + fname + "(_taint, _taint, _taint, _taint); }\n"
+        "} catch(e){ _err = (e && e.message) ? String(e.message) : String(e); }\n"
+        "})(_mock, { exports: {} }, {}, { argv: [_marker, _marker], env: _taint, platform: 'linux', cwd: function(){ return '/'; } }, {}, '/', '/x.js');\n"
+        "let _triggered = false, _cap = null, _sink = null;\n"
+        "for (let i = 0; i < _rec.length; i++){ if (String(_rec[i][1]).indexOf(_marker) >= 0){ _triggered = true; _cap = String(_rec[i][2]).slice(0, 200); _sink = _rec[i][0]; break; } }\n"
+        "console.log('AUDITAGENTX_RESULT_JSON=' + JSON.stringify({ triggered: _triggered, sink_called: _rec.length > 0, sink_name: (_sink !== null ? _sink : " + _json.dumps(sink_name) + "), captured_argument: _cap, payload: (_triggered ? _marker : null), trigger_detail: (_triggered ? '自包含切片：攻击者可控输入经真实 JS 函数逻辑到达危险 sink' : (_err || '未命中 sink（可能经净化/需真实依赖）')) }));\n"
+        "console.log(_triggered ? 'AUDITAGENTX_VULN_TRIGGERED' : 'AUDITAGENTX_NO_TRIGGER');\n"
+    )
+
+
+def build_selfcontained_slice_harness_multilang(func: dict, vuln_type: str) -> "tuple[str, str] | None":
+    """按语言分发多语言自包含切片，返回 (harness_code, language)；不适用返回 None。
+    Python 由原生 AST 版 build_selfcontained_slice_harness 负责，这里只处理其它解释型语言。"""
+    lang = normalize_language((func or {}).get("language"))
+    if lang == "php":
+        h = build_selfcontained_slice_harness_php(func, vuln_type)
+        return (h, "php") if h else None
+    if lang == "javascript":
+        h = build_selfcontained_slice_harness_js(func, vuln_type)
+        return (h, "javascript") if h else None
+    return None
+
+
 def build_target_scaffold_harness(func: dict, vuln_type: str) -> str | None:
     """内联真实目标函数 + mock 精确 sink + 真实调用，构造 target_specific harness。
 
@@ -1583,7 +1791,10 @@ def _run_in_docker(harness_code: str, timeout: int, language: str,
         logger.info("Docker 引擎不可用，harness 不走 Docker: %s", e)
         return None
     rt = _LANG_RUNTIMES.get(language, _LANG_RUNTIMES["python"])
-    image = (getattr(settings, "harness_sandbox_image", "") or "").strip() or rt["image"]
+    # harness_sandbox_image 是 Python 专用固定镜像（预装 flask/django 等，供 import scaffold）；
+    # PHP/JS/Ruby 必须用各自的语言运行时镜像，否则会拿 Python 镜像跑 php/node/ruby 而失败。
+    fixed_image = (getattr(settings, "harness_sandbox_image", "") or "").strip()
+    image = (fixed_image if language == "python" else "") or rt["image"]
     code = harness_code
     if language == "php":
         code = code.replace("<?php", "").replace("?>", "")

@@ -22,7 +22,8 @@ from backend.skills.harness_tools import (
     extract_function, run_harness, build_template_harness, normalize_language,
     build_target_scaffold_harness, build_import_scaffold_harness,
     build_route_testclient_harness, build_django_classview_harness,
-    build_selfcontained_slice_harness, scaffold_capability,
+    build_selfcontained_slice_harness, build_selfcontained_slice_harness_multilang,
+    scaffold_capability,
 )
 from backend.mcp.audit_mcp_server import AuditMCPServer
 from backend.skills.loader import load_skill
@@ -316,6 +317,15 @@ class HarnessVerifier(BaseAgent):
                                     func.get("function_name"))
                         return {"harness_code": imp, "_source": "scaffold", "_language": "python",
                                 "_kind": "import_module"}
+            # 【多语言自包含切片·主力】PHP/JS 等解释型语言：同样 inline 真实函数体、
+            # 运行时遮蔽/mock 危险 sink，不 import 整个 app、不起服务，稳定产出 function_reproduced。
+            ml_slice = build_selfcontained_slice_harness_multilang(func, finding.get("type"))
+            if ml_slice:
+                ml_code, ml_lang = ml_slice
+                logger.info("HarnessVerifier 使用【自包含切片·主力·%s】脚手架 (func=%s)",
+                            ml_lang, func.get("function_name"))
+                return {"harness_code": ml_code, "_source": "scaffold", "_language": ml_lang,
+                        "_kind": "selfcontained_slice"}
             # 再次选：内联函数体脚手架（无源码/import 不适用时）。
             scaffold = build_target_scaffold_harness(func, finding.get("type"))
             if scaffold:
