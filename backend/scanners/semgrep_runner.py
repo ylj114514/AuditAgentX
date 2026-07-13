@@ -116,6 +116,10 @@ class SemgrepScanner(BaseScanner):
                                     seen.add(key)
                                     findings.append(finding)
                                 if recovery_errors:
+                                    batch_recovery = (
+                                        f"recovered {recovered_count} file(s); "
+                                        f"isolated {len(_parser_coverage_gaps(recovery_errors))} parser-unsupported file(s)"
+                                    )
                                     batch_coverage_gaps.extend(
                                         _parser_coverage_gaps(recovery_errors)
                                     )
@@ -152,6 +156,10 @@ class SemgrepScanner(BaseScanner):
                                 seen.add(key)
                                 findings.append(finding)
                             if recovery_errors:
+                                batch_recovery = (
+                                    f"recovered {recovered_count} file(s); "
+                                    f"isolated {len(_parser_coverage_gaps(recovery_errors))} parser-unsupported file(s)"
+                                )
                                 batch_coverage_gaps.extend(
                                     _parser_coverage_gaps(recovery_errors)
                                 )
