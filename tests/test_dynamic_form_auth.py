@@ -60,7 +60,8 @@ def _nodegoat_auth_inventory():
 
 
 @contextmanager
-def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open_redirect=False):
+def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open_redirect=False,
+                      empty_nodegoat_csrf=False):
     state = {"registered": False, "posts": 0, "register_csrf": "register-live-csrf",
              "login_csrf": "login-live-csrf", "registered_identity": {}}
     signup_path = "/signup" if form_variant == "nodegoat" else "/register"
@@ -93,7 +94,7 @@ def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open
         register_form = (
             "x" * 900
             + '<form method="post" action="/signup">'
-            + f'<input type="hidden" name="_csrf" value="{state["register_csrf"]}">'
+            + f'<input type="hidden" name="_csrf" value="{("" if empty_nodegoat_csrf else state["register_csrf"])}">'
             + '<input name="userName"><input name="firstName"><input name="lastName">'
             + '<input name="password" type="password"><input name="verify" type="password">'
             + '<input name="email" type="email"></form>'
@@ -108,7 +109,7 @@ def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open
     login_form = (
         ('y' * 900 if form_variant == "nodegoat" else "")
         + '<form method="post" action="/login">'
-        + (f'<input type="hidden" name="_csrf" value="{state["login_csrf"]}">'
+        + (f'<input type="hidden" name="_csrf" value="{("" if empty_nodegoat_csrf else state["login_csrf"])}">'
            if form_variant == "nodegoat" else "")
         + ('<input name="userName">' if form_variant == "nodegoat" else '<input name="username">')
         + '<input name="password" type="password"></form>'
@@ -153,7 +154,8 @@ def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open
             if self.path == signup_path:
                 if form_variant == "nodegoat":
                     state["registered"] = bool(
-                        values.get("_csrf") == [state["register_csrf"]]
+                        (not values.get("_csrf") if empty_nodegoat_csrf
+                         else values.get("_csrf") == [state["register_csrf"]])
                         and values.get("userName") and values.get("firstName") and values.get("lastName")
                         and values.get("email") and values.get("password") == values.get("verify")
                     )
@@ -168,7 +170,8 @@ def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open
                 return
             if (self.path == "/login" and state["registered"]
                     and (form_variant != "nodegoat" or (
-                        values.get("_csrf") == [state["login_csrf"]]
+                        (not values.get("_csrf") if empty_nodegoat_csrf
+                         else values.get("_csrf") == [state["login_csrf"]])
                         and values.get("userName") == [state["registered_identity"].get("userName")]
                         and values.get("password") == [state["registered_identity"].get("password")]
                     ))):
@@ -327,6 +330,23 @@ def test_nodegoat_style_csrf_signup_authenticates_open_redirect_and_replays_exac
         verifier_identity["userName"], verifier_identity["email"], verifier_identity["password"],
     ):
         assert raw_value not in body
+
+
+def test_nodegoat_empty_conventional_csrf_is_omitted_then_requires_real_auth_success():
+    """An empty _csrf field is not a token; omission remains safe because auth must succeed."""
+    with _form_auth_target(form_variant="nodegoat", open_redirect=True,
+                           empty_nodegoat_csrf=True) as (base_url, state):
+        result = DynamicVerifier().verify(
+            base_url, _open_redirect_exploit(base_url), endpoints=[_inventory()[0]],
+            auth_endpoints=_nodegoat_auth_inventory(),
+        )
+
+    assert result.reproduction_status == "dynamic_confirmed"
+    assert result.disposable_auth_bootstrap is True
+    assert state["posts"] == 2
+    submits = [item for item in result.setup_records
+               if item["auth_bootstrap"]["stage"] == "form_submit"]
+    assert all(item["auth_bootstrap"]["dynamic_csrf_field"] == "" for item in submits)
 
 
 def test_no_auth_response_falls_back_to_existing_no_oracle_verdict():

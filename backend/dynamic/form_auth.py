@@ -72,9 +72,12 @@ class _FormParser(HTMLParser):
             return
         if input_type == "hidden":
             # The only hidden value this narrow bootstrap understands is the
-            # conventional same-form _csrf token.  It is validated and used in
-            # memory, but never retained in setup evidence or replay metadata.
-            if name.lower() != _CSRF_FIELD or not values.get("value", "").strip():
+            # conventional same-form _csrf token.  A non-empty value is used
+            # only in memory and never retained in evidence.  Some applications
+            # render a conventional but empty _csrf input without enforcing CSRF;
+            # retain that known field shape so it can be omitted from submission.
+            # Any other hidden field remains fail-closed.
+            if name.lower() != _CSRF_FIELD:
                 self.current["invalid"] = True
                 return
             self.current["fields"].append({"name": name, "type": input_type,
@@ -214,8 +217,7 @@ def _safe_form(html: str, base_url: str, route: dict, kind: str) -> dict | None:
     csrf_fields = [field for field in fields if str(field["name"]).lower() == _CSRF_FIELD]
     if len(names) != len(set(names)) or len(csrf_fields) > 1:
         return None
-    if csrf_fields and (str(csrf_fields[0].get("type") or "").lower() != "hidden"
-                        or not str(csrf_fields[0].get("value") or "").strip()):
+    if csrf_fields and str(csrf_fields[0].get("type") or "").lower() != "hidden":
         return None
     if any(("csrf" in name or "token" in name or "nonce" in name) and name != _CSRF_FIELD
            for name in names):
@@ -229,8 +231,18 @@ def _safe_form(html: str, base_url: str, route: dict, kind: str) -> dict | None:
         return None
     if kind == "login" and any(name in _CONFIRM_FIELDS | _PROFILE_FIELDS for name in names):
         return None
-    return {"path": urlparse(action).path, "fields": fields,
-            "csrf_field": str(csrf_fields[0]["name"]) if csrf_fields else ""}
+    return {
+        "path": urlparse(action).path,
+        "fields": fields,
+        # Empty conventional fields are deliberately omitted from the live POST.
+        # A target that truly enforces CSRF will reject that POST and remain
+        # authentication_required; no dynamic verdict is promoted.
+        "csrf_field": (
+            str(csrf_fields[0]["name"])
+            if csrf_fields and str(csrf_fields[0].get("value") or "").strip()
+            else ""
+        ),
+    }
 
 
 def _credential_values(fields: list[dict], credentials: dict[str, str], kind: str) -> dict[str, str] | None:
@@ -246,8 +258,10 @@ def _credential_values(fields: list[dict], credentials: dict[str, str], kind: st
             values[raw_name] = credentials["password"]
         elif name in _PROFILE_FIELDS:
             values[raw_name] = "Audit" if "first" in name or "given" in name else "Agent"
-        elif name == _CSRF_FIELD and str(field.get("value") or ""):
-            values[raw_name] = str(field["value"])
+        elif name == _CSRF_FIELD:
+            value = str(field.get("value") or "")
+            if value:
+                values[raw_name] = value
         else:
             return None
     return values
