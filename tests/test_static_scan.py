@@ -697,6 +697,40 @@ def test_static_skill_runs_mcp_tools_in_parallel_and_keeps_skill_order(tmp_path:
     ]
 
 
+def test_static_skill_dispatches_bandit_and_trivy_when_selected(tmp_path: Path):
+    class ScannerServer:
+        server_name = "test-mcp"
+
+        def list_tools(self):
+            return [{"name": name} for name in (
+                "check_static_tool_availability", "run_bandit", "run_trivy", "run_custom_rules",
+            )]
+
+        def call_tool(self, name, _arguments):
+            if name == "check_static_tool_availability":
+                return {"structuredContent": {"tools": []}}
+            scanner = {
+                "run_bandit": "bandit", "run_trivy": "trivy", "run_custom_rules": "custom",
+            }[name]
+            return {"structuredContent": {
+                "raw_findings": [],
+                "scanner_status": {
+                    "tool": scanner, "available": True, "executed": True,
+                    "success": True, "finding_count": 0,
+                },
+            }}
+
+    result = AuditMCPClient(ScannerServer()).run_static_scanning_skill(
+        tmp_path, ["bandit", "trivy"],
+        {"tools": ["check_static_tool_availability", "run_bandit", "run_trivy", "run_custom_rules"]},
+    )
+
+    assert [item["tool"] for item in result["scanner_status"]] == ["bandit", "trivy", "custom"]
+    assert [item["name"] for item in result["tools_used"]] == [
+        "check_static_tool_availability", "run_bandit", "run_trivy", "run_custom_rules",
+    ]
+
+
 def test_semgrep_workspace_truncation_marks_scan_partial(monkeypatch, tmp_path: Path):
     (tmp_path / "a.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("VALUE = 2\n", encoding="utf-8")

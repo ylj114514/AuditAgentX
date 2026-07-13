@@ -83,6 +83,20 @@
           </el-form-item>
         </el-form>
 
+        <el-form :model="staticTools" label-position="top" class="static-tools-form">
+          <el-form-item label="静态安全工具">
+            <el-checkbox-group v-model="staticTools.selected" class="static-tools-list">
+              <el-checkbox v-for="tool in STATIC_TOOL_OPTIONS" :key="tool.value" :label="tool.value">
+                <span class="static-tool-label">{{ tool.label }}</span>
+                <span class="static-tool-description">{{ tool.description }}</span>
+              </el-checkbox>
+            </el-checkbox-group>
+            <p class="deep-hint">
+              内置 Custom Rules 始终启用，作为离线兜底规则；取消勾选的外部工具不会在本次扫描中执行。
+            </p>
+          </el-form-item>
+        </el-form>
+
         <el-alert
           v-if="scanScope.include_test_findings"
           type="warning"
@@ -195,6 +209,7 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { ProjectApi, ScanApi } from "../api";
 import { upsertHistory } from "../api/history";
+import { DEFAULT_STATIC_TOOLS, normalizeStaticTools, STATIC_TOOL_OPTIONS } from "../utils/staticTools";
 
 const router = useRouter();
 const submitting = ref(false);
@@ -219,6 +234,9 @@ const form = reactive({
 const scanMode = ref<"quick" | "standard" | "deep">("standard");
 const scanScope = reactive({
   include_test_findings: false,
+});
+const staticTools = reactive({
+  selected: [...DEFAULT_STATIC_TOOLS],
 });
 const verifyBudget = reactive({
   max_verify_candidates: 50,
@@ -325,7 +343,7 @@ async function submit() {
       project_id: proj.project_id,
       scan_mode: scanMode.value,
       scan_type: scanMode.value === "quick" ? "static" : "full",
-      enabled_tools: ["custom", "semgrep", "gitleaks"],
+      enabled_tools: normalizeStaticTools(staticTools.selected),
       options,
     });
 
@@ -378,12 +396,17 @@ async function submit() {
 .deep-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .notice { margin-top: 14px; }
 .verify-budget-form { margin-top: 14px; }
+.static-tools-form { margin-top: 14px; }
+.static-tools-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; width: 100%; }
+.static-tools-list :deep(.el-checkbox) { align-items: flex-start; height: auto; margin-right: 0; white-space: normal; }
+.static-tool-label { display: block; color: #344054; font-weight: 700; }
+.static-tool-description { display: block; color: #667085; font-size: 12px; line-height: 1.45; margin-top: 2px; }
 .verify-budget-form :deep(.el-input-number) { width: 100%; }
 .dynamic-form { margin-top: 14px; }
 .advanced-collapse { margin-top: 6px; border-top: 1px dashed #e4ebf3; }
 .advanced-title { color: #475467; font-weight: 700; }
 .override-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 720px) { .override-inline { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .override-inline, .static-tools-list { grid-template-columns: 1fr; } }
 .submit-btn { width: 100%; margin-top: 18px; }
 @media (max-width: 980px) { .create-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .page-title-row { align-items: flex-start; flex-direction: column; } }
