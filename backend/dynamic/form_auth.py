@@ -126,7 +126,10 @@ def bootstrap_disposable_form_auth(base_url: str, endpoints: list[dict], probe) 
     credentials = {
         "username": "aax_" + secrets.token_hex(8),
         "email": "aax_" + secrets.token_hex(8) + "@example.invalid",
-        "password": "Aax!" + secrets.token_urlsafe(18),
+        # Keep the random disposable password below conservative form limits
+        # (NodeGoat accepts at most 20 characters) while retaining upper/lower,
+        # digit, and punctuation for common password-policy compatibility.
+        "password": "Aax!" + secrets.token_hex(6),
     }
     result = AuthBootstrapResult()
     for kind, route in (("registration", register), ("login", login)):

@@ -276,6 +276,7 @@ def test_nodegoat_style_csrf_signup_authenticates_open_redirect_and_replays_exac
         assert state["register_csrf"] not in str(result.setup_records)
         assert state["login_csrf"] not in str(result.setup_records)
         verifier_identity = dict(state["registered_identity"])
+        assert len(verifier_identity["password"]) <= 20
         setup_steps = _recorded_poc_setup_steps(result.__dict__)
         assert setup_steps == [
             {"path": "/signup", "method": "GET", "transport": "query", "values": {}},
