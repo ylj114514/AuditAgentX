@@ -312,7 +312,10 @@ _LOCKFILE_NAMES = {
     "composer.lock", "poetry.lock", "pdm.lock", "cargo.lock", "gemfile.lock", "go.sum",
 }
 _TEST_FILE_NAME = re.compile(r"(?:^test_.+|.+\.(?:test|spec)\.[^.]+)$", re.IGNORECASE)
-_LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE = 200
+# A Python taint rule can consume the 300-second process budget on a 200-file
+# benchmark chunk.  Forty keeps worst-case per-file rule time bounded while
+# still avoiding one-process-per-file startup overhead.
+_LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE = 40
 
 _LANGUAGE_PROFILES: tuple[dict[str, Any], ...] = (
     {"name": "python", "suffixes": {".py"}, "configs": ["p/python"], "includes": ["**/*.py"]},
@@ -523,6 +526,8 @@ def _plan_semgrep_batches(target: Path, custom_rules_dir: Path, *,
                     "suffixes": set(profile["suffixes"]),
                     "include_test_findings": include_test_findings,
                 }
+                if profile.get("target_file_chunk_size"):
+                    batch["target_file_chunk_size"] = int(profile["target_file_chunk_size"])
                 _assign_bounded_source_targets(batch, target, max_files=max_files)
                 batches.append(batch)
     local_batches = _plan_local_rule_batches(
