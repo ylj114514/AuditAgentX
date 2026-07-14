@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -311,6 +312,7 @@ _LOCKFILE_NAMES = {
     "composer.lock", "poetry.lock", "pdm.lock", "cargo.lock", "gemfile.lock", "go.sum",
 }
 _TEST_FILE_NAME = re.compile(r"(?:^test_.+|.+\.(?:test|spec)\.[^.]+)$", re.IGNORECASE)
+_LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE = 200
 
 _LANGUAGE_PROFILES: tuple[dict[str, Any], ...] = (
     {"name": "python", "suffixes": {".py"}, "configs": ["p/python"], "includes": ["**/*.py"]},
@@ -521,20 +523,10 @@ def _plan_semgrep_batches(target: Path, custom_rules_dir: Path, *,
                     "suffixes": set(profile["suffixes"]),
                     "include_test_findings": include_test_findings,
                 }
-                chunk_size = int(profile.get("target_file_chunk_size") or 0)
-                if chunk_size:
-                    target_files = _select_source_files(
-                        target, set(profile["suffixes"]), max_files=max_files,
-                        include_test_findings=include_test_findings,
-                    )
-                    # Keep small projects on Semgrep's efficient directory path.
-                    # Only large Java repositories need bounded invocations.
-                    if len(target_files) > chunk_size:
-                        batch["target_files"] = target_files
-                        batch["target_file_chunk_size"] = chunk_size
+                _assign_bounded_source_targets(batch, target, max_files=max_files)
                 batches.append(batch)
     local_batches = _plan_local_rule_batches(
-        custom_rules_dir, includes_by_language, max_files=max_files,
+        custom_rules_dir, target, includes_by_language, max_files=max_files,
         include_test_findings=include_test_findings,
     )
     if local_batches:
@@ -544,43 +536,68 @@ def _plan_semgrep_batches(target: Path, custom_rules_dir: Path, *,
     return batches
 
 
-def _plan_local_rule_batches(custom_rules_dir: Path,
+def _plan_local_rule_batches(custom_rules_dir: Path, target: Path,
                              includes_by_language: dict[str, list[str]], *,
                              max_files: int = 20000,
                              include_test_findings: bool = False) -> list[dict[str, Any]]:
     batches: list[dict[str, Any]] = []
     python_rule = custom_rules_dir / "taint_injection.yaml"
     if python_rule.exists() and includes_by_language.get("python"):
-        batches.append({
+        batch = {
             "name": "local-python-taint",
             "config": str(python_rule),
             "includes": includes_by_language["python"],
             "suffixes": {".py"},
             "include_test_findings": include_test_findings,
-        })
+        }
+        _assign_bounded_source_targets(batch, target, max_files=max_files)
+        batches.append(batch)
     c_cpp_rule = custom_rules_dir / "c_cpp_security.yaml"
     c_cpp_includes = []
     c_cpp_includes.extend(includes_by_language.get("c") or [])
     c_cpp_includes.extend(includes_by_language.get("cpp") or [])
     if c_cpp_rule.exists() and c_cpp_includes:
-        batches.append({
+        batch = {
             "name": "local-c-cpp-security",
             "config": str(c_cpp_rule),
             "includes": list(dict.fromkeys(c_cpp_includes)),
             "suffixes": {".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"},
             "include_test_findings": include_test_findings,
-            "target_files": _select_source_files(
-                custom_rules_dir.parent / "src" if custom_rules_dir.name == "rules" else None,
-                {".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"},
-                max_files=max_files,
-                include_test_findings=include_test_findings,
-            ),
-        })
+        }
+        # C/C++ custom rules already use explicit files for compatibility with
+        # their mixed-language include set.  Keep that established behavior.
+        batch["target_files"] = _select_source_files(
+            target, set(batch["suffixes"]), max_files=max_files,
+            include_test_findings=include_test_findings, includes=batch["includes"],
+        )
+        if len(batch["target_files"]) > _LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE:
+            batch["target_file_chunk_size"] = _LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE
+        batches.append(batch)
     return batches
 
 
+def _assign_bounded_source_targets(batch: dict[str, Any], target: Path, *, max_files: int) -> None:
+    """Use explicit bounded targets only when a directory batch is genuinely large.
+
+    A single directory invocation is efficient for ordinary repositories but can
+    exceed the process budget on benchmark-scale source sets.  Explicit chunks
+    retain the same config, excludes and eligible files without introducing a
+    project-specific timeout or rule exception.
+    """
+    chunk_size = int(batch.get("target_file_chunk_size") or _LARGE_DIRECTORY_BATCH_FILE_CHUNK_SIZE)
+    target_files = _select_source_files(
+        target, set(batch.get("suffixes") or set()), max_files=max_files,
+        include_test_findings=bool(batch.get("include_test_findings", False)),
+        includes=batch.get("includes") or [],
+    )
+    if len(target_files) > chunk_size:
+        batch["target_files"] = target_files
+        batch["target_file_chunk_size"] = chunk_size
+
+
 def _select_source_files(root: Path | None, suffixes: set[str], *, max_files: int = 20000,
-                         include_test_findings: bool = False) -> list[str]:
+                         include_test_findings: bool = False,
+                         includes: list[str] | None = None) -> list[str]:
     if root is None or not root.exists():
         return []
     selected: list[str] = []
@@ -592,10 +609,30 @@ def _select_source_files(root: Path | None, suffixes: set[str], *, max_files: in
             continue
         if _path_has_excluded_part(path.parts, include_test_findings=include_test_findings):
             continue
+        relative = path.relative_to(root).as_posix()
+        if includes and not _matches_semgrep_include(relative, includes):
+            continue
         selected.append(str(path))
         if len(selected) >= max_files:
             break
     return selected
+
+
+def _matches_semgrep_include(relative_path: str, includes: list[str]) -> bool:
+    """Match a workspace-relative path against Semgrep include globs.
+
+    ``**/`` may match zero directories in Semgrep, while Python's fnmatch
+    requires at least the literal prefix.  Check both forms to keep explicit
+    file batches equivalent to the previous directory batch scope.
+    """
+    path = str(relative_path).replace("\\", "/")
+    for include in includes:
+        pattern = str(include).replace("\\", "/")
+        if fnmatchcase(path, pattern):
+            return True
+        if pattern.startswith("**/") and fnmatchcase(path, pattern[3:]):
+            return True
+    return False
 
 
 def _append_batch_error(current: str | None, new_error: str) -> str:

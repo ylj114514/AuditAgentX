@@ -64,6 +64,27 @@ def _diagnostic_tail(text: str, limit: int = 1200) -> str:
     return "\n".join(lines[-12:])[-limit:]
 
 
+_DEPENDENCY_DIAGNOSTIC = re.compile(
+    r"(?:^|\b)(?:cannot install|resolutionimpossible|no matching distribution|"
+    r"failed building wheel|subprocess-exited-with-error|could not build wheels|"
+    r"package .*? has no installation candidate)",
+    re.IGNORECASE,
+)
+
+
+def _dependency_diagnostic(text: str, limit: int = 1200) -> tuple[str, str]:
+    """Keep a meaningful dependency error as well as the final BuildKit footer."""
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    detail = next((line for line in reversed(lines) if _DEPENDENCY_DIAGNOSTIC.search(line)), "")
+    if not detail:
+        detail = next((line for line in reversed(lines) if "error:" in line.lower()), "")
+    tail = _diagnostic_tail(text, limit)
+    if not detail or detail in tail:
+        return detail or _first_line(text), tail
+    excerpt = f"{detail}\n--- BuildKit tail ---\n{tail}"
+    return detail[:400], excerpt[-limit:]
+
+
 def _transient_pull_failure(text: str) -> bool:
     lower = str(text).lower()
     return any(token in lower for token in (
@@ -403,11 +424,9 @@ class DockerProjectRunner:
             logger.warning("Compose 环境预检失败: %s", e)
         except _DependencyError as e:
             self.metadata["status"] = DEPENDENCY_INSTALL_FAILED
-            # BuildKit prints setup progress before the failing RUN output.
-            # Keeping the tail preserves the actionable package/extension
-            # failure instead of only reporting the build header.
-            self.metadata["logs_excerpt"] = _diagnostic_tail(str(e), 1200)
-            self.metadata["reason"] = "镜像构建时依赖安装失败：" + _first_line(str(e))
+            detail, excerpt = _dependency_diagnostic(str(e), 1200)
+            self.metadata["logs_excerpt"] = excerpt
+            self.metadata["reason"] = "镜像构建时依赖安装失败：" + detail
             logger.warning("沙箱依赖安装失败: %s", e)
         except Exception as e:  # noqa: BLE001
             self.metadata["status"] = SANDBOX_START_FAILED
@@ -533,7 +552,7 @@ class DockerProjectRunner:
         try:
             self.metadata["image_build_attempted"] = True
             build_command = [
-                "docker", "build", "--file", str(dockerfile_name), "--tag", image_tag,
+                "docker", "build", "--progress=plain", "--file", str(dockerfile_name), "--tag", image_tag,
                 "--rm", "--force-rm", ".",
             ]
             built = None

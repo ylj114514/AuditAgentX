@@ -106,6 +106,52 @@ def test_semgrep_plans_c_cpp_local_rules_and_respects_max_files(tmp_path: Path):
     assert any(batch["name"] == "c:p/c" for batch in batches)
 
 
+def test_semgrep_chunks_large_python_batches_without_changing_small_project_mode(tmp_path: Path):
+    root = tmp_path / "work"
+    rules = root / "rules"
+    root.mkdir()
+    rules.mkdir()
+    (rules / "taint_injection.yaml").write_text("rules: []\n", encoding="utf-8")
+    for index in range(201):
+        (root / f"module_{index:03}.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    large = _plan_semgrep_batches(root, rules)
+    for name in ("local-python-taint", "python:p/python"):
+        batch = next(item for item in large if item["name"] == name)
+        commands = _build_semgrep_commands(batch, root)
+        assert len(batch["target_files"]) == 201
+        assert len(commands) == 2
+        assert all("--timeout" in command for _label, command in commands)
+        target_operands = [
+            operand for _label, command in commands for operand in command
+            if operand in batch["target_files"]
+        ]
+        assert set(target_operands) == set(batch["target_files"])
+
+    small_root = tmp_path / "small"
+    small_root.mkdir()
+    for index in range(200):
+        (small_root / f"module_{index:03}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    small = _plan_semgrep_batches(small_root, rules)
+    assert "target_files" not in next(item for item in small if item["name"] == "local-python-taint")
+    assert "target_files" not in next(item for item in small if item["name"] == "python:p/python")
+
+
+def test_semgrep_explicit_batches_preserve_github_actions_include_scope(tmp_path: Path):
+    rules = tmp_path / "rules"
+    workflows = tmp_path / ".github" / "workflows"
+    rules.mkdir()
+    workflows.mkdir(parents=True)
+    for index in range(201):
+        (workflows / f"workflow_{index:03}.yml").write_text("name: test\n", encoding="utf-8")
+        (tmp_path / f"application_{index:03}.yml").write_text("name: config\n", encoding="utf-8")
+
+    batches = _plan_semgrep_batches(tmp_path, rules)
+    workflow_batch = next(item for item in batches if item["name"] == "github-actions:p/github-actions")
+    assert len(workflow_batch["target_files"]) == 201
+    assert all(".github" in path and "workflows" in path for path in workflow_batch["target_files"])
+
+
 def test_semgrep_ascii_workspace_respects_max_files(tmp_path: Path):
     source = tmp_path / "source"
     rules = tmp_path / "rules"

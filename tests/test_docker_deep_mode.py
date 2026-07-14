@@ -446,6 +446,25 @@ def test_dependency_failure_records_buildkit_tail(monkeypatch, tmp_path):
         assert "build header" not in runner.metadata["logs_excerpt"]
 
 
+def test_dependency_failure_keeps_early_pip_diagnostic_and_buildkit_footer(monkeypatch, tmp_path):
+    """Plain BuildKit logs must not lose the pip resolver detail before the footer."""
+    from backend.verifier.docker_project_runner import _DependencyError
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="dependency-diagnostic")
+    output = (
+        "#9 11.4 ERROR: Cannot install legacy-package==1.0 because it requires Python <3\n"
+        + "progress\n" * 30
+        + "ERROR: failed to solve: process did not complete successfully: exit code: 1"
+    )
+    monkeypatch.setattr(runner, "_start", lambda: (_ for _ in ()).throw(_DependencyError(output)))
+
+    with runner:
+        assert runner.metadata["status"] == "dependency_install_failed"
+        assert "Cannot install legacy-package" in runner.metadata["logs_excerpt"]
+        assert "failed to solve" in runner.metadata["logs_excerpt"]
+        assert "Cannot install legacy-package" in runner.metadata["reason"]
+
+
 def test_single_container_build_timeout_never_starts_container(tmp_path, monkeypatch):
     from backend.runtime.scan_execution import SandboxCommandTimeout
 
@@ -509,6 +528,7 @@ def test_single_container_build_retries_transient_registry_failure(tmp_path, mon
     ) as runner:
         assert runner.metadata["status"] == "started"
         assert len([item for item in calls if item[:2] == ["docker", "build"]]) == 2
+        assert all("--progress=plain" in item for item in calls if item[:2] == ["docker", "build"])
         assert any("build transient failure; retry 1/3" in item for item in runner.metadata["diagnostics"])
 
 
