@@ -272,9 +272,21 @@ class DynamicVerifier:
 
         payloads = exploit.get("payloads") or []
         indicators = [i for i in (exploit.get("success_indicators") or []) if i]
-        params = [str(value) for value in (exploit.get("_injection_points") or []) if str(value)]
+        source_parameter, source_parameter_error = _proven_source_parameter(endpoints)
+        if source_parameter_error:
+            result.skipped = True
+            result.reproduction_status = "endpoint_unresolved"
+            result.reason = source_parameter_error
+            return result
+        # A fresh server-side route→sink proof is stronger than a generic exploit
+        # template's field hint.  This lets handler arguments such as
+        # ``get_user(username)`` stay executable when their OpenAPI path parameter
+        # was statically proven to reach the sink, without deriving a name from the
+        # handler or guessing one from a route.
+        params = ([source_parameter] if source_parameter else
+                  [str(value) for value in (exploit.get("_injection_points") or []) if str(value)])
         preferred_method = _http_method(exploit.get("http_method") or exploit.get("method"))
-        if not _has_explicit_bound_parameter(endpoints, exploit):
+        if not source_parameter and not _has_explicit_bound_parameter(endpoints, exploit):
             result.skipped = True
             result.reproduction_status = "endpoint_unresolved"
             result.reason = "未提供与 source-bound endpoint 匹配的明确参数；未发送 HTTP 探测请求"
@@ -1239,6 +1251,39 @@ def _has_explicit_bound_parameter(endpoints, exploit: dict) -> bool:
             if isinstance(parameter, dict) and str(parameter.get("name") or "") == name:
                 matches.append((str(surface.get("path") or ""), name))
     return len(matches) == 1
+
+
+def _proven_source_parameter(endpoints) -> tuple[str | None, str]:
+    """Return one parameter explicitly proven by fresh route→sink analysis.
+
+    ``source_parameter`` is minted only by the server-side static proof, never by
+    persisted finding metadata.  A malformed proof, a parameter absent from its
+    bound surface, or competing proven parameters refuses HTTP execution rather
+    than falling back to a template hint.
+    """
+    parameters: set[str] = set()
+    saw_source_route_sink_proof = False
+    for surface in endpoints or []:
+        if not isinstance(surface, dict):
+            continue
+        binding = surface.get("source_route_binding") or {}
+        if not isinstance(binding, dict) or binding.get("kind") != "source_route_sink":
+            continue
+        saw_source_route_sink_proof = True
+        parameter = str(binding.get("source_parameter") or "").strip()
+        names = {
+            str(item.get("name") or "").strip()
+            for item in (surface.get("params") or [])
+            if isinstance(item, dict)
+        }
+        if not parameter or parameter not in names:
+            return None, "source-bound route proof lacks a matching declared parameter; no HTTP request sent"
+        parameters.add(parameter)
+    if not saw_source_route_sink_proof:
+        return None, ""
+    if len(parameters) != 1:
+        return None, "source-bound route proofs disagree on the injection parameter; no HTTP request sent"
+    return next(iter(parameters)), ""
 
 
 def _bound_parameter_names(endpoints) -> list[str]:

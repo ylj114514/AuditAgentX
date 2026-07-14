@@ -155,6 +155,70 @@ paths:
     assert bound[0]["source_route_binding"]["proof_kind"] == "intermodule_parameter_flow"
 
 
+def test_proven_openapi_handler_parameter_overrides_unbound_template_hint(tmp_path):
+    """A server-proven handler parameter must remain executable through the HTTP gate."""
+    (tmp_path / "api_views").mkdir()
+    (tmp_path / "models").mkdir()
+    (tmp_path / "api_views" / "users.py").write_text(
+        "from models.user_model import User\n\ndef get_by_username(username):\n    return User.get_user(username)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "user_model.py").write_text(
+        "class User:\n    @staticmethod\n    def get_user(username):\n        return db.execute(f\"SELECT * FROM users WHERE username = '{username}'\")\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "openapi.yml").write_text(
+        """openapi: 3.0.1
+paths:
+  /users/v1/{username}:
+    get:
+      operationId: api_views.users.get_by_username
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: {type: string}
+""",
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    class VulnerablePathProbe:
+        def send(self, base_url, path, param, payload, method="GET", transport="query", role="attack", **_kwargs):
+            calls.append((path, param, transport, role))
+            body = "SQLite error" if role == "attack" else "normal"
+            return ProbeRecord(
+                url=base_url + path, method=method, params={param: payload}, payload=payload,
+                transport=transport, role=role, status=500, status_code=500,
+                response_excerpt=body,
+            )
+
+    endpoints = _proven_surfaces_for_finding(
+        {"file": "models/user_model.py", "start_line": 4},
+        extract_endpoints(tmp_path)["endpoints"], tmp_path,
+    )
+    pipeline = object.__new__(ExploitPipeline)
+    pipeline.dynamic = DynamicVerifier(max_probes=4)
+    pipeline.dynamic.probe = VulnerablePathProbe()
+    result = pipeline._http_verify(
+        {"type": "SQL Injection", "severity": "high", "file": "models/user_model.py", "start_line": 4},
+        {
+            "vuln_type": "SQL Injection", "payloads": ["'"],
+            "success_indicators": ["SQLite error"],
+            # Generic template metadata is not proof for this source route.
+            "_injection_points": ["id"],
+        },
+        "http://127.0.0.1:18080", endpoints, None, None, True,
+    )
+
+    assert result["reproduction_status"] == "dynamic_confirmed"
+    assert calls == [
+        ("/users/v1/{username}", "username", "path", "baseline"),
+        ("/users/v1/{username}", "username", "path", "attack"),
+    ]
+
+
 def test_static_attack_surface_resolves_express_router_mount_and_route_parameters(tmp_path):
     routes = tmp_path / "routes"
     routes.mkdir()
