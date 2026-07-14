@@ -584,7 +584,10 @@ def _select_source_files(root: Path | None, suffixes: set[str], *, max_files: in
     if root is None or not root.exists():
         return []
     selected: list[str] = []
-    for path in root.rglob("*"):
+    # Filesystem enumeration order differs across OS/filesystems. Keep command
+    # chunks deterministic so parser-recovery bisection and its evidence remain
+    # reproducible in CI and local scans.
+    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root)).casefold()):
         if not path.is_file() or path.suffix.lower() not in suffixes:
             continue
         if _path_has_excluded_part(path.parts, include_test_findings=include_test_findings):
