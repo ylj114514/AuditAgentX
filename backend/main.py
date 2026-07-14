@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.database import init_db
+from backend.database import SessionLocal, init_db
 from backend.api import (
     routes_projects, routes_scans, routes_findings, routes_reports, routes_agents,
     routes_analytics, routes_acp,
@@ -64,7 +64,14 @@ def _bootstrap_docker() -> None:
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    db = SessionLocal()
+    try:
+        recovered = routes_scans.recover_interrupted_cancellations(db)
+    finally:
+        db.close()
     logging.getLogger(__name__).info("AuditAgentX 已启动，数据库初始化完成。")
+    if recovered:
+        logging.getLogger(__name__).warning("启动时收敛已取消扫描：%s", ", ".join(recovered))
     # 项目启动即在后台预热 Docker 引擎（引擎冷启动较慢，用独立线程避免阻塞服务就绪）。
     if settings.docker_autostart:
         import threading

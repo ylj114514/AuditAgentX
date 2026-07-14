@@ -144,6 +144,27 @@ def test_stale_orphaned_cancelling_scan_converges_to_cancelled(monkeypatch):
     assert scan.finished_at is not None
 
 
+def test_startup_recovery_converges_interrupted_cancellations(monkeypatch):
+    from backend.api.routes_scans import recover_interrupted_cancellations
+
+    db = SessionLocal()
+    project = Project(
+        id=ids.project_id(), name=f"startup_cancel_{ids.project_id()}", source_type="local",
+        local_path="examples/vulnerable_projects/demo_flask_app", status="created",
+    )
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="deep", status="cancelling")
+    db.add_all([project, scan])
+    db.commit()
+    scan_id = scan.id
+    monkeypatch.setattr("backend.api.routes_scans.has_active_scan_resources", lambda _scan_id: False)
+
+    assert scan_id in recover_interrupted_cancellations(db)
+    db.refresh(scan)
+    assert scan.status == "cancelled"
+    assert scan.finished_at is not None
+    db.close()
+
+
 def _scan_with_fake_terminal_acp(*, status="running", scanner_status=None):
     """Create an isolated persisted scan for terminal-ACP reconciliation tests."""
     from backend.api import routes_scans

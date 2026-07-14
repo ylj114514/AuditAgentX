@@ -405,3 +405,25 @@ def _mark_stale_scan_if_needed(scan: Scan) -> bool:
     )
     scan.finished_at = datetime.utcnow()
     return True
+
+
+def recover_interrupted_cancellations(db: Session) -> list[str]:
+    """Converge cancellation requests left behind by a process restart.
+
+    Only scans already marked ``cancelling`` are eligible.  A caller has
+    explicitly requested their termination, so completing that state on startup
+    is safer than leaving inaccessible rows indefinitely after a worker dies.
+    """
+    recovered: list[str] = []
+    for scan in db.query(Scan).filter(Scan.status == "cancelling").all():
+        if has_active_scan_resources(scan.id):
+            continue
+        scan.status = "cancelled"
+        scan.current_stage = scan.current_stage or "startup_cancel_recovery"
+        scan.progress = min(int(scan.progress or 0), 99)
+        scan.error = scan.error or "服务重启后收敛已请求取消的扫描。"
+        scan.finished_at = datetime.utcnow()
+        recovered.append(scan.id)
+    if recovered:
+        db.commit()
+    return recovered
