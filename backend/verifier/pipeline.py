@@ -1541,18 +1541,42 @@ def _python_function_index(root: Path) -> dict:
     for rel, tree in trees.items():
         imports = _local_python_imports(tree, rel, modules)
         for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            functions[(rel, node.name)] = {
-                "file": rel,
-                "name": node.name,
-                "node": node,
-                "imports": imports,
-                "params": [argument.arg for argument in (*node.args.posonlyargs, *node.args.args)],
-                "start": min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]]),
-                "end": getattr(node, "end_lineno", node.lineno),
-            }
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[(rel, node.name)] = _indexed_python_function(node, rel, imports)
+            elif isinstance(node, ast.ClassDef):
+                # Class attributes are resolvable only when Python can dispatch
+                # them without an instance.  This covers service/model helpers
+                # such as ``User.get_user(value)`` while refusing speculative
+                # instance-method flows such as ``service.get_user(value)``.
+                for method in node.body:
+                    if (isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and _is_class_dispatchable_method(method)):
+                        name = f"{node.name}.{method.name}"
+                        functions[(rel, name)] = _indexed_python_function(
+                            method, rel, imports, name=name,
+                        )
     return {"functions": functions}
+
+
+def _indexed_python_function(node: ast.FunctionDef | ast.AsyncFunctionDef, rel: str,
+                             imports: dict[str, tuple[str, str]], *, name: str | None = None) -> dict:
+    return {
+        "file": rel,
+        "name": name or node.name,
+        "node": node,
+        "imports": imports,
+        "params": [argument.arg for argument in (*node.args.posonlyargs, *node.args.args)],
+        "start": min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]]),
+        "end": getattr(node, "end_lineno", node.lineno),
+    }
+
+
+def _is_class_dispatchable_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether ``Class.method(...)`` is provably valid without an instance."""
+    return any(
+        isinstance(decorator, ast.Name) and decorator.id in {"staticmethod", "classmethod"}
+        for decorator in node.decorator_list
+    )
 
 
 def _python_module_name(rel: str) -> str:
@@ -1641,10 +1665,18 @@ def _function_calls(node: ast.AST) -> list[ast.Call]:
 
 
 def _local_call_target(index: dict, function: dict, call: ast.Call) -> dict | None:
-    if not isinstance(call.func, ast.Name):
+    if isinstance(call.func, ast.Name):
+        name = call.func.id
+        target_key = function["imports"].get(name, (function["file"], name))
+    elif (isinstance(call.func, ast.Attribute)
+          and isinstance(call.func.value, ast.Name)):
+        class_name = call.func.value.id
+        target_file, declared_class = function["imports"].get(
+            class_name, (function["file"], class_name),
+        )
+        target_key = (target_file, f"{declared_class}.{call.func.attr}")
+    else:
         return None
-    name = call.func.id
-    target_key = function["imports"].get(name, (function["file"], name))
     return index["functions"].get(target_key)
 
 

@@ -107,6 +107,54 @@ def health():
     assert bound[0]["source_route_binding"]["proof_kind"] == "intermodule_parameter_flow"
 
 
+def test_openapi_route_binds_path_parameter_through_imported_static_model_method(tmp_path):
+    """OpenAPI handlers may dispatch to imported model static methods (VAmPI pattern)."""
+    (tmp_path / "api_views").mkdir()
+    (tmp_path / "models").mkdir()
+    (tmp_path / "api_views" / "users.py").write_text(
+        """from models.user_model import User
+
+def get_by_username(username):
+    return User.get_user(username)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "user_model.py").write_text(
+        """class User:
+    @staticmethod
+    def get_user(username):
+        return db.execute(f\"SELECT * FROM users WHERE username = '{username}'\")
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "openapi.yml").write_text(
+        """openapi: 3.0.1
+paths:
+  /users/v1/{username}:
+    get:
+      operationId: api_views.users.get_by_username
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: {type: string}
+""",
+        encoding="utf-8",
+    )
+
+    endpoints = extract_endpoints(tmp_path)["endpoints"]
+    bound = _proven_surfaces_for_finding(
+        {"file": "models/user_model.py", "start_line": 4}, endpoints, tmp_path,
+    )
+
+    assert len(bound) == 1
+    assert bound[0]["path"] == "/users/v1/1"
+    assert bound[0]["methods"] == ["GET"]
+    assert {"name": "username", "location": "path", "required": True,
+            "type": "string", "enum": [], "default": None} in bound[0]["params"]
+    assert bound[0]["source_route_binding"]["proof_kind"] == "intermodule_parameter_flow"
+
+
 def test_static_attack_surface_resolves_express_router_mount_and_route_parameters(tmp_path):
     routes = tmp_path / "routes"
     routes.mkdir()
@@ -286,6 +334,39 @@ paths:
     assert endpoint["tags"] == ["users"]
     assert endpoint["summary"] == "Update password"
     assert endpoint["response_fields"] == ["owner", "secret"]
+
+
+def test_connexion_controller_operation_id_maps_to_qualified_source_handler(tmp_path):
+    """Connexion's controller extension qualifies an otherwise local operationId."""
+    (tmp_path / "api_views").mkdir()
+    (tmp_path / "api_views" / "users.py").write_text(
+        "def get_by_username(username):\n    return username\n", encoding="utf-8",
+    )
+    (tmp_path / "openapi.yml").write_text(
+        """openapi: 3.0.1
+paths:
+  /users/v1/{username}:
+    get:
+      x-openapi-router-controller: api_views.users
+      operationId: get_by_username
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: {type: string}
+""",
+        encoding="utf-8",
+    )
+
+    endpoint = extract_endpoints(tmp_path)["endpoints"][0]
+
+    assert endpoint["raw_path"] == "/users/v1/{username}"
+    assert endpoint["methods"] == ["GET"]
+    assert endpoint["operation_id"] == "api_views.users.get_by_username"
+    assert endpoint["file"] == "api_views/users.py"
+    assert endpoint["line"] == 1
+    assert {"name": "username", "location": "path", "required": True,
+            "type": "string", "enum": [], "default": None} in endpoint["params"]
 
 
 def test_path_parameter_replacement_is_encoded_and_scoped():

@@ -544,6 +544,7 @@ def _extract_openapi_endpoints(root: Path, *, max_endpoints: int) -> list[dict]:
             continue
         if not isinstance(spec, dict) or not isinstance(spec.get("paths"), dict):
             continue
+        spec_controller = spec.get("x-openapi-router-controller")
         for raw_path, path_item in spec["paths"].items():
             if not isinstance(path_item, dict):
                 continue
@@ -553,7 +554,12 @@ def _extract_openapi_endpoints(root: Path, *, max_endpoints: int) -> list[dict]:
                     continue
                 operation = operation if isinstance(operation, dict) else {}
                 params = _openapi_parameters(shared_params, operation)
-                operation_id = str(operation.get("operationId") or "")
+                operation_id = _qualified_operation_id(
+                    operation.get("operationId"),
+                    operation.get("x-openapi-router-controller")
+                    or path_item.get("x-openapi-router-controller")
+                    or spec_controller,
+                )
                 source_file, source_line = _operation_source(root, operation_id)
                 out.append({
                     "path": _normalize(str(raw_path)) or "/",
@@ -620,8 +626,31 @@ def _openapi_response_fields(operation: dict) -> list[str]:
     return sorted(fields)
 
 
+_OPERATION_ID = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+
+
+def _qualified_operation_id(operation_id: object, controller: object) -> str:
+    """Return the exact dotted handler reference declared by OpenAPI/Connexion.
+
+    Connexion permits an operation-local function name when
+    ``x-openapi-router-controller`` supplies its module.  A fully-qualified
+    ``operationId`` remains authoritative, including when a controller is also
+    present.  No filesystem search is used: malformed or ambiguous references
+    stay unresolved.
+    """
+    raw_operation = str(operation_id or "").strip().replace(":", ".")
+    if _OPERATION_ID.fullmatch(raw_operation):
+        return raw_operation
+    raw_controller = str(controller or "").strip()
+    if not raw_operation or not re.fullmatch(r"[A-Za-z_]\w*", raw_operation):
+        return raw_operation
+    if not _OPERATION_ID.fullmatch(raw_controller):
+        return raw_operation
+    return f"{raw_controller}.{raw_operation}"
+
+
 def _operation_source(root: Path, operation_id: str) -> tuple[str, int | None]:
-    if not operation_id or "." not in operation_id:
+    if not _OPERATION_ID.fullmatch(operation_id):
         return "", None
     module, function = operation_id.rsplit(".", 1)
     source = root.joinpath(*module.split(".")).with_suffix(".py")
