@@ -1,11 +1,10 @@
-# AuditAgentX 自定义 Semgrep taint mode 规则
-# 用真正的 source→sink 污点追踪替代单行匹配，显著降低误报。
-# 用法：semgrep scan --config rules/semgrep/taint_injection.yaml <target>
+# AuditAgentX custom Python web taint rules. These intentionally cover only
+# direct, cross-project source-to-sink paths not already delegated to p/python.
 rules:
   - id: auditagentx-python-sql-injection-taint
     languages: [python]
     severity: ERROR
-    message: "用户可控输入经数据流到达 SQL 执行 sink（污点分析），存在 SQL 注入风险"
+    message: "Untrusted web input reaches a SQL execution API, risking SQL injection."
     metadata:
       cwe: "CWE-89: SQL Injection"
       category: security
@@ -13,9 +12,13 @@ rules:
     mode: taint
     pattern-sources:
       - pattern: request.$ANYTHING
-      - pattern: request.args.get(...)
-      - pattern: request.form.get(...)
-      - pattern: request.values.get(...)
+      - pattern: request.get_json(...)
+      - pattern: request.get_data(...)
+      - pattern: request.query_params
+      - pattern: request.path_params
+      - pattern: request.view_args
+      - pattern: request.GET
+      - pattern: request.POST
       - pattern: input(...)
     pattern-sanitizers:
       - pattern: int(...)
@@ -28,13 +31,22 @@ rules:
           - pattern: $CUR.executemany($QUERY, ...)
           - focus-metavariable: $QUERY
       - patterns:
+          - pattern: $CUR.executescript($QUERY, ...)
+          - focus-metavariable: $QUERY
+      - patterns:
+          - pattern: $CONNECTION.exec_driver_sql($QUERY, ...)
+          - focus-metavariable: $QUERY
+      - patterns:
+          - pattern: $SESSION.execute(text($QUERY), ...)
+          - focus-metavariable: $QUERY
+      - patterns:
           - pattern: $DB.query($QUERY, ...)
           - focus-metavariable: $QUERY
 
   - id: auditagentx-python-command-injection-taint
     languages: [python]
     severity: ERROR
-    message: "用户可控输入经数据流到达系统命令执行 sink（污点分析），存在命令注入风险"
+    message: "Untrusted web input reaches a shell command execution API, risking command injection."
     metadata:
       cwe: "CWE-78: OS Command Injection"
       category: security
@@ -42,33 +54,193 @@ rules:
     mode: taint
     pattern-sources:
       - pattern: request.$ANYTHING
-      - pattern: request.args.get(...)
+      - pattern: request.get_json(...)
+      - pattern: request.get_data(...)
+      - pattern: request.query_params
+      - pattern: request.path_params
+      - pattern: request.view_args
+      - pattern: request.GET
+      - pattern: request.POST
       - pattern: input(...)
     pattern-sanitizers:
       - pattern: shlex.quote(...)
     pattern-sinks:
       - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: subprocess.getoutput(...)
+      - pattern: subprocess.getstatusoutput(...)
+      - pattern: asyncio.create_subprocess_shell(...)
       - pattern: subprocess.call(..., shell=True, ...)
       - pattern: subprocess.run(..., shell=True, ...)
       - pattern: subprocess.Popen(..., shell=True, ...)
-      - pattern: os.popen(...)
+      - pattern: subprocess.check_call(..., shell=True, ...)
+      - pattern: subprocess.check_output(..., shell=True, ...)
+
+  - id: auditagentx-python-ssrf-taint
+    languages: [python]
+    severity: WARNING
+    message: "Untrusted web input reaches an outbound HTTP client URL or host, risking SSRF."
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.get_json(...)
+      - pattern: request.get_data(...)
+      - pattern: request.query_params
+      - pattern: request.path_params
+      - pattern: request.view_args
+      - pattern: request.GET
+      - pattern: request.POST
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: requests.get($URL, ...)
+              - pattern: requests.post($URL, ...)
+              - pattern: requests.put($URL, ...)
+              - pattern: requests.patch($URL, ...)
+              - pattern: requests.delete($URL, ...)
+              - pattern: httpx.get($URL, ...)
+              - pattern: httpx.post($URL, ...)
+              - pattern: httpx.put($URL, ...)
+              - pattern: httpx.patch($URL, ...)
+              - pattern: httpx.delete($URL, ...)
+              - pattern: urllib.request.urlopen($URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern-either:
+              - pattern: requests.Session().request($METHOD, $URL, ...)
+              - pattern: httpx.Client().request($METHOD, $URL, ...)
+              - pattern: httpx.AsyncClient().request($METHOD, $URL, ...)
+              - pattern: urllib3.PoolManager().request($METHOD, $URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern-either:
+              - pattern: http.client.HTTPConnection($HOST, ...)
+              - pattern: http.client.HTTPSConnection($HOST, ...)
+          - focus-metavariable: $HOST
 
   - id: auditagentx-python-path-traversal-taint
     languages: [python]
     severity: WARNING
-    message: "用户可控输入经数据流到达文件读取 sink（污点分析），存在路径遍历风险"
+    message: "Untrusted web input reaches a file operation path, risking path traversal."
     metadata:
       cwe: "CWE-22: Path Traversal"
       category: security
-      confidence: MEDIUM
+      confidence: HIGH
     mode: taint
     pattern-sources:
       - pattern: request.$ANYTHING
-      - pattern: request.args.get(...)
+      - pattern: request.get_json(...)
+      - pattern: request.get_data(...)
+      - pattern: request.query_params
+      - pattern: request.path_params
+      - pattern: request.view_args
+      - pattern: request.GET
+      - pattern: request.POST
+      - pattern: request.files
     pattern-sanitizers:
       - pattern: os.path.basename(...)
       - pattern: werkzeug.utils.secure_filename(...)
+      - pattern: werkzeug.utils.safe_join(...)
+      - pattern: django.utils._os.safe_join(...)
     pattern-sinks:
       - patterns:
           - pattern: open($PATH, ...)
           - focus-metavariable: $PATH
+      - patterns:
+          - pattern-either:
+              - pattern: Path($PATH).read_text(...)
+              - pattern: Path($PATH).read_bytes(...)
+              - pattern: Path($PATH).write_text(...)
+              - pattern: Path($PATH).write_bytes(...)
+              - pattern: Path($PATH).unlink(...)
+              - pattern: os.remove($PATH, ...)
+              - pattern: os.unlink($PATH, ...)
+              - pattern: os.rmdir($PATH, ...)
+              - pattern: send_file($PATH, ...)
+          - focus-metavariable: $PATH
+      - patterns:
+          - pattern-either:
+              - pattern: shutil.copyfile($SOURCE, $PATH, ...)
+              - pattern: shutil.move($SOURCE, $PATH, ...)
+              - pattern: os.rename($SOURCE, $PATH, ...)
+              - pattern: os.replace($SOURCE, $PATH, ...)
+          - focus-metavariable: $PATH
+
+  - id: auditagentx-python-unsafe-deserialization-taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted web input reaches an unsafe Python deserializer, risking code execution."
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.get_json(...)
+      - pattern: request.get_data(...)
+      - pattern: request.data
+      - pattern: request.body
+      - pattern: request.POST
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads($DATA, ...)
+              - pattern: pickle.load($DATA, ...)
+              - pattern: cPickle.loads($DATA, ...)
+              - pattern: cPickle.load($DATA, ...)
+              - pattern: dill.loads($DATA, ...)
+              - pattern: dill.load($DATA, ...)
+              - pattern: cloudpickle.loads($DATA, ...)
+              - pattern: cloudpickle.load($DATA, ...)
+              - pattern: joblib.load($DATA, ...)
+          - focus-metavariable: $DATA
+
+  - id: auditagentx-python-unsafe-yaml-load-taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted web input reaches an unsafe YAML loader, risking object deserialization."
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.get_data(...)
+      - pattern: request.data
+      - pattern: request.body
+      - pattern: request.POST
+    pattern-sinks:
+      - patterns:
+          - pattern: yaml.unsafe_load($DATA, ...)
+          - focus-metavariable: $DATA
+      - patterns:
+          - pattern-either:
+              - pattern: yaml.load($DATA, Loader=yaml.Loader, ...)
+              - pattern: yaml.load($DATA, Loader=yaml.UnsafeLoader, ...)
+          - focus-metavariable: $DATA
+
+  - id: auditagentx-python-xxe-taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted XML reaches lxml with DTD loading and entity resolution enabled, risking XXE."
+    metadata:
+      cwe: "CWE-611: Improper Restriction of XML External Entity Reference"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: request.$ANYTHING
+      - pattern: request.get_data(...)
+      - pattern: request.data
+      - pattern: request.body
+      - pattern: request.POST
+    pattern-sinks:
+      - patterns:
+          - pattern: etree.fromstring($XML, parser=etree.XMLParser(..., load_dtd=True, ..., resolve_entities=True, ...), ...)
+          - focus-metavariable: $XML
