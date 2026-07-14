@@ -54,12 +54,21 @@ function hasTargetHarnessConfirmation(evidence: UnknownRecord, verification: Unk
     && harness.entrypoint_reachable === true;
 }
 
+function hasExecutedNoHitHttpReplay(evidence: UnknownRecord, verification: UnknownRecord): boolean {
+  const runtime = asRecord(evidence.runtime);
+  return (normalized(verification.dynamic_method) === "http_executed_not_reproduced"
+      || verification.execution_completed_without_hit === true)
+    && normalized(runtime.reproduction_status) === "not_reproduced"
+    && runtime.skipped !== true;
+}
+
 /**
  * Canonical, side-effect-free authorization gate for detailed PoC code.
  *
  * A visible finding alone is never enough: code is released only for a current
  * confirmed finding with an immutable, non-revoked primary artifact and either
- * a real HTTP reproduction or an entrypoint-confirmed target Harness proof.
+ * a real HTTP reproduction, entrypoint-confirmed target Harness proof, or an
+ * explicitly labeled HTTP request replay that executed without a hit.
  */
 export function canDisplayDetailedPoc({ finding, evidence }: PocDisplayInput): boolean {
   const currentFinding = asRecord(finding);
@@ -75,7 +84,8 @@ export function canDisplayDetailedPoc({ finding, evidence }: PocDisplayInput): b
   if (!isPersistedArtifact(artifact)) return false;
 
   return hasActualHttpConfirmation(proof, verification)
-    || hasTargetHarnessConfirmation(proof, verification);
+    || hasTargetHarnessConfirmation(proof, verification)
+    || hasExecutedNoHitHttpReplay(proof, verification);
 }
 
 export function hasDisplayablePocCode(value: unknown): boolean {

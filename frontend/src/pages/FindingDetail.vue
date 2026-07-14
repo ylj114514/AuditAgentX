@@ -145,7 +145,7 @@
             </el-descriptions-item>
             <el-descriptions-item label="HTTP 是否实际执行">{{ httpExecutionLabel(evidence.runtime) }}</el-descriptions-item>
             <el-descriptions-item label="最终证据等级">
-              <el-tag :type="evidenceLevelMeta(evidence?.verification, detail).tone">{{ evidenceLevelMeta(evidence?.verification, detail).label }}</el-tag>
+              <el-tag :type="evidenceLevelMeta(evidence?.verification, detail, evidence?.runtime).tone">{{ evidenceLevelMeta(evidence?.verification, detail, evidence?.runtime).label }}</el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="请求记录">
               攻击 {{ evidence.runtime.records?.length || 0 }} / 前置 {{ evidence.runtime.setup_records?.length || 0 }} / 确认 {{ evidence.runtime.confirmation_records?.length || 0 }}
@@ -189,8 +189,8 @@
         </el-tab-pane>
 
         <el-tab-pane label="利用与复现代码" name="exploit">
-          <div class="tab-intro"><h2>利用与复现代码</h2><p>仅展示已持久化且已确认的 HTTP/目标入口 PoC 代码。</p></div>
-          <el-empty v-if="!attackPlan" description="暂无已持久化的端到端复现代码。未确认内容不会生成可执行利用代码。" />
+          <div class="tab-intro"><h2>利用与复现代码</h2><p>仅展示已持久化的已确认 HTTP/目标入口代码，或已执行但未命中的 HTTP 请求复放代码。</p></div>
+          <el-empty v-if="!attackPlan" description="暂无已持久化的确认代码或已执行请求复放代码。未确认内容不会生成可执行利用代码。" />
           <div v-else class="exploit-block">
             <div class="attack-plan-banner">
               <el-tag :type="attackPlanTagType(attackPlan)">{{ attackPlanLabel(attackPlan) }}</el-tag>
@@ -519,11 +519,11 @@ function verdictLabel(v: string) {
 }
 
 function runtimeStatusLabel(runtime: any, finding?: any) {
-  return runtimeStatusMeta(runtime, finding).label;
+  return runtimeStatusMeta(runtime, finding, evidence.value?.verification).label;
 }
 
 function runtimeTagType(runtime: any, finding?: any) {
-  return runtimeStatusMeta(runtime, finding).tone;
+  return runtimeStatusMeta(runtime, finding, evidence.value?.verification).tone;
 }
 
 function toolStatusType(tool: any) {
@@ -587,13 +587,14 @@ function attackPlanLabel(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案";
   if (status === "static_confirmed_pending_runtime") return "静态确认待运行";
   if (status === "framework_confirmed_replay") return "已确认 HTTP PoC";
+  if (status === "executed_not_reproduced_replay") return "已执行请求复放（未复现）";
   if (status === "target_harness_reproduction") return "目标 Harness 复现";
   if (plan?.plan_status === "manual_plan_required") return "需人工补充";
   return "利用与复现材料";
 }
 function attackPlanTagType(plan: any) {
   const status = normalizedPlanStatus(plan);
-  if (["framework_confirmed_replay", "target_harness_reproduction"].includes(status)) return "success";
+  if (["framework_confirmed_replay", "executed_not_reproduced_replay", "target_harness_reproduction"].includes(status)) return "success";
   if (["candidate_plan_pending_review", "manual_plan_required"].includes(status)) return "warning";
   return "info";
 }
@@ -613,6 +614,7 @@ function attackPlanDescription(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案，尚待人工复核；不得计为已确认 PoC。";
   if (status === "static_confirmed_pending_runtime") return "静态证据已确认，代码仍待运行验证。";
   if (status === "framework_confirmed_replay") return "代码来自框架实际命中的本地 HTTP 请求。";
+  if (status === "executed_not_reproduced_replay") return "代码来自已执行的本地 HTTP 请求；未命中成功判据，不声明漏洞命中。";
   if (status === "target_harness_reproduction") return "代码来自目标入口 Harness 的已确认复现。";
   return "当前材料不自动视为已确认 PoC。";
 }
@@ -622,6 +624,7 @@ function attackPlanCodeCaption(plan: any) {
   if (status === "candidate_plan_pending_review") return `${language} · 候选测试草案`;
   if (status === "static_confirmed_pending_runtime") return `${language} · 待运行测试计划`;
   if (status === "framework_confirmed_replay") return `${language} · 已确认 HTTP PoC`;
+  if (status === "executed_not_reproduced_replay") return `${language} · 已执行请求复放（未复现）`;
   if (status === "target_harness_reproduction") return `${language} · 目标 Harness 复现代码`;
   return `${language} · 利用与复现代码`;
 }

@@ -51,6 +51,7 @@ const HARNESS_STATUS: Record<string, StatusMeta> = {
 
 const EVIDENCE_LEVEL: Record<string, StatusMeta> = {
   static_confirmed_http_not_reproduced: { label: "静态确认；HTTP 未复现", tone: "success", trustworthyPositive: true },
+  http_executed_not_reproduced: { label: "HTTP 请求已执行但未复现（未命中）", tone: "warning", trustworthyPositive: false },
   http_reproduced: { label: "HTTP 端到端证据", tone: "success", trustworthyPositive: true },
   target_harness: { label: "Harness 入口级证据", tone: "success", trustworthyPositive: true },
   function_unit_reproduced: { label: "函数单元证据（非端到端）", tone: "warning", trustworthyPositive: false },
@@ -118,8 +119,30 @@ function isStaticConfirmedHttpNoHit(finding: any): boolean {
     === "static_confirmed_http_not_reproduced";
 }
 
-export function runtimeStatusMeta(runtime: any, finding?: any): StatusMeta {
+function isExecutedNoHitVerification(verification: any): boolean {
+  return String(verification?.dynamic_method || "").toLowerCase() === "http_executed_not_reproduced"
+    || verification?.execution_completed_without_hit === true;
+}
+
+function executedNoHitMeta(): StatusMeta {
+  return {
+    label: "已确认：HTTP 请求已执行但未复现（未命中）",
+    tone: "success",
+    trustworthyPositive: true,
+  };
+}
+
+function isConfirmedExecutedNoHit(runtime: any, finding: any, verification: any): boolean {
+  return isConfirmedFinding(finding)
+    && String(runtime?.reproduction_status || "").toLowerCase() === "not_reproduced"
+    && runtime?.skipped !== true
+    && isExecutedNoHitVerification(verification);
+}
+
+export function runtimeStatusMeta(runtime: any, finding?: any, verification?: any): StatusMeta {
   const status = String(runtime?.reproduction_status || "not_executed").toLowerCase();
+  const resolvedVerification = verification || finding?.verification || finding?.evidence?.verification;
+  if (isConfirmedExecutedNoHit(runtime, finding, resolvedVerification)) return executedNoHitMeta();
   if (isStaticConfirmedHttpNoHit(finding) && status === "not_reproduced") {
     return EVIDENCE_LEVEL.static_confirmed_http_not_reproduced;
   }
@@ -136,8 +159,9 @@ export function harnessStatusMeta(harness: any): StatusMeta {
   return HARNESS_STATUS[verdict] || fallback(verdict, "Harness");
 }
 
-export function evidenceLevelMeta(verification: any, finding?: any): StatusMeta {
+export function evidenceLevelMeta(verification: any, finding?: any, runtime?: any): StatusMeta {
   const level = String(verification?.evidence_level || "not_executed").toLowerCase();
+  if (isConfirmedExecutedNoHit(runtime, finding, verification)) return executedNoHitMeta();
   if (level === "static_confirmed_http_not_reproduced") return EVIDENCE_LEVEL[level];
   if (isConfirmedFinding(finding) && level === "not_reproduced") return confirmedStaticMeta();
   return EVIDENCE_LEVEL[level] || fallback(level, "证据等级");

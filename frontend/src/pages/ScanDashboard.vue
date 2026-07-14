@@ -287,8 +287,8 @@
             </el-table-column>
             <el-table-column label="证据等级" min-width="160">
               <template #default="scope">
-                <el-tag :type="evidenceLevelMeta(scope.row.verification, scope.row).tone">
-                  {{ evidenceLevelMeta(scope.row.verification, scope.row).label }}
+                <el-tag :type="evidenceLevelMeta(scope.row.verification, scope.row, scope.row.runtime).tone">
+                  {{ evidenceLevelMeta(scope.row.verification, scope.row, scope.row.runtime).label }}
                 </el-tag>
               </template>
             </el-table-column>
@@ -325,13 +325,13 @@
         <el-tab-pane label="利用与复现代码" name="exploit">
           <div class="tab-intro">
             <h2>利用计划与复现代码</h2>
-            <p>仅展示已持久化且已确认的 HTTP/目标入口 PoC 代码。未确认 finding 只提供验证假设，不生成可复制利用脚本。</p>
+            <p>仅展示已持久化的已确认 HTTP/目标入口代码，或已执行但未命中的 HTTP 请求复放代码。未确认 finding 只提供验证假设，不生成可复制利用脚本。</p>
           </div>
           <div v-if="!evidenceLoading" class="exploit-summary" role="status">
-            <span><b>{{ confirmedReproductionCount }}</b> 个已确认复现 / PoC</span>
+            <span><b>{{ confirmedReproductionCount }}</b> 个已确认代码材料（含未命中请求复放）</span>
             <span>脚本仅允许 localhost / 127.0.0.1 / ::1</span>
           </div>
-          <el-empty v-if="!evidenceLoading && exploitRows.length === 0" description="该扫描没有已持久化的端到端复现代码。" />
+          <el-empty v-if="!evidenceLoading && exploitRows.length === 0" description="该扫描没有已持久化的确认代码或已执行请求复放代码。" />
           <div v-else v-loading="evidenceLoading" class="exploit-list">
             <section v-for="group in exploitGroups" :key="group.status" class="exploit-group">
               <div class="exploit-group-head">
@@ -670,7 +670,7 @@ function normalizedPlanStatus(plan: any) {
 }
 const confirmedReproductionCount = computed(() => exploitRows.value.length);
 const exploitGroups = computed(() => {
-  const order = ["framework_confirmed_replay", "target_harness_reproduction"];
+  const order = ["framework_confirmed_replay", "executed_not_reproduced_replay", "target_harness_reproduction"];
   return order.map((status) => ({
     status,
     label: attackPlanLabel({ plan_status: status }),
@@ -1332,6 +1332,7 @@ function attackPlanLabel(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案";
   if (status === "static_confirmed_pending_runtime") return "静态确认待运行";
   if (status === "framework_confirmed_replay") return "已确认 HTTP PoC";
+  if (status === "executed_not_reproduced_replay") return "已执行请求复放（未复现）";
   if (status === "target_harness_reproduction") return "目标 Harness 复现";
   if (status === "manual_plan_required") return "需人工补充";
   return "其他利用与复现材料";
@@ -1339,7 +1340,7 @@ function attackPlanLabel(plan: any) {
 
 function attackPlanTagType(plan: any) {
   const status = normalizedPlanStatus(plan);
-  if (["framework_confirmed_replay", "target_harness_reproduction"].includes(status)) return "success";
+  if (["framework_confirmed_replay", "executed_not_reproduced_replay", "target_harness_reproduction"].includes(status)) return "success";
   if (["candidate_plan_pending_review", "manual_plan_required"].includes(status)) return "warning";
   return "info";
 }
@@ -1349,6 +1350,7 @@ function attackPlanDescription(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案，尚待人工复核；不得计为已确认 PoC。";
   if (status === "static_confirmed_pending_runtime") return "静态证据已确认，代码仍待运行验证。";
   if (status === "framework_confirmed_replay") return "代码来自框架实际命中的本地 HTTP 请求，可用于复放。";
+  if (status === "executed_not_reproduced_replay") return "代码来自已执行的本地 HTTP 请求；未命中成功判据，不声明漏洞命中。";
   if (status === "target_harness_reproduction") return "代码来自目标入口 Harness 的已确认复现。";
   return "请结合证据状态人工判断，当前材料不自动视为已确认 PoC。";
 }
@@ -1359,6 +1361,7 @@ function attackPlanCodeCaption(plan: any) {
   if (status === "candidate_plan_pending_review") return `${language} · 候选测试草案`;
   if (status === "static_confirmed_pending_runtime") return `${language} · 待运行测试计划`;
   if (status === "framework_confirmed_replay") return `${language} · 已确认 HTTP PoC`;
+  if (status === "executed_not_reproduced_replay") return `${language} · 已执行请求复放（未复现）`;
   if (status === "target_harness_reproduction") return `${language} · 目标 Harness 复现代码`;
   return `${language} · 利用与复现代码`;
 }
@@ -1430,11 +1433,11 @@ function formatConfidence(value: any) {
 }
 
 function runtimeStatusLabel(runtime: any, finding?: any) {
-  return runtimeStatusMeta(runtime, finding).label;
+  return runtimeStatusMeta(runtime, finding, finding?.verification).label;
 }
 
 function runtimeTagType(runtime: any, finding?: any) {
-  return runtimeStatusMeta(runtime, finding).tone;
+  return runtimeStatusMeta(runtime, finding, finding?.verification).tone;
 }
 
 function agentName(value?: string) {

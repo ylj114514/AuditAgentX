@@ -22,6 +22,18 @@ function httpConfirmedEvidence() {
   };
 }
 
+function executedNoHitReplayEvidence() {
+  return {
+    verification: {
+      dynamic_method: "http_executed_not_reproduced",
+      execution_completed_without_hit: true,
+      dynamically_verified: false,
+    },
+    runtime: { reproduction_status: "not_reproduced", reproducible: false },
+    artifacts: { validated_poc: persistedArtifact() },
+  };
+}
+
 function targetHarnessConfirmedEvidence() {
   return {
     verification: { dynamic_method: "target_harness", dynamically_verified: true },
@@ -39,6 +51,27 @@ function targetHarnessConfirmedEvidence() {
 
 test("allows persisted PoC code for an actual confirmed HTTP reproduction", () => {
   assert.equal(canDisplayDetailedPoc({ finding: confirmedFinding(), evidence: httpConfirmedEvidence() }), true);
+});
+
+test("allows a persisted replay for a confirmed HTTP request executed without a hit", () => {
+  assert.equal(canDisplayDetailedPoc({
+    finding: confirmedFinding(),
+    evidence: executedNoHitReplayEvidence(),
+  }), true);
+});
+
+test("allows a persisted replay when completed-without-hit is supplied as the compatibility flag", () => {
+  const evidence = executedNoHitReplayEvidence();
+  evidence.verification = { execution_completed_without_hit: true };
+
+  assert.equal(canDisplayDetailedPoc({ finding: confirmedFinding(), evidence }), true);
+});
+
+test("rejects an executed no-hit replay without a persisted artifact", () => {
+  const evidence = executedNoHitReplayEvidence();
+  evidence.artifacts.validated_poc = persistedArtifact({ sha256: "" });
+
+  assert.equal(canDisplayDetailedPoc({ finding: confirmedFinding(), evidence }), false);
 });
 
 test("allows persisted PoC code for an entrypoint-confirmed target harness", () => {
