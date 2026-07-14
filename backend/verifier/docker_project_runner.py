@@ -91,6 +91,11 @@ def _dependency_diagnostic(text: str, limit: int = 1200) -> tuple[str, str]:
     return detail[:400], excerpt[-limit:]
 
 
+def _command_diagnostics(stdout: str | None, stderr: str | None) -> str:
+    """Combine BuildKit streams; plain progress splits resolver and footer output."""
+    return "\n".join(part for part in (stdout, stderr) if part).strip()
+
+
 def _transient_pull_failure(text: str) -> bool:
     lower = str(text).lower()
     return any(token in lower for token in (
@@ -587,7 +592,7 @@ class DockerProjectRunner:
                     env=self._compose_subprocess_env(), timeout=self.build_timeout,
                     deadline=self._build_deadline, phase="image_build",
                 )
-                build_error = (built.stderr or built.stdout or "").strip()
+                build_error = _command_diagnostics(built.stdout, built.stderr)
                 if built.returncode == 0 or not _transient_pull_failure(build_error) or attempt == 3:
                     break
                 self.metadata["diagnostics"].append(
@@ -627,7 +632,7 @@ class DockerProjectRunner:
                         env=self._compose_subprocess_env(), timeout=self.build_timeout,
                         deadline=self._build_deadline, phase="image_build",
                     )
-                    build_error = (built.stderr or built.stdout or "").strip()
+                    build_error = _command_diagnostics(built.stdout, built.stderr)
                     if built.returncode == 0 or not _transient_pull_failure(build_error) or attempt == 3:
                         break
                     self.metadata["diagnostics"].append(
@@ -636,7 +641,7 @@ class DockerProjectRunner:
                     )
                     time.sleep(attempt * 2)
             if built.returncode != 0:
-                raise RuntimeError(built.stderr or built.stdout or "docker build 失败")
+                raise RuntimeError(_command_diagnostics(built.stdout, built.stderr) or "docker build 失败")
         except FileNotFoundError as e:
             raise RuntimeError("docker CLI 不可用，无法执行受管沙箱构建") from e
         except Exception as e:  # noqa: BLE001

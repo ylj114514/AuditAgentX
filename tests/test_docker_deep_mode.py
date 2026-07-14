@@ -578,6 +578,43 @@ def test_generated_python_sandbox_retries_with_newer_compatible_image(tmp_path, 
         ]
 
 
+def test_python_compatibility_retry_reads_resolver_error_from_buildkit_stdout(tmp_path, monkeypatch):
+    """--progress=plain can split the pip error and BuildKit footer across streams."""
+    import subprocess
+
+    calls = []
+    container = type("Container", (), {
+        "id": "abcdef1234567890", "reload": lambda self: None,
+        "remove": lambda self, force=False: None, "logs": lambda self: b"",
+    })()
+    client = type("Client", (), {
+        "containers": type("Containers", (), {"run": lambda self, **_kwargs: container})(),
+    })()
+
+    def _run(_scan_id, command, **_kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(
+                command, 1, "ERROR: No matching distribution found for demo-package==1.0",
+                "ERROR: failed to solve: exit code: 1",
+            )
+        return subprocess.CompletedProcess(command, 0, "built", "")
+
+    monkeypatch.setattr("backend.verifier.docker_project_runner.get_docker_client", lambda: client)
+    monkeypatch.setattr("backend.verifier.docker_project_runner.run_managed_command", _run)
+    monkeypatch.setattr(DockerProjectRunner, "_prefetch_dockerfile_base_images", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(DockerProjectRunner, "_prefetch_image", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("backend.verifier.docker_project_runner._wait_healthy", lambda *_args, **_kwargs: True)
+
+    with DockerProjectRunner(
+        tmp_path, {"framework": "Flask", "run_command": "python app.py", "port": 5000},
+        scan_id="python-compat-split-stream", trust_project_container_config=False,
+    ) as runner:
+        assert runner.metadata["status"] == "started"
+        assert len(calls) == 2
+        assert "python:3.12-slim" in runner.metadata["sandbox_compatibility_patches"][0]
+
+
 def test_cancel_after_single_container_start_force_removes_once(tmp_path, monkeypatch):
     container = type("Container", (), {
         "id": "abcdef1234567890",
