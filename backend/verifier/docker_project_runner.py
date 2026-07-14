@@ -14,6 +14,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -116,6 +117,26 @@ _DOCKERFILE_ARG = re.compile(
 )
 _DOCKERFILE_FROM = re.compile(r"^\s*FROM\s+(?:--[^\s]+\s+)*([^\s]+)", re.IGNORECASE)
 _DOCKERFILE_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_DOCKERFILE_WORKDIR = re.compile(r"(?mi)^\s*WORKDIR\s+([^\s#]+)")
+_SQLITE_REFERENCE = re.compile(r"\bsqlite(?:3)?\b", re.IGNORECASE)
+_SQLITE_PATH_LITERAL = re.compile(
+    r"(?P<quote>['\"])(?P<path>[^'\"\r\n]{1,512}\.(?:sqlite(?:3)?|db))(?P=quote)",
+    re.IGNORECASE,
+)
+_SQLITE_URI = re.compile(
+    r"(?P<path>sqlite:/{3,4}[^\s'\"#]{1,512}\.(?:sqlite(?:3)?|db))",
+    re.IGNORECASE,
+)
+_SQLITE_SOURCE_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", "node_modules", "vendor", "venv", ".venv", "__pycache__",
+})
+_SQLITE_SOURCE_SUFFIXES = frozenset({
+    ".c", ".cfg", ".conf", ".cs", ".cjs", ".env", ".go", ".ini", ".java", ".js",
+    ".json", ".jsx", ".mjs", ".php", ".py", ".rb", ".rs", ".toml", ".ts", ".tsx",
+    ".yaml", ".yml",
+})
+_SQLITE_SOURCE_FILE_LIMIT = 2000
+_SQLITE_SOURCE_FILE_BYTES = 512 * 1024
 
 
 def _dockerfile_base_images(path: Path) -> list[str]:
@@ -1355,7 +1376,7 @@ class DockerProjectRunner:
                     self.metadata["diagnostics"].append("removed fixed Compose network name")
 
         services[web_service]["ports"] = [f"127.0.0.1::{target_port}"]
-        self._harden_isolated_compose_services(services, web_service)
+        self._harden_isolated_compose_services(services, web_service, source.parent)
         suffix = re.sub(r"[^a-z0-9]", "", self.scan_id.lower())[:12] or "scan"
         generated_name = f"docker-compose.auditagentx.{suffix}.yml"
         # Keep the isolated file next to the source Compose file. Compose resolves
@@ -1432,7 +1453,8 @@ class DockerProjectRunner:
             f"generated deterministic Node 8 nodemon compatibility Dockerfile for {web_service}"
         )
 
-    def _harden_isolated_compose_services(self, services: dict, web_service: str) -> None:
+    def _harden_isolated_compose_services(self, services: dict, web_service: str,
+                                          compose_dir: Path) -> None:
         """Apply controls that do not prevent ordinary stateful dependencies from starting.
 
         Every selected service receives bounded memory, CPU and process resources.  The
@@ -1457,10 +1479,195 @@ class DockerProjectRunner:
             safe_tmp = "/tmp:rw,noexec,nosuid,size=64m"
             if not any(str(entry).split(":", 1)[0] == "/tmp" for entry in tmpfs_entries):
                 tmpfs_entries.append(safe_tmp)
+            for target in self._sqlite_runtime_tmpfs_targets(service, compose_dir):
+                if not any(str(entry).split(":", 1)[0] == target for entry in tmpfs_entries):
+                    tmpfs_entries.append(
+                        f"{target}:rw,noexec,nosuid,nodev,size=64m,mode=1777"
+                    )
             service["tmpfs"] = tmpfs_entries
         self.metadata["diagnostics"].append(
             "isolated compose hardened selected web service and applied resource limits"
         )
+
+    def _sqlite_runtime_tmpfs_targets(self, service: dict, compose_dir: Path) -> list[str]:
+        """Map declared safe SQLite directories onto disposable container tmpfs mounts.
+
+        Only source files that actually reference SQLite are considered.  A source
+        filename is never mounted from the host: the generated Compose file mounts
+        an empty tmpfs at the corresponding in-container directory for this scan.
+        """
+        storage_dirs = self._declared_sqlite_storage_dirs()
+        if not storage_dirs:
+            return []
+        app_root = self._compose_service_app_root(service, compose_dir)
+        if app_root is None:
+            self.metadata["diagnostics"].append(
+                "SQLite storage declared but container application root could not be resolved"
+            )
+            return []
+        targets = [self._container_child_path(app_root, storage_dir) for storage_dir in storage_dirs]
+        self.metadata["diagnostics"].append(
+            "isolated compose added disposable SQLite tmpfs storage: " + ", ".join(targets)
+        )
+        return targets
+
+    def _declared_sqlite_storage_dirs(self) -> list[str]:
+        """Return project-relative parent directories of literal SQLite database paths.
+
+        The scan is deliberately bounded and does not follow symlinks, so untrusted
+        target projects cannot use this compatibility feature to read arbitrary host
+        files.  Absolute, dynamic, and traversal paths fail closed rather than
+        becoming a writable mount target.
+        """
+        storage_dirs: set[str] = set()
+        seen = 0
+        for current, directories, filenames in os.walk(self.code_root, followlinks=False):
+            directories[:] = sorted(
+                directory for directory in directories
+                if directory not in _SQLITE_SOURCE_SKIP_DIRS
+            )
+            for filename in sorted(filenames):
+                if seen >= _SQLITE_SOURCE_FILE_LIMIT:
+                    self.metadata["diagnostics"].append(
+                        "SQLite declaration scan reached its bounded source-file limit"
+                    )
+                    return sorted(storage_dirs)
+                path = Path(current) / filename
+                if path.suffix.lower() not in _SQLITE_SOURCE_SUFFIXES or path.is_symlink():
+                    continue
+                try:
+                    if path.stat().st_size > _SQLITE_SOURCE_FILE_BYTES:
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                seen += 1
+                if not _SQLITE_REFERENCE.search(text):
+                    continue
+                for match in (*_SQLITE_PATH_LITERAL.finditer(text), *_SQLITE_URI.finditer(text)):
+                    storage_dir = self._safe_sqlite_storage_dir(match.group("path"))
+                    if storage_dir:
+                        storage_dirs.add(storage_dir)
+        return sorted(storage_dirs)
+
+    def _safe_sqlite_storage_dir(self, literal: str) -> str | None:
+        """Validate one SQLite filename and return its relative parent directory."""
+        raw = str(literal or "").strip()
+        lowered = raw.lower()
+        if lowered.startswith("sqlite:"):
+            suffix = raw[len("sqlite:"):]
+            if suffix.startswith("////"):
+                raw = "/" + suffix[4:]
+            elif suffix.startswith("///"):
+                raw = suffix[3:]
+            else:
+                return None
+        normalized = raw.replace("\\", "/")
+        parts = normalized.split("/")
+        if (not normalized or normalized.startswith(("/", "~"))
+                or re.match(r"^[A-Za-z]:", raw) or "$" in normalized
+                or ".." in parts):
+            raise _ComposeEnvironmentError(
+                "unsafe_sqlite_storage_path", [],
+                "SQLite 存储路径不安全；拒绝绝对路径、路径穿越或动态路径",
+            )
+        safe_parts = [part for part in parts if part not in {"", "."}]
+        if len(safe_parts) < 2:
+            # A root-level SQLite file cannot be safely overlaid with a directory
+            # tmpfs without masking the application itself.
+            self.metadata["diagnostics"].append(
+                "SQLite root-level database declaration left unchanged to preserve application files"
+            )
+            return None
+        return "/".join(safe_parts[:-1])
+
+    def _compose_service_app_root(self, service: dict, compose_dir: Path) -> str | None:
+        """Resolve a static in-container application root without trusting host paths."""
+        configured = self._safe_container_directory(service.get("working_dir"))
+        if configured:
+            return configured
+
+        for volume in service.get("volumes") or []:
+            source, target = self._compose_bind_source_and_target(volume)
+            if source is None or target is None:
+                continue
+            candidate = self._safe_project_relative_path(source, compose_dir)
+            if candidate == self.code_root:
+                return target
+
+        build = service.get("build")
+        if isinstance(build, str):
+            context_value, dockerfile_value = build, "Dockerfile"
+        elif isinstance(build, dict):
+            context_value = build.get("context", ".")
+            dockerfile_value = build.get("dockerfile") or "Dockerfile"
+        else:
+            return None
+        context = self._safe_project_relative_path(context_value, compose_dir)
+        if context is None:
+            return None
+        dockerfile = self._safe_project_relative_path(dockerfile_value, context)
+        if dockerfile is None:
+            return None
+        try:
+            dockerfile.relative_to(context)
+            source = dockerfile.read_text(encoding="utf-8", errors="ignore")
+        except (OSError, ValueError):
+            return None
+
+        workdir: str | None = None
+        for match in _DOCKERFILE_WORKDIR.finditer(source):
+            value = match.group(1)
+            if "$" in value:
+                return None
+            if value.startswith("/"):
+                workdir = self._safe_container_directory(value)
+            elif workdir:
+                workdir = self._safe_container_directory(posixpath.join(workdir, value))
+            else:
+                return None
+            if workdir is None:
+                return None
+        return workdir
+
+    def _safe_project_relative_path(self, value, base: Path) -> Path | None:
+        raw = str(value or "").strip()
+        normalized = raw.replace("\\", "/")
+        if (not normalized or normalized.startswith(("/", "~")) or "$" in normalized
+                or re.match(r"^[A-Za-z]:", raw) or ".." in normalized.split("/")):
+            return None
+        try:
+            candidate = (base / Path(*normalized.split("/"))).resolve()
+            candidate.relative_to(self.code_root)
+        except ValueError:
+            return None
+        return candidate
+
+    @staticmethod
+    def _safe_container_directory(value) -> str | None:
+        raw = str(value or "").strip()
+        normalized = raw.replace("\\", "/")
+        if (not normalized.startswith("/") or "$" in normalized or ":" in normalized
+                or ".." in normalized.split("/")):
+            return None
+        return posixpath.normpath(normalized)
+
+    @staticmethod
+    def _container_child_path(root: str, relative: str) -> str:
+        return posixpath.join(root, relative)
+
+    def _compose_bind_source_and_target(self, volume) -> tuple[str | None, str | None]:
+        if isinstance(volume, dict):
+            if str(volume.get("type") or "").lower() != "bind":
+                return None, None
+            return str(volume.get("source") or ""), self._safe_container_directory(volume.get("target"))
+        raw = str(volume or "")
+        source = _compose_short_volume_source(raw)
+        if source == raw:
+            return None, None
+        remaining = raw[len(source):].lstrip(":")
+        target = remaining.split(":", 1)[0]
+        return source, self._safe_container_directory(target)
 
     def _precheck_compose_environment_files(self, services: dict, compose_dir: Path) -> None:
         """Fail closed for missing env files, except one deterministic local DB shape.

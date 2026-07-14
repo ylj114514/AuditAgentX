@@ -6,7 +6,11 @@ import pytest
 from backend.dynamic.launch_detector import detect_launch
 from backend.dynamic.endpoint_extractor import extract_endpoints
 from backend.dynamic.strategy import resolve_strategy
-from backend.verifier.docker_project_runner import DockerProjectRunner, build_dockerfile
+from backend.verifier.docker_project_runner import (
+    DockerProjectRunner,
+    _ComposeEnvironmentError,
+    build_dockerfile,
+)
 from backend.verifier.pipeline import ExploitPipeline
 from backend.verifier.evidence_collector import EvidenceCollector
 from backend.api.routes_scans import resolve_scan_mode
@@ -1407,6 +1411,72 @@ def test_isolated_compose_hardens_selected_web_service_without_restricting_datab
     assert services["mongo"]["pids_limit"] == 256
     assert "read_only" not in services["mongo"]
     runner._cleanup()
+
+
+def test_isolated_compose_mounts_declared_relative_sqlite_storage_on_tmpfs(tmp_path):
+    """A declared project-relative SQLite directory stays writable per scan."""
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.11-slim\nWORKDIR /srv/application\n", encoding="utf-8",
+    )
+    (tmp_path / "settings.py").write_text(
+        "import sqlite3\nDATABASE = 'runtime/state.sqlite3'\n", encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  web:\n    build: .\n    ports: ['8000:8000']\n", encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="sqlite-runtime")
+    generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
+    import yaml
+    web = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]["web"]
+
+    assert web["read_only"] is True
+    assert web["tmpfs"] == [
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "/srv/application/runtime:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+    ]
+    runner._cleanup()
+
+
+def test_isolated_compose_does_not_add_sqlite_tmpfs_without_a_declaration(tmp_path):
+    """Non-SQLite projects retain the existing single writable /tmp mount."""
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.11-slim\nWORKDIR /srv/application\n", encoding="utf-8",
+    )
+    (tmp_path / "app.py").write_text("print('no local database')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "Example only: sqlite3.connect('/var/lib/example.db')\n", encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  web:\n    build: .\n    ports: ['8000:8000']\n", encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="no-sqlite-runtime")
+    generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
+    import yaml
+    web = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]["web"]
+
+    assert web["tmpfs"] == ["/tmp:rw,noexec,nosuid,size=64m"]
+    runner._cleanup()
+
+
+@pytest.mark.parametrize("sqlite_path", ["/var/lib/app.db", "../outside/app.db"])
+def test_isolated_compose_rejects_absolute_or_traversing_sqlite_storage(tmp_path, sqlite_path):
+    """SQLite declarations must not turn arbitrary paths into writable mounts."""
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.11-slim\nWORKDIR /srv/application\n", encoding="utf-8",
+    )
+    (tmp_path / "settings.py").write_text(
+        f"import sqlite3\nDATABASE = {sqlite_path!r}\n", encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  web:\n    build: .\n    ports: ['8000:8000']\n", encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="unsafe-sqlite-runtime")
+    with pytest.raises(_ComposeEnvironmentError, match="SQLite.*路径") as exc_info:
+        runner._prepare_isolated_compose("docker-compose.yml", None)
+    assert exc_info.value.failure_code == "unsafe_sqlite_storage_path"
 
 
 def test_compose_prefers_explicit_vulnerable_variant_for_vampi_style_target(tmp_path):
