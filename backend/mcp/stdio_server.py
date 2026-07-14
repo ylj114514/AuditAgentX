@@ -34,10 +34,11 @@ def main() -> None:
         })["structuredContent"]
 
     @mcp.tool()
-    def verify_source_sink(candidate: dict, code_context: dict) -> dict:
+    def verify_source_sink(candidate: dict, code_context: dict, code_root: str | None = None) -> dict:
         return bridge.call_tool("verify_source_sink", {
             "candidate": candidate,
             "code_context": code_context,
+            "code_root": code_root,
         })["structuredContent"]
 
     @mcp.tool()

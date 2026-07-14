@@ -56,7 +56,10 @@ def build_verification_context(
     })
     context["context_classification"] = classify_finding_context(
         candidate, context["code_context"].get("snippet"))
-    heuristic = run_heuristic_static_verifier(candidate, context["code_context"])
+    heuristic = run_heuristic_static_verifier(
+        candidate, context["code_context"],
+        source_route_surfaces=_fresh_source_route_surfaces(candidate, code_root),
+    )
     context["heuristic_result"] = heuristic
     context["tools_used"].append({
         "name": "heuristic_static_verifier",
@@ -79,14 +82,90 @@ def read_code_context(candidate: dict[str, Any], code_root: Path | None, *, radi
     return _read_code_context(candidate, code_root, radius=radius)
 
 
-def run_heuristic_static_verifier(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
+def run_heuristic_static_verifier(candidate: dict[str, Any], code_context: dict[str, Any], *,
+                                  source_route_surfaces: list[dict] | None = None) -> dict[str, Any]:
     """Public MCP tool implementation for source-to-sink and false-positive checks."""
-    return _run_heuristic_verifier(candidate, code_context)
+    result = _run_heuristic_verifier(candidate, code_context)
+    return _apply_source_route_proof(result, source_route_surfaces)
 
 
 def run_local_sast_replay(candidate: dict[str, Any], code_context: dict[str, Any]) -> dict[str, Any]:
     """Public MCP tool implementation for deterministic local SAST replay."""
     return _local_sast_replay(candidate, code_context)
+
+
+def fresh_source_route_surfaces(candidate: dict[str, Any], code_root: Path | None) -> list[dict]:
+    """Derive current-code route→sink capabilities for static verification.
+
+    The returned surfaces are private server-minted objects, not persisted route
+    claims.  Callers must still validate their capability before treating the
+    accompanying proof as attacker-control evidence.
+    """
+    return _fresh_source_route_surfaces(candidate, code_root)
+
+
+def _fresh_source_route_surfaces(candidate: dict[str, Any], code_root: Path | None) -> list[dict]:
+    if code_root is None:
+        return []
+    try:
+        from backend.dynamic.endpoint_extractor import candidate_attack_surfaces
+        from backend.verifier.pipeline import _proven_surfaces_for_finding
+
+        root = Path(code_root).resolve()
+        return _proven_surfaces_for_finding(
+            candidate, candidate_attack_surfaces(root), root,
+        )
+    except (OSError, ValueError):
+        return []
+
+
+def _apply_source_route_proof(result: dict[str, Any], surfaces: list[dict] | None) -> dict[str, Any]:
+    """Promote an inconclusive parameter origin only with a fresh server proof."""
+    from backend.dynamic.source_route_binding import is_server_bound_surface
+
+    proofs = []
+    for surface in surfaces or []:
+        if not is_server_bound_surface(surface):
+            continue
+        proof = surface.get("source_route_binding") or {}
+        if isinstance(proof, dict) and proof.get("kind") == "source_route_sink":
+            proofs.append(dict(proof))
+    if not proofs:
+        return result
+
+    merged = dict(result)
+    merged["source_route_sink_proofs"] = proofs
+    merged["source_route_sink_proven"] = True
+    merged["checks"] = [
+        *(merged.get("checks") or []),
+        {
+            "name": "server_bound_route_parameter_reaches_sink",
+            "passed": True,
+            "parameters": sorted({str(proof.get("source_parameter") or "") for proof in proofs}),
+        },
+    ]
+    # A definitive safe pattern remains a false positive.  This proof establishes
+    # attacker control, not vulnerability semantics independent of the sink check.
+    if merged.get("is_valid") is not None:
+        return merged
+
+    parameters = sorted({str(proof.get("source_parameter") or "") for proof in proofs if proof.get("source_parameter")})
+    parameter_label = ", ".join(parameters)
+    merged.update({
+        "is_valid": True,
+        "confidence": max(float(merged.get("confidence") or 0.0), 0.8),
+        "source": f"OpenAPI/route parameter: {parameter_label}",
+        "sink": merged.get("sink") or "candidate sink reached by server-bound route parameter",
+        "propagation_path": [
+            *(merged.get("propagation_path") or []),
+            f"mapped route parameter ({parameter_label})",
+            "server-proven route→handler→sink flow",
+        ],
+        "deterministic_flow": True,
+        "evidence_strength": "server_route_sink",
+        "verification_level": "local_static_verified",
+    })
+    return merged
 
 
 def _read_code_context(candidate: dict[str, Any], code_root: Path | None, *, radius: int) -> dict[str, Any]:

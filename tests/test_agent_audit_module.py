@@ -48,6 +48,85 @@ def test_verify_agent_keeps_unproven_parameter_origin_for_review(monkeypatch, tm
     assert result["_tool_evidence"]["skill"]["name"] == "vulnerability-verification"
 
 
+def test_verify_agent_confirms_function_parameter_proven_from_openapi_route(monkeypatch, tmp_path: Path):
+    """A fresh OpenAPI handler→model proof makes the model parameter attacker-controlled."""
+    (tmp_path / "api_views").mkdir()
+    (tmp_path / "models").mkdir()
+    (tmp_path / "api_views" / "users.py").write_text(
+        "from models.user_model import User\n\n"
+        "def get_by_username(username):\n"
+        "    return User.get_user(username)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "user_model.py").write_text(
+        "class User:\n"
+        "    @staticmethod\n"
+        "    def get_user(username):\n"
+        "        user_query = f\"SELECT * FROM users WHERE username = '{username}'\"\n"
+        "        return db.session.execute(text(user_query))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "openapi.yml").write_text(
+        """openapi: 3.0.1
+paths:
+  /users/v1/{username}:
+    get:
+      operationId: api_views.users.get_by_username
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: {type: string}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(VerifyAgent, "_call", lambda self, content: {
+        "is_valid": False,
+        "confidence": 0.2,
+        "false_positive_reason": "Function parameter origin is unknown.",
+    })
+
+    result = VerifyAgent().run({
+        "type": "SQL Injection",
+        "severity": "high",
+        "file": "models/user_model.py",
+        "start_line": 4,
+        "code_snippet": "user_query = f\"SELECT * FROM users WHERE username = '{username}'\"",
+    }, code_root=tmp_path)
+
+    assert result["is_valid"] is True
+    assert result.get("needs_review") is False
+    assert result["_tool_evidence"]["heuristic_result"]["source_route_sink_proven"] is True
+    assert result["_tool_evidence"]["heuristic_result"]["source"] == "OpenAPI/route parameter: username"
+
+
+def test_verify_agent_rejects_unbound_function_parameter(monkeypatch, tmp_path: Path):
+    """A function parameter without a fresh mapped-route proof stays a false positive."""
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "user_model.py").write_text(
+        "def get_user(username):\n"
+        "    user_query = f\"SELECT * FROM users WHERE username = '{username}'\"\n"
+        "    return db.session.execute(text(user_query))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(VerifyAgent, "_call", lambda self, content: {
+        "is_valid": False,
+        "confidence": 0.2,
+        "false_positive_reason": "Function parameter origin is unknown.",
+    })
+
+    result = VerifyAgent().run({
+        "type": "SQL Injection",
+        "severity": "high",
+        "file": "models/user_model.py",
+        "start_line": 2,
+        "code_snippet": "user_query = f\"SELECT * FROM users WHERE username = '{username}'\"",
+    }, code_root=tmp_path)
+
+    assert result["is_valid"] is False
+    assert result.get("source_route_sink_proven") is not True
+
+
 def test_mcp_server_exposes_verification_tools(tmp_path: Path):
     (tmp_path / "app.py").write_text(
         "def user(uid, cur):\n    sql = 'select * from users where id=' + uid\n    return cur.execute(sql)\n",

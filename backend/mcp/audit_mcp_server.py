@@ -118,6 +118,7 @@ class AuditMCPServer:
                     "properties": {
                         "candidate": {"type": "object"},
                         "code_context": {"type": "object"},
+                        "code_root": {"type": ["string", "null"]},
                     },
                 },
                 "handler": self._verify_source_sink,
@@ -367,9 +368,16 @@ class AuditMCPServer:
 
     @staticmethod
     def _verify_source_sink(arguments: dict[str, Any]) -> dict[str, Any]:
+        code_root = arguments.get("code_root")
+        candidate = arguments.get("candidate") or {}
+        from backend.agents.verification_tools import fresh_source_route_surfaces
+
         return run_heuristic_static_verifier(
-            arguments.get("candidate") or {},
+            candidate,
             arguments.get("code_context") or {},
+            source_route_surfaces=fresh_source_route_surfaces(
+                candidate, Path(code_root) if code_root else None,
+            ),
         )
 
     @staticmethod

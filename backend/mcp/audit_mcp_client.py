@@ -138,6 +138,7 @@ class AuditMCPClient:
                 heuristic_result = self._call(tool_name, {
                     "candidate": candidate,
                     "code_context": code_context,
+                    "code_root": str(code_root) if code_root else None,
                 })
                 tools_used.append(_tool_call(tool_name, "Verify source-to-sink flow through the MCP server.", heuristic_result))
 

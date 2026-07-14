@@ -153,7 +153,9 @@ class VerifyAgent(BaseAgent):
             # Independent verifiers disagree. Only an exact weak hash used in
             # password/authentication state is deterministic enough to prevail;
             # generic window heuristics remain reviewable.
-            verdict["needs_review"] = heuristic.get("evidence_strength") != "authentication_hash"
+            verdict["needs_review"] = heuristic.get("evidence_strength") not in {
+                "authentication_hash", "server_route_sink",
+            }
             verdict["heuristic_disagreement"] = (
                 verdict.get("false_positive_reason") or
                 "本地静态验证确认漏洞，但 LLM 判为误报，保留本地证据并标记分歧。"
