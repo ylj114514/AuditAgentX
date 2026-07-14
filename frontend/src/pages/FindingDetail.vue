@@ -189,7 +189,7 @@
         </el-tab-pane>
 
         <el-tab-pane label="利用与复现代码" name="exploit">
-          <div class="tab-intro"><h2>利用与复现代码</h2><p>仅展示已持久化的 HTTP/目标入口复现；函数级取证不等同端到端 PoC。</p></div>
+          <div class="tab-intro"><h2>利用与复现代码</h2><p>仅展示已持久化且已确认的 HTTP/目标入口 PoC 代码。</p></div>
           <el-empty v-if="!attackPlan" description="暂无已持久化的端到端复现代码。未确认内容不会生成可执行利用代码。" />
           <div v-else class="exploit-block">
             <div class="attack-plan-banner">
@@ -374,7 +374,6 @@ const artifactStates = computed(() => {
   const artifacts = evidence.value?.artifacts || {};
   return [
     { kind: "validated_poc", label: "Primary PoC（端到端 / 目标入口）", value: artifacts.validated_poc, legacy: evidence.value?.poc_file },
-    { kind: "function_forensic", label: "函数级复现（非端到端）", value: artifacts.function_forensic, legacy: evidence.value?.forensic_poc_file },
   ].filter(({ value, legacy }) => value || legacy).map(({ kind, label, value, legacy }) => {
     const item = value || {};
     const persistence = String(item.persistence_status || (legacy?.sha256 ? "persisted" : "not_attempted"));
@@ -393,7 +392,7 @@ const artifactStates = computed(() => {
       failure_code: item.failure_code || "-",
       alertType: revoked ? "warning" : failed ? "error" : pending ? "warning" : persistence === "persisted" ? "success" : "info",
       notice: revoked ? "finding 当前状态已撤销该制品；保留哈希仅供审计，不可复制或执行"
-        : failed ? "已确认但制品保存失败 / 证据不完整" : pending ? "验证尚待完成：当前制品未确认" : kind === "function_forensic" ? "函数级复现制品（非端到端 PoC）" : persistence === "persisted" ? "已确认复现制品已安全保存" : "当前未形成已保存的确认制品",
+        : failed ? "已确认但制品保存失败 / 证据不完整" : pending ? "验证尚待完成：当前制品未确认" : persistence === "persisted" ? "已确认复现制品已安全保存" : "当前未形成已保存的确认制品",
     };
   });
 });

@@ -325,22 +325,12 @@
         <el-tab-pane label="利用与复现代码" name="exploit">
           <div class="tab-intro">
             <h2>利用计划与复现代码</h2>
-            <p>仅展示已持久化的 HTTP/目标入口复现。未确认 finding 只提供验证假设，不生成可复制利用脚本。</p>
+            <p>仅展示已持久化且已确认的 HTTP/目标入口 PoC 代码。未确认 finding 只提供验证假设，不生成可复制利用脚本。</p>
           </div>
           <div v-if="!evidenceLoading" class="exploit-summary" role="status">
             <span><b>{{ confirmedReproductionCount }}</b> 个已确认复现 / PoC</span>
             <span>脚本仅允许 localhost / 127.0.0.1 / ::1</span>
           </div>
-          <section v-if="!evidenceLoading && validationHypothesisRows.length" class="validation-hypothesis-panel">
-            <h3>验证假设 / 人工复核</h3>
-            <el-alert type="warning" show-icon :closable="false" title="未确认，未生成可执行利用代码。" />
-            <el-table :data="validationHypothesisRows" size="small" class="validation-hypothesis-table">
-              <el-table-column prop="type" label="漏洞类型" min-width="150" />
-              <el-table-column label="位置" min-width="180"><template #default="scope">{{ scope.row.attackPlan?.trigger_location || scope.row.file }}</template></el-table-column>
-              <el-table-column label="验证方法" min-width="280"><template #default="scope">{{ scope.row.attackPlan?.verification_method || "请人工确认 source→route/endpoint 与 sink。" }}</template></el-table-column>
-              <el-table-column label="人工复核" width="100"><template #default="scope"><el-button type="primary" link @click="openFinding(scope.row.finding_id)">查看</el-button></template></el-table-column>
-            </el-table>
-          </section>
           <el-empty v-if="!evidenceLoading && exploitRows.length === 0" description="该扫描没有已持久化的端到端复现代码。" />
           <div v-else v-loading="evidenceLoading" class="exploit-list">
             <section v-for="group in exploitGroups" :key="group.status" class="exploit-group">
@@ -387,6 +377,16 @@
             </article>
             </section>
           </div>
+          <section v-if="!evidenceLoading && validationHypothesisRows.length" class="validation-hypothesis-panel">
+            <h3>验证假设 / 人工复核</h3>
+            <el-alert type="warning" show-icon :closable="false" title="未确认，未生成可执行利用代码。" />
+            <el-table :data="validationHypothesisRows" size="small" class="validation-hypothesis-table">
+              <el-table-column prop="type" label="漏洞类型" min-width="150" />
+              <el-table-column label="位置" min-width="180"><template #default="scope">{{ scope.row.attackPlan?.trigger_location || scope.row.file }}</template></el-table-column>
+              <el-table-column label="验证方法" min-width="280"><template #default="scope">{{ scope.row.attackPlan?.verification_method || "请人工确认 source→route/endpoint 与 sink。" }}</template></el-table-column>
+              <el-table-column label="人工复核" width="100"><template #default="scope"><el-button type="primary" link @click="openFinding(scope.row.finding_id)">查看</el-button></template></el-table-column>
+            </el-table>
+          </section>
         </el-tab-pane>
 
         <el-tab-pane label="Agent 通信流" name="agents">
@@ -635,7 +635,6 @@ function artifactRows(evidence: any) {
   const artifacts = evidence?.artifacts || {};
   return [
     { kind: "validated_poc", label: "Primary PoC", value: artifacts.validated_poc },
-    { kind: "function_forensic", label: "函数级复现（非端到端）", value: artifacts.function_forensic },
   ].filter(({ value }) => value && Object.values(value).some((item) => item !== null && item !== undefined && item !== ""))
     .map(({ kind, label, value }) => {
       const persistence = String(value.persistence_status || "");
