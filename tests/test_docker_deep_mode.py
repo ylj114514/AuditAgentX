@@ -532,6 +532,52 @@ def test_single_container_build_retries_transient_registry_failure(tmp_path, mon
         assert any("build transient failure; retry 1/3" in item for item in runner.metadata["diagnostics"])
 
 
+def test_generated_python_sandbox_retries_with_newer_compatible_image(tmp_path, monkeypatch):
+    """A Python dependency unavailable on 3.11 gets one generic 3.12 retry.
+
+    The fallback applies only to an AuditAgentX-generated Dockerfile, so an
+    untrusted project Dockerfile remains disabled when its config is not trusted.
+    """
+    import subprocess
+
+    generated_images = []
+    container = type("Container", (), {
+        "id": "abcdef1234567890", "reload": lambda self: None,
+        "remove": lambda self, force=False: None, "logs": lambda self: b"",
+    })()
+    client = type("Client", (), {
+        "containers": type("Containers", (), {"run": lambda self, **_kwargs: container})(),
+    })()
+
+    def _run(_scan_id, command, **_kwargs):
+        generated_images.append((tmp_path / command[command.index("--file") + 1]).read_text())
+        if len(generated_images) == 1:
+            return subprocess.CompletedProcess(
+                command, 1, "", "ERROR: No matching distribution found for demo-package==1.0"
+            )
+        return subprocess.CompletedProcess(command, 0, "built", "")
+
+    monkeypatch.setattr("backend.verifier.docker_project_runner.get_docker_client", lambda: client)
+    monkeypatch.setattr("backend.verifier.docker_project_runner.run_managed_command", _run)
+    monkeypatch.setattr(DockerProjectRunner, "_prefetch_dockerfile_base_images", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(DockerProjectRunner, "_prefetch_image", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("backend.verifier.docker_project_runner._wait_healthy", lambda *_args, **_kwargs: True)
+
+    with DockerProjectRunner(
+        tmp_path, {"framework": "Flask", "run_command": "python app.py", "port": 5000},
+        scan_id="python-compat",
+        trust_project_container_config=False,
+    ) as runner:
+        assert runner.metadata["status"] == "started"
+        assert len(generated_images) == 2
+        assert "FROM python:3.11-slim" in generated_images[0]
+        assert "FROM python:3.12-slim" in generated_images[1]
+        assert runner.metadata["trust_project_container_config"] is False
+        assert runner.metadata["sandbox_compatibility_patches"] == [
+            "retried generated Python sandbox with python:3.12-slim after dependency resolution failure"
+        ]
+
+
 def test_cancel_after_single_container_start_force_removes_once(tmp_path, monkeypatch):
     container = type("Container", (), {
         "id": "abcdef1234567890",

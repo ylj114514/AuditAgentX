@@ -70,6 +70,12 @@ _DEPENDENCY_DIAGNOSTIC = re.compile(
     r"package .*? has no installation candidate)",
     re.IGNORECASE,
 )
+_PYTHON_RESOLUTION_FAILURE = re.compile(
+    r"(?:no matching distribution found|could not find a version that satisfies the requirement)",
+    re.IGNORECASE,
+)
+_DEFAULT_PYTHON_SANDBOX_IMAGE = "python:3.11-slim"
+_PYTHON_COMPATIBILITY_IMAGE = "python:3.12-slim"
 
 
 def _dependency_diagnostic(text: str, limit: int = 1200) -> tuple[str, str]:
@@ -185,7 +191,7 @@ def _image_reference_repository(reference: str) -> str:
     return repository
 
 
-def build_dockerfile(launch_plan: dict, port: int) -> str:
+def build_dockerfile(launch_plan: dict, port: int, *, python_image: str = _DEFAULT_PYTHON_SANDBOX_IMAGE) -> str:
     """SandboxBuilder：按 launch_plan 生成最小 Dockerfile（无项目 Dockerfile 时）。"""
     framework = (launch_plan.get("framework") or "").lower()
     install = launch_plan.get("install_command")
@@ -242,7 +248,7 @@ def build_dockerfile(launch_plan: dict, port: int) -> str:
     # 默认 Python
     install = install or "pip install --no-cache-dir -r requirements.txt"
     return (
-        "FROM python:3.11-slim\n"
+        f"FROM {python_image}\n"
         "WORKDIR /app\n"
         "COPY . /app\n"
         f"WORKDIR {app_workdir}\n"
@@ -251,6 +257,25 @@ def build_dockerfile(launch_plan: dict, port: int) -> str:
         f"RUN {install}\n"
         f"EXPOSE {port}\n"
         f"CMD {_cmd_json(run)}\n"
+    )
+
+
+def _uses_generated_python_image(launch_plan: dict) -> bool:
+    """Whether ``build_dockerfile`` selects its Python branch for this plan."""
+    framework = str(launch_plan.get("framework") or "").lower()
+    return not any(runtime in framework for runtime in ("node", "express", "php", "spring", "java"))
+
+
+def _should_retry_python_dependency_resolution(build_error: str, launch_plan: dict) -> bool:
+    """Allow one newer-interpreter retry for generated Python dependency resolution.
+
+    This deliberately keys off the generic pip resolver error rather than a
+    package name. Project Dockerfiles never reach this path, and a failed retry
+    remains an honest ``dependency_install_failed`` result.
+    """
+    return bool(
+        _uses_generated_python_image(launch_plan)
+        and _PYTHON_RESOLUTION_FAILURE.search(str(build_error or ""))
     )
 
 
@@ -572,6 +597,44 @@ class DockerProjectRunner:
                 time.sleep(attempt * 2)
             if built is None:
                 raise RuntimeError("docker build 未返回结果")
+            # A generated Python 3.11 image is a conservative default, but a
+            # project dependency can legitimately require a newer interpreter.
+            # Retry exactly once with the next supported image only for pip's
+            # generic resolution failure; never reinterpret or execute a
+            # project Dockerfile while trust_project_container_config is false.
+            if (built.returncode != 0 and not has_dockerfile
+                    and _should_retry_python_dependency_resolution(build_error, self.launch_plan)):
+                compatibility_dockerfile = build_dockerfile(
+                    self.launch_plan, internal_port,
+                    python_image=_PYTHON_COMPATIBILITY_IMAGE,
+                )
+                (self.code_root / dockerfile_name).write_text(
+                    compatibility_dockerfile, encoding="utf-8"
+                )
+                self._prefetch_image(
+                    _PYTHON_COMPATIBILITY_IMAGE,
+                    source="Python dependency compatibility fallback",
+                )
+                self.metadata["sandbox_compatibility_patches"].append(
+                    "retried generated Python sandbox with python:3.12-slim after dependency resolution failure"
+                )
+                self.metadata["diagnostics"].append(
+                    "generated Python dependency compatibility retry: python:3.11-slim -> python:3.12-slim"
+                )
+                for attempt in range(1, 4):
+                    built = run_managed_command(
+                        self.scan_id, build_command, cwd=self.code_root,
+                        env=self._compose_subprocess_env(), timeout=self.build_timeout,
+                        deadline=self._build_deadline, phase="image_build",
+                    )
+                    build_error = (built.stderr or built.stdout or "").strip()
+                    if built.returncode == 0 or not _transient_pull_failure(build_error) or attempt == 3:
+                        break
+                    self.metadata["diagnostics"].append(
+                        "compatibility build transient failure; retry "
+                        f"{attempt}/3: {_diagnostic_tail(build_error, 240)}"
+                    )
+                    time.sleep(attempt * 2)
             if built.returncode != 0:
                 raise RuntimeError(built.stderr or built.stdout or "docker build 失败")
         except FileNotFoundError as e:
