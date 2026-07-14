@@ -419,7 +419,8 @@ def test_build_from_acp_parses_dynamic_runtime_payload():
     assert rt["matched_indicator"] == "SQL syntax error"
     # 旧 ACP 记录没有可绑定的请求参数时，仍可解析运行事实，但绝不能生成 PoC。
     assert evidence["exploit"]["exploit_code"] is None
-    assert evidence["attack_plan"]["code"] is None
+    assert evidence["exploit"]["failure_code"] == "incomplete_confirmed_http_record"
+    assert evidence["attack_plan"] is None or evidence["attack_plan"]["code"] is None
     assert "untrusted candidate" not in str(evidence)
 
 

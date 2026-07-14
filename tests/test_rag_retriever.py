@@ -1,4 +1,5 @@
 from backend.rag.retriever import SecurityKnowledgeRetriever
+from backend.rag.models import SecurityKnowledgeItem
 from backend.mcp.audit_mcp_client import AuditMCPClient
 from backend.skills.loader import load_skill
 from backend.verifier.evidence_collector import EvidenceCollector
@@ -17,6 +18,27 @@ def test_retriever_maps_sql_injection_to_cwe_and_playbook():
     assert result["top_result"]["cwe_id"] == "CWE-89"
     assert "A03:2021 Injection" in result["summary"]["owasp"]
     assert result["summary"]["verification_checks"]
+
+
+def test_retriever_keeps_canonical_cwe_above_learned_feedback():
+    """Feedback augments canonical knowledge instead of replacing its CWE."""
+    canonical = SecurityKnowledgeItem(
+        id="CWE-89", source_type="cwe_core", title="SQL Injection",
+        cwe_id="CWE-89", vuln_types=["SQL Injection"],
+    )
+    feedback = SecurityKnowledgeItem(
+        id="learned-sqli", source_type="learned_feedback", title="SQL Injection",
+        vuln_types=["SQL Injection"], sources=["app.py"],
+        verification_checks=["Verify the dynamically confirmed pattern."],
+    )
+
+    result = SecurityKnowledgeRetriever(items=[canonical, feedback]).retrieve(
+        candidate={"type": "SQL Injection", "file": "app.py"}
+    )
+
+    assert result["top_result"]["id"] == "CWE-89"
+    assert result["top_result"]["cwe_id"] == "CWE-89"
+    assert result["top_result"]["learned_feedback_applied"] is True
 
 
 def test_retriever_filters_verification_playbooks():

@@ -449,13 +449,20 @@ def _rebuild_confirmed_acp_http_replay(exploit: dict, dynamic: dict,
             dynamic_exploit.get("setup_requests") or [],
         )
     except ValueError:
-        # ACP payloads are evidence, not a capability to produce code.  An
-        # incomplete historical record must not abort evidence collection or
-        # loosen the strict parameter-binding requirement for a replay.
-        rebuilt["exploit_code"] = None
-        rebuilt["code_kind"] = "candidate_metadata"
-        rebuilt["generation_status"] = "validation_pending"
-        rebuilt["validation_status"] = "validation_pending"
+        # Historical ACP messages can attest a runtime result while omitting
+        # the exact request fields needed for a safe replay.  Keep that
+        # diagnostic evidence, but never turn an incomplete record into a
+        # generated or validated PoC.
+        rebuilt.update({
+            "exploit_code": None,
+            "code_kind": "candidate_metadata",
+            "generation_status": "validation_pending",
+            "validation_status": "validation_pending",
+            "failure_code": "incomplete_confirmed_http_record",
+            "verification_method": (
+                "ACP confirmed_record is incomplete; validated HTTP replay withheld"
+            ),
+        })
         return rebuilt
     rebuilt["code_kind"] = "validated_http_replay"
     rebuilt["generation_status"] = "generated"

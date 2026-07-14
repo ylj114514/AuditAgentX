@@ -32,6 +32,13 @@ class SecurityKnowledgeRetriever:
         query_tokens = _tokens(query_text)
         scored: list[tuple[float, SecurityKnowledgeItem]] = []
         for item in self.items:
+            # Learned feedback enriches a canonical security record below; it
+            # is not authoritative enough to become the primary result.  In
+            # particular, feedback records may intentionally omit CWE/OWASP
+            # metadata and must not displace an offline CWE entry because of
+            # incidental source-file token overlap.
+            if source_type is None and item.source_type == "learned_feedback":
+                continue
             if source_type and item.source_type != source_type:
                 continue
             if source_type and not _candidate_matches_item(candidate, item):
