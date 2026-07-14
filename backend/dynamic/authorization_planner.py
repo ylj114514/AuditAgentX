@@ -11,7 +11,8 @@ from urllib.parse import quote
 
 
 def plan_authorization_workflow(finding: dict, surfaces: list[dict] | None, *,
-                                disposable: bool, seed: str = "") -> dict | None:
+                                disposable: bool, seed: str = "",
+                                include_initializer: bool = True) -> dict | None:
     """返回可执行的授权工作流；攻击面不唯一或目标非一次性时返回 None。"""
     vuln_type = str(finding.get("type") or "").lower()
     if not any(token in vuln_type for token in ("idor", "bola", "object level authorization")):
@@ -53,7 +54,7 @@ def plan_authorization_workflow(finding: dict, surfaces: list[dict] | None, *,
         return None
 
     steps: list[dict] = []
-    initializer = plan_disposable_initializer(items)
+    initializer = plan_disposable_initializer(items) if include_initializer else None
     if initializer:
         steps.append({
             "name": "initialize_disposable_target",
@@ -235,13 +236,37 @@ def _login_step(surface: dict, username: str, password: str, token_name: str,
 def _initializer(items: list[dict]) -> dict | None:
     candidates = [
         item for item in items
-        if "GET" in {str(value).upper() for value in (item.get("methods") or [])}
+        if _is_server_extracted_initializer(item)
         and (
             "db-init" in {str(value).lower() for value in (item.get("tags") or [])}
             or re.search(r"/(?:create|init|reset)[_-]?db$", str(item.get("path") or ""), re.I)
         )
     ]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _is_server_extracted_initializer(item: dict) -> bool:
+    """Accept only a source-extracted, parameterless GET DB initializer.
+
+    An initializer resets application state, so a guessed live/OpenAPI route or a
+    generic state-changing endpoint is never enough.  The pipeline supplies this
+    helper only with its freshly extracted source inventory after it has started
+    an AuditAgentX-owned disposable Docker sandbox.
+    """
+    methods = {str(value).upper() for value in (item.get("methods") or [])}
+    try:
+        line = int(item.get("line") or 0)
+    except (TypeError, ValueError):
+        line = 0
+    return bool(
+        methods == {"GET"}
+        and not (item.get("params") or [])
+        and str(item.get("source") or "") in {"static_route", "static_openapi"}
+        and str(item.get("file") or "").strip()
+        and line > 0
+        and str(item.get("path") or "").startswith("/")
+        and not str(item.get("path") or "").startswith("//")
+    )
 
 
 def _fill_path(path: str, parameter: str, value: str) -> str:

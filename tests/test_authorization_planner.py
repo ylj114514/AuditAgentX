@@ -14,12 +14,14 @@ from backend.verifier.pipeline import (
     _should_run_dynamic_verify,
     _surfaces_for_finding,
 )
+from backend.dynamic.source_route_binding import bind_server_surface
 
 
 def _vampi_surfaces():
     return [
         {"path": "/createdb", "methods": ["GET"], "params": [],
-         "tags": ["db-init"], "file": "api_views/main.py", "line": 8},
+         "tags": ["db-init"], "file": "api_views/main.py", "line": 8,
+         "operation_id": "api_views.main.populate_db", "source": "static_openapi"},
         {"path": "/users/v1/register", "methods": ["POST"],
          "params": [{"name": name, "location": "json"}
                     for name in ("username", "password", "email")],
@@ -77,8 +79,108 @@ def test_disposable_initializer_requires_one_recognized_route():
         "role": "initialize",
     }
     assert plan_disposable_initializer([
-        {"path": "/run-anything", "methods": ["GET"], "params": []},
+        {"path": "/run-anything", "methods": ["GET"], "params": [],
+         "source": "static_openapi", "file": "api_views/main.py", "line": 8},
     ]) is None
+
+
+def test_disposable_initializer_rejects_unextracted_or_unsafe_routes():
+    assert plan_disposable_initializer([
+        {"path": "/createdb", "methods": ["GET"], "params": [],
+         "file": "api_views/main.py", "line": 8, "source": "heuristic"},
+    ]) is None
+    assert plan_disposable_initializer([
+        {"path": "/createdb", "methods": ["POST"], "params": [],
+         "file": "api_views/main.py", "line": 8, "source": "static_openapi"},
+    ]) is None
+    assert plan_disposable_initializer([
+        {"path": "/createdb", "methods": ["GET"],
+         "params": [{"name": "reset", "location": "query"}],
+         "file": "api_views/main.py", "line": 8, "source": "static_openapi"},
+    ]) is None
+
+
+class _VampiLikeInitializerProbe:
+    def __init__(self):
+        self.calls = []
+
+    def send_values(self, base_url, path, values, *, method="POST", transport="json",
+                    role="setup", headers=None, payload=""):
+        self.calls.append((role, path, method, dict(values)))
+        return ProbeRecord(
+            url=base_url + path, method=method, params=dict(values), payload=payload,
+            transport=transport, role=role, status=200, status_code=200,
+            response_excerpt='{"status":"database initialized"}',
+        )
+
+    def send(self, base_url, path, param, payload, method="GET", transport="query",
+             role="attack", headers=None, sibling_values=None):
+        self.calls.append((role, path, method, {param: payload}))
+        body = "SQLite error: near quote" if role == "attack" else "normal"
+        return ProbeRecord(
+            url=base_url + path, method=method, params={param: payload}, payload=payload,
+            transport=transport, role=role, status=200, status_code=200,
+            response_excerpt=body,
+        )
+
+
+def _bound_vampi_sink():
+    return bind_server_surface({
+        "path": "/users/v1", "methods": ["GET"],
+        "params": [{"name": "id", "location": "query"}],
+        "file": "api_views/users.py", "line": 90, "source": "static_route",
+    }, {"kind": "test"})
+
+
+def _sqli_exploit():
+    return {
+        "vuln_type": "SQL Injection", "payloads": ["'"],
+        "success_indicators": [r"SQLite error"], "_injection_points": ["id"],
+    }
+
+
+def test_pipeline_initializes_vampi_openapi_db_in_owned_docker_before_http_verify():
+    pipeline = ExploitPipeline(scan_id="scan-test")
+    probe = _VampiLikeInitializerProbe()
+    pipeline.dynamic = DynamicVerifier(max_probes=4)
+    pipeline.dynamic.probe = probe
+    finding = {"type": "SQL Injection", "severity": "high", "file": "api_views/users.py", "line": 96}
+    exploit = _sqli_exploit()
+
+    result = pipeline._http_verify(
+        finding, exploit, "http://127.0.0.1:18080", [_bound_vampi_sink()],
+        {"mode": "docker_project", "status": "started"}, None, False,
+        full_endpoint_inventory=_vampi_surfaces(),
+    )
+
+    assert probe.calls[0] == ("setup", "/createdb", "GET", {})
+    assert len(result["setup_records"]) == 1
+    assert result["setup_records"][0]["url"] == "http://127.0.0.1:18080/createdb"
+    assert result["setup_records"][0]["status_code"] == 200
+    assert result["setup_records"][0]["role"] == "setup"
+    assert exploit["setup_requests"][0]["path"] == "/createdb"
+
+
+def test_pipeline_never_adds_initializer_for_non_disposable_or_external_target():
+    finding = {"type": "SQL Injection", "severity": "high", "file": "api_views/users.py", "line": 96}
+    for base_url, sandbox in (
+        ("http://127.0.0.1:18080", {"mode": "url", "status": "started"}),
+        ("http://example.test", None),
+    ):
+        pipeline = ExploitPipeline(scan_id="scan-test")
+        probe = _VampiLikeInitializerProbe()
+        pipeline.dynamic = DynamicVerifier(max_probes=4)
+        pipeline.dynamic.probe = probe
+        exploit = _sqli_exploit()
+
+        result = pipeline._http_verify(
+            finding, exploit, base_url, [_bound_vampi_sink()], sandbox, None, False,
+            full_endpoint_inventory=_vampi_surfaces(),
+        )
+
+        assert "setup_requests" not in exploit
+        assert result.get("setup_records", []) == []
+        assert not any(call[1] == "/createdb" for call in probe.calls)
 
 
 def test_pipeline_uses_planner_without_calling_llm_for_bola():

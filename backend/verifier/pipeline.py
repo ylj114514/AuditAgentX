@@ -350,10 +350,13 @@ class ExploitPipeline:
         # Missing source is deliberately fail-closed: no route proof, no request.
         exploit_endpoints = candidate_attack_surfaces(code_root) if code_root is not None else []
         auth_endpoints = _auth_bootstrap_inventory(exploit_endpoints)
-        disposable_target = bool(
-            target_config.get("allow_stateful_workflows")
-            or target_config.get("mode") in {"docker", "docker_project", "docker_compose"}
-        )
+        # Stateful authorization workflows are never permitted for a caller's
+        # URL/local target.  Docker modes are created and torn down by this
+        # pipeline; the HTTP lane still verifies the sandbox actually started
+        # before adding its DB initializer.
+        disposable_target = target_config.get("mode") in {
+            "docker", "docker_project", "docker_compose",
+        }
 
         def _exploit_lane() -> list[dict]:
             self._raise_if_cancelled("exploit_generation")
@@ -479,6 +482,7 @@ class ExploitPipeline:
                             dynamic_results[index] = self._http_verify(
                                 finding, exploits[index], base_url, bound_endpoints, sandbox_meta,
                                 sandbox_fail_status, auto_endpoints, runtime_log_supplier, auth_endpoints,
+                                full_endpoint_inventory=endpoints,
                             )
                         except SandboxCommandCancelled:
                             raise
@@ -610,6 +614,10 @@ class ExploitPipeline:
         workflow = plan_authorization_workflow(
             f, scoped_endpoints,
             disposable=disposable_target, seed=getattr(self, "scan_id", None) or "adhoc",
+            # The runtime may be an external/failed target despite its requested
+            # mode.  The generic initializer is attached only after the pipeline
+            # has verified ownership of the started Docker sandbox.
+            include_initializer=False,
         )
         # 手动复核/ACP 链路可能已经生成了利用方案。动态阶段必须复用该制品，
         # 否则不仅会重复消耗一次 LLM/API，还可能用第二次生成的载荷覆盖已审计内容。
@@ -656,18 +664,12 @@ class ExploitPipeline:
                 "仅由 DynamicVerifier 的 owner/secret 不变量裁决")
             exploit["attack_vector"] = "OpenAPI 约束的多身份对象级授权工作流"
             exploit["payloads"] = []
-        elif disposable_target and strategy.get("strategy") in {HTTP, BOTH}:
-            initializer = plan_disposable_initializer(scoped_endpoints)
-            if initializer:
-                # State mutation is only allowed for the isolated Docker target
-                # created by this pipeline. DynamicVerifier records this setup
-                # step before every finding's independent HTTP session.
-                exploit.setdefault("setup_requests", [initializer])
         return exploit
 
     def _http_verify(self, f: dict, exploit: dict, base_url, endpoints,
                        sandbox_meta, sandbox_fail_status, auto_endpoints,
-                       runtime_log_supplier=None, auth_endpoints: list[dict] | None = None) -> dict:
+                       runtime_log_supplier=None, auth_endpoints: list[dict] | None = None,
+                       full_endpoint_inventory: list[dict] | None = None) -> dict:
         """阶段 B：对共享靶场做 HTTP 动态探测（必须串行）。仅返回 dyn_result，不改 finding。"""
         # Binding happens only in the server-side source extraction lane above.
         # Do not re-bind raw structured JSON here: ACP/MCP/client payloads may
@@ -676,6 +678,15 @@ class ExploitPipeline:
             surface for surface in (endpoints or [])
             if _is_proven_bound_surface(surface)
         ]
+        # The finding-scoped surfaces intentionally exclude unrelated routes, but
+        # a safe DB bootstrap such as VAmPI's source-extracted /createdb is not
+        # sink-bound.  Attach it only now: this is the first point where the
+        # pipeline knows both the real base URL and that it owns a started Docker
+        # sandbox.  URL/local/external targets therefore receive no initializer.
+        initializer_surfaces = _attach_disposable_initializer(
+            exploit, full_endpoint_inventory, sandbox_meta, base_url,
+        )
+        verification_endpoints = [*scoped_endpoints, *initializer_surfaces]
         # Open Redirect has a complete, source-bound HTTP oracle.  Unlike generic
         # payload generation it must not depend on the LLM returning a payload.
         # Planning is delayed until a local sandbox base_url exists, so no plan is
@@ -698,7 +709,7 @@ class ExploitPipeline:
                 "open_redirect_plan": plan,
             })
         should_run, skip_status, skip_reason = _should_run_dynamic_verify(
-            f, exploit, base_url, scoped_endpoints)
+            f, exploit, base_url, verification_endpoints)
         # 沙箱启动失败：适合 HTTP 验证的漏洞用真实沙箱失败状态，而非泛化 not_executed
         if sandbox_fail_status and skip_status == "not_executed" and not base_url:
             strat = resolve_strategy(f.get("type"))
@@ -723,7 +734,7 @@ class ExploitPipeline:
             return dyn_result
         if should_run:
             dyn_result = self.dynamic.verify(
-                base_url, exploit, scoped_endpoints,
+                base_url, exploit, verification_endpoints,
                 runtime_log_supplier=runtime_log_supplier,
                 auth_endpoints=auth_endpoints,
             ).__dict__
@@ -1361,6 +1372,54 @@ def _is_started_local_sandbox(sandbox_meta: dict | None, base_url: str | None) -
         return False
     host = (urlparse(str(base_url or "")).hostname or "").strip("[]").lower()
     return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _attach_disposable_initializer(exploit: dict, full_endpoint_inventory: list[dict] | None,
+                                   sandbox_meta: dict | None, base_url: str | None) -> list[dict]:
+    """Attach one source-extracted DB reset only to this scan's Docker sandbox.
+
+    The full source inventory is deliberately separate from the finding-bound
+    surfaces: an initializer prepares the target but cannot prove a sink flow.
+    It receives a narrow server capability solely when this pipeline owns a
+    started loopback Docker target.  Nothing is attached for URL, local-process,
+    failed, or externally addressed targets.
+    """
+    if not (_is_disposable_sandbox(sandbox_meta) and _is_started_local_sandbox(sandbox_meta, base_url)):
+        return []
+    initializer = plan_disposable_initializer(full_endpoint_inventory)
+    if not initializer:
+        return []
+
+    source = next((
+        item for item in (full_endpoint_inventory or [])
+        if isinstance(item, dict)
+        and plan_disposable_initializer([item]) == initializer
+    ), None)
+    if source is None:  # Defensive: planner and capability must describe one route.
+        return []
+    capability = bind_server_surface(dict(source), {
+        "kind": "disposable_initializer",
+        "route_file": source.get("file"),
+        "route_line": source.get("line"),
+        "operation_id": source.get("operation_id"),
+    })
+    if not is_server_bound_surface(capability):
+        return []
+
+    if isinstance(exploit.get("authorization_workflow"), dict):
+        workflow = exploit["authorization_workflow"]
+        steps = workflow.get("steps")
+        if not isinstance(steps, list) or any(
+            isinstance(step, dict) and step.get("role") == "initialize" for step in steps
+        ):
+            return []
+        workflow["steps"] = [dict(initializer), *steps]
+    else:
+        existing = exploit.get("setup_requests") or []
+        if not isinstance(existing, list):
+            return []
+        exploit["setup_requests"] = [dict(initializer), *existing]
+    return [capability]
 
 
 def _auth_bootstrap_inventory(endpoints: list[dict] | None) -> list[dict]:
