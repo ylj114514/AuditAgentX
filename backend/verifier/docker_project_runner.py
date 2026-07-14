@@ -401,7 +401,10 @@ class DockerProjectRunner:
             logger.warning("Compose 环境预检失败: %s", e)
         except _DependencyError as e:
             self.metadata["status"] = DEPENDENCY_INSTALL_FAILED
-            self.metadata["logs_excerpt"] = str(e)[:800]
+            # BuildKit prints setup progress before the failing RUN output.
+            # Keeping the tail preserves the actionable package/extension
+            # failure instead of only reporting the build header.
+            self.metadata["logs_excerpt"] = _diagnostic_tail(str(e), 1200)
             self.metadata["reason"] = "镜像构建时依赖安装失败：" + _first_line(str(e))
             logger.warning("沙箱依赖安装失败: %s", e)
         except Exception as e:  # noqa: BLE001

@@ -429,6 +429,23 @@ def test_docker_runner_no_docker_returns_sandbox_start_failed(monkeypatch):
         assert "docker unavailable" in r.metadata["reason"]
 
 
+def test_dependency_failure_records_buildkit_tail(monkeypatch, tmp_path):
+    """Long BuildKit output must retain the final actionable dependency error."""
+    from backend.verifier.docker_project_runner import _DependencyError
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="dependency-tail")
+
+    def fail_start():
+        raise _DependencyError("build header\n" + "progress\n" * 300 + "pdo_mysql is missing")
+
+    monkeypatch.setattr(runner, "_start", fail_start)
+
+    with runner:
+        assert runner.metadata["status"] == "dependency_install_failed"
+        assert "pdo_mysql is missing" in runner.metadata["logs_excerpt"]
+        assert "build header" not in runner.metadata["logs_excerpt"]
+
+
 def test_single_container_build_timeout_never_starts_container(tmp_path, monkeypatch):
     from backend.runtime.scan_execution import SandboxCommandTimeout
 
