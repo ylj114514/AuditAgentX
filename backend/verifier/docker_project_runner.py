@@ -1500,7 +1500,15 @@ class DockerProjectRunner:
                 cwd=str(self.code_root), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=30,
                 env=self._compose_subprocess_env())
-            return (proc.stdout or proc.stderr or "")[-1500:]
+            compose_tail = _diagnostic_tail(proc.stdout or proc.stderr or "", 600)
+            # A noisy DB can push the selected HTTP service out of a combined
+            # Compose tail. Keep that service's startup output first so runtime
+            # failures remain attributable after the sandbox is cleaned up.
+            target_logs = self._service_logs(self._compose_web_service or "")
+            target_tail = _diagnostic_tail(target_logs, 1200)
+            if target_tail and target_tail != compose_tail:
+                return target_tail + ("\n--- compose tail ---\n" + compose_tail if compose_tail else "")
+            return compose_tail
         except Exception:  # noqa: BLE001
             return ""
 

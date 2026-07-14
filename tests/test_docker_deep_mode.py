@@ -1189,6 +1189,28 @@ def test_compose_uses_https_for_tls_alternate_port(tmp_path, monkeypatch):
         assert observed["url"].startswith("https://")
 
 
+def test_compose_logs_prioritizes_selected_web_service_over_noisy_dependency(tmp_path, monkeypatch):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  app:\n    image: example/app\n", encoding="utf-8")
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="compose-log-priority")
+    runner._compose_project = "project"
+    runner._compose_file = str(compose)
+    runner._compose_web_service = "app"
+
+    monkeypatch.setattr(runner, "_service_logs", lambda service: "app | startup root cause")
+    monkeypatch.setattr(
+        "backend.verifier.docker_project_runner.subprocess.run",
+        lambda *_args, **_kwargs: _FakeProc(0, "mysql | repeated noisy status\n" * 100, ""),
+    )
+
+    logs = runner._compose_logs()
+
+    assert logs.startswith("app | startup root cause")
+    assert "--- compose tail ---" in logs
+    assert "mysql | repeated noisy status" in logs
+    runner._cleanup()
+
+
 def test_isolated_compose_removes_global_names_and_fixed_ports(tmp_path):
     """固定 container_name/network/host port 必须在一次性覆写文件中移除。"""
     compose = tmp_path / "docker-compose.yml"
