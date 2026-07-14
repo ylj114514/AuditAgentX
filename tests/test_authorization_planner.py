@@ -132,10 +132,51 @@ def _bound_vampi_sink():
     }, {"kind": "test"})
 
 
+def _bound_vampi_username_sink():
+    return bind_server_surface({
+        "path": "/users/v1/{username}", "raw_path": "/users/v1/{username}",
+        "methods": ["GET"],
+        "params": [{"name": "username", "location": "path"}],
+        "file": "api_views/users.py", "line": 90, "source": "static_route",
+    }, {"kind": "source_route_sink", "source_parameter": "username"})
+
+
 def _sqli_exploit():
     return {
         "vuln_type": "SQL Injection", "payloads": ["'"],
         "success_indicators": [r"SQLite error"], "_injection_points": ["id"],
+    }
+
+
+class _VampiSqliProbe:
+    def __init__(self):
+        self.calls = []
+
+    def send_values(self, base_url, path, values, *, method="POST", transport="json",
+                    role="setup", headers=None, payload=""):
+        self.calls.append((role, path, method, dict(values)))
+        return ProbeRecord(
+            url=base_url + path, method=method, params=dict(values), payload=payload,
+            transport=transport, role=role, status=200, status_code=200,
+            response_excerpt='{"status":"database initialized"}',
+        )
+
+    def send(self, base_url, path, param, payload, method="GET", transport="query",
+             role="attack", headers=None, sibling_values=None):
+        self.calls.append((role, path, method, {param: payload}))
+        status = 404 if payload == "AUDITAGENTX_CONTROL" else 200
+        body = '{"message":"user record","username":"admin"}' if status == 200 else "not found"
+        return ProbeRecord(
+            url=base_url + "/users/v1/" + payload, method=method,
+            params={param: payload}, payload=payload, transport=transport,
+            role=role, status=status, status_code=status, response_excerpt=body,
+        )
+
+
+def _vampi_username_sqli_exploit():
+    return {
+        "vuln_type": "SQL Injection", "payloads": ["1' OR '1'='1"],
+        "success_indicators": [r"user record"], "_injection_points": ["username"],
     }
 
 
@@ -159,6 +200,52 @@ def test_pipeline_initializes_vampi_openapi_db_in_owned_docker_before_http_verif
     assert result["setup_records"][0]["status_code"] == 200
     assert result["setup_records"][0]["role"] == "setup"
     assert exploit["setup_requests"][0]["path"] == "/createdb"
+
+
+def test_successful_disposable_initializer_preserves_vampi_sqli_confirmation():
+    pipeline = ExploitPipeline(scan_id="scan-test")
+    probe = _VampiSqliProbe()
+    pipeline.dynamic = DynamicVerifier(max_probes=4)
+    pipeline.dynamic.probe = probe
+    finding = {"type": "SQL Injection", "severity": "high", "file": "api_views/users.py", "line": 96}
+
+    result = pipeline._http_verify(
+        finding, _vampi_username_sqli_exploit(), "http://127.0.0.1:18080",
+        [_bound_vampi_username_sink()], {"mode": "docker_project", "status": "started"},
+        None, False, full_endpoint_inventory=_vampi_surfaces(),
+    )
+
+    assert result["baseline_record"]["status_code"] == 404
+    assert result["confirmed_record"]["status_code"] == 200
+    assert "user record" in result["confirmed_record"]["response_excerpt"]
+    assert result["reproduction_status"] == "dynamic_confirmed"
+    assert result["reproducible"] is True
+
+
+def test_non_reset_setup_still_downgrades_dynamic_confirmation():
+    pipeline = ExploitPipeline(scan_id="scan-test")
+    probe = _VampiSqliProbe()
+    pipeline.dynamic = DynamicVerifier(max_probes=4)
+    pipeline.dynamic.probe = probe
+    finding = {"type": "SQL Injection", "severity": "high", "file": "api_views/users.py", "line": 96}
+    exploit = _vampi_username_sqli_exploit()
+    exploit["setup_requests"] = [{
+        "path": "/session", "method": "POST", "transport": "json", "values": {},
+    }]
+
+    result = pipeline._http_verify(
+        finding, exploit, "http://127.0.0.1:18080", [_bound_vampi_username_sink()],
+        {"mode": "docker_project", "status": "started"}, None, False,
+        full_endpoint_inventory=_vampi_surfaces(),
+    )
+
+    assert probe.calls[:2] == [
+        ("setup", "/createdb", "GET", {}),
+        ("setup", "/session", "POST", {}),
+    ]
+    assert result["reproduction_status"] == "inconclusive"
+    assert result["reason"] == "state_contamination_possible"
+    assert result["reproducible"] is False
 
 
 def test_pipeline_never_adds_initializer_for_non_disposable_or_external_target():

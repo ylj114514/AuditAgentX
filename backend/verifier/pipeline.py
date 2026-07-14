@@ -744,9 +744,13 @@ class ExploitPipeline:
             disposable_auth_in_owned_sandbox = bool(
                 dyn_result.get("disposable_auth_bootstrap") and _is_disposable_sandbox(sandbox_meta)
             )
+            disposable_initializer_isolation = _has_successful_disposable_initializer(
+                exploit, initializer_surfaces, dyn_result, sandbox_meta,
+            )
             if (dyn_result.get("state_contamination_possible")
                     and not bool((sandbox_meta or {}).get("per_finding_isolation"))
-                    and not disposable_auth_in_owned_sandbox):
+                    and not disposable_auth_in_owned_sandbox
+                    and not disposable_initializer_isolation):
                 dyn_result["state_contamination_possible"] = True
                 if dyn_result.get("reproducible"):
                     dyn_result["reproducible"] = False
@@ -1372,6 +1376,60 @@ def _is_started_local_sandbox(sandbox_meta: dict | None, base_url: str | None) -
         return False
     host = (urlparse(str(base_url or "")).hostname or "").strip("[]").lower()
     return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _has_successful_disposable_initializer(exploit: dict, initializer_surfaces: list[dict],
+                                            dyn_result: dict, sandbox_meta: dict | None) -> bool:
+    """Recognize a per-finding reset only when its server capability and run both prove it.
+
+    A source-extracted, parameterless DB initializer is attached exclusively for
+    this scan's started Docker sandbox.  It is an isolation contract only after a
+    matching successful setup response is recorded. The initializer must be the
+    sole declared setup step; arbitrary setup requests, external targets, and
+    failed resets remain contamination risks.
+    """
+    if not _is_disposable_sandbox(sandbox_meta):
+        return False
+    expected = [
+        surface for surface in (initializer_surfaces or [])
+        if _is_proven_bound_surface(surface)
+        and (surface.get("source_route_binding") or {}).get("kind") == "disposable_initializer"
+    ]
+    if len(expected) != 1:
+        return False
+    initializer = expected[0]
+    path = str(initializer.get("path") or "")
+    methods = {str(method).upper() for method in (initializer.get("methods") or [])}
+    if not path or not methods:
+        return False
+    declared_steps = exploit.get("setup_requests") or []
+    if not isinstance(declared_steps, list) or len(declared_steps) != 1:
+        return False
+    declared = declared_steps[0]
+    if not isinstance(declared, dict):
+        return False
+    declared_values = declared.get("values") or declared.get("json") or declared.get("data") or declared.get("params") or {}
+    if (declared.get("role") != "initialize"
+            or str(declared.get("path") or "") != path
+            or str(declared.get("method") or "").upper() not in methods
+            or str(declared.get("transport") or "").lower() != "query"
+            or not isinstance(declared_values, dict)
+            or declared_values):
+        return False
+
+    for record in dyn_result.get("setup_records") or []:
+        if not isinstance(record, dict):
+            continue
+        try:
+            status = int(record.get("status_code", record.get("status")))
+        except (TypeError, ValueError):
+            continue
+        record_path = urlparse(str(record.get("url") or "")).path
+        if (200 <= status < 300
+                and record_path == path
+                and str(record.get("method") or "").upper() in methods):
+            return True
+    return False
 
 
 def _attach_disposable_initializer(exploit: dict, full_endpoint_inventory: list[dict] | None,
