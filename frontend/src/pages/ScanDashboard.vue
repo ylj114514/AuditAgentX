@@ -1567,6 +1567,13 @@ watch(activeTab, async (tab) => {
 
 watch(pageSize, () => { currentPage.value = 1; });
 
+watch(() => route.query.scanId, (newId) => {
+  if (newId && newId !== scanId.value) {
+    searchText.value = newId as string;
+    loadByScanId(newId as string);
+  }
+});
+
 onMounted(() => {
   refreshHistoryRecords();
   // 历史记录被其他页面（如新建项目）更新时同步刷新，避免搜索用到过期快照
