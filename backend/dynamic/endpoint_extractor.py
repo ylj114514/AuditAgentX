@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from html.parser import HTMLParser
@@ -62,6 +63,12 @@ def extract_endpoints(code_root: Path | None, *, max_files: int = 4000,
         sources.append((f, text, f.relative_to(root).as_posix()))
 
     express_mounts = _express_mounts(root, sources)
+    flask_routes = _flask_routes(sources)
+    flask_route_starts = {
+        (rel, offset) for rel, routes in flask_routes.items()
+        for _path, _methods, start, _params in routes
+        for offset in (start, start + 1)  # Express regex begins after the decorator's @.
+    }
 
     def add_route(fw: str, raw_path: str, methods: list[str], f: Path, text: str, rel: str,
                   start: int, params: list[dict] | None = None) -> None:
@@ -90,12 +97,17 @@ def extract_endpoints(code_root: Path | None, *, max_files: int = 4000,
                 return
 
     for f, text, rel in sources:
+        for raw_path, methods, start, params in flask_routes.get(rel, []):
+            add_route("flask", raw_path, methods, f, text, rel, start, params)
+
         for fw, raw_path, methods, start, params in _framework_routes(
                 text, rel, express_mounts):
+            if fw in {"express", "fastapi"} and (rel, start) in flask_route_starts:
+                continue
             add_route(fw, raw_path, methods, f, text, rel, start, params)
 
         for fw, pattern in _ROUTE_PATTERNS:
-            if fw in {"express", "fastapi", "spring"}:
+            if fw in {"flask", "express", "fastapi", "spring"}:
                 continue
             for m in pattern.finditer(text):
                 groups = m.groups()
@@ -127,6 +139,189 @@ def extract_endpoints(code_root: Path | None, *, max_files: int = 4000,
     result["count"] = len(endpoints)
     result["frameworks"] = sorted(frameworks)
     return result
+
+
+_FLASK_ROUTE_METHODS = {"get", "post", "put", "delete", "patch"}
+
+
+def _flask_routes(sources: list[tuple[Path, str, str]]) -> dict[str, list[tuple]]:
+    """Extract Flask application and Blueprint routes with static registration prefixes.
+
+    A Blueprint decorator does not create a reachable route until an application
+    registers that exact local Blueprint object.  Resolve only literal local
+    imports and literal ``url_prefix`` values; unknown registration forms remain
+    unextracted rather than producing a guessed URL.
+    """
+    parsed: dict[str, ast.Module] = {}
+    module_files: dict[str, str] = {}
+    source_texts: dict[str, str] = {}
+    for _path, text, rel in sources:
+        if not rel.endswith(".py"):
+            continue
+        try:
+            parsed[rel] = ast.parse(text)
+        except SyntaxError:
+            continue
+        module_files[_python_module_name(rel)] = rel
+        source_texts[rel] = text
+
+    blueprints: dict[tuple[str, str], str] = {}
+    applications: dict[str, set[str]] = {}
+    imports: dict[str, dict[str, tuple[str, str]]] = {}
+    for rel, tree in parsed.items():
+        applications[rel] = set()
+        imports[rel] = _python_imports(tree, rel, module_files)
+        flask_factories = _flask_factory_names(tree)
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            target_names = _assignment_names(node)
+            value = node.value
+            if not isinstance(value, ast.Call):
+                continue
+            factory = _call_symbol(value.func)
+            if factory in flask_factories["Flask"]:
+                applications[rel].update(target_names)
+            elif factory in flask_factories["Blueprint"]:
+                prefix = _literal_keyword(value, "url_prefix") or ""
+                for name in target_names:
+                    blueprints[(rel, name)] = prefix
+
+    mounts: dict[tuple[str, str], list[str]] = {}
+    for rel, tree in parsed.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "register_blueprint" or not isinstance(node.func.value, ast.Name):
+                continue
+            if node.func.value.id not in applications.get(rel, set()) or not node.args:
+                continue
+            blueprint = node.args[0]
+            if not isinstance(blueprint, ast.Name):
+                continue
+            owner = imports[rel].get(blueprint.id, (rel, blueprint.id))
+            if owner not in blueprints:
+                continue
+            # Flask's explicit registration prefix overrides Blueprint.url_prefix.
+            prefix = _literal_keyword(node, "url_prefix")
+            mounts.setdefault(owner, []).append(
+                blueprints[owner] if prefix is None else prefix,
+            )
+
+    output: dict[str, list[tuple]] = {}
+    for rel, tree in parsed.items():
+        text = source_texts[rel]
+        lines = _line_offsets(text)
+        route_owners = {name: [""] for name in applications.get(rel, set())}
+        for (owner_rel, owner_name), _prefix in blueprints.items():
+            if owner_rel == rel and (owner_rel, owner_name) in mounts:
+                route_owners[owner_name] = mounts[(owner_rel, owner_name)]
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                route = _flask_decorator_route(decorator, route_owners)
+                if route is None:
+                    continue
+                owner, path, methods = route
+                start = lines[max(0, decorator.lineno - 1)]
+                params = _params_near_route(text, start)
+                for prefix in route_owners[owner]:
+                    output.setdefault(rel, []).append((
+                        _join_paths(prefix, path), methods, start, params,
+                    ))
+    return output
+
+
+def _flask_factory_names(tree: ast.Module) -> dict[str, set[str]]:
+    names = {"Flask": {"Flask"}, "Blueprint": {"Blueprint"}}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module != "flask":
+            continue
+        for alias in node.names:
+            if alias.name in names:
+                names[alias.name].add(alias.asname or alias.name)
+    return names
+
+
+def _call_symbol(value: ast.expr) -> str | None:
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute) and value.attr in {"Flask", "Blueprint"}:
+        return value.attr
+    return None
+
+
+def _flask_decorator_route(decorator: ast.expr, owners: dict[str, list[str]]) -> tuple[str, str, list[str]] | None:
+    if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+        return None
+    if not isinstance(decorator.func.value, ast.Name) or decorator.func.value.id not in owners:
+        return None
+    if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
+        return None
+    path = decorator.args[0].value
+    if not isinstance(path, str):
+        return None
+    method = decorator.func.attr.lower()
+    if method == "route":
+        methods = _literal_methods(decorator) or ["GET"]
+    elif method in _FLASK_ROUTE_METHODS:
+        methods = [method.upper()]
+    else:
+        return None
+    return decorator.func.value.id, path, methods
+
+
+def _assignment_names(node: ast.Assign | ast.AnnAssign) -> set[str]:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return {target.id for target in targets if isinstance(target, ast.Name)}
+
+
+def _literal_keyword(node: ast.Call, name: str) -> str | None:
+    for keyword in node.keywords:
+        if keyword.arg == name and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
+    return None
+
+
+def _literal_methods(node: ast.Call) -> list[str]:
+    for keyword in node.keywords:
+        if keyword.arg != "methods" or not isinstance(keyword.value, (ast.List, ast.Tuple, ast.Set)):
+            continue
+        methods = [item.value.upper() for item in keyword.value.elts
+                   if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+        if methods:
+            return sorted(set(methods))
+    return []
+
+
+def _python_module_name(rel: str) -> str:
+    path = rel[:-3].replace("/", ".")
+    return path.rsplit(".__init__", 1)[0] if path.endswith(".__init__") else path
+
+
+def _python_imports(tree: ast.Module, rel: str, module_files: dict[str, str]) -> dict[str, tuple[str, str]]:
+    imports: dict[str, tuple[str, str]] = {}
+    package = _python_module_name(rel).split(".")[:-1]
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        base = node.module.split(".") if node.module else []
+        if node.level:
+            base = package[:max(0, len(package) - node.level + 1)] + base
+        target = module_files.get(".".join(base))
+        if not target:
+            continue
+        for alias in node.names:
+            imports[alias.asname or alias.name] = (target, alias.name)
+    return imports
+
+
+def _line_offsets(text: str) -> list[int]:
+    offsets = [0]
+    for match in re.finditer("\\n", text):
+        offsets.append(match.end())
+    return offsets
 
 
 _EXPRESS_ROUTE = re.compile(

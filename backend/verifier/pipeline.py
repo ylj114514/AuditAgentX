@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import ast
 import logging
 import copy
 import re
@@ -1388,18 +1389,26 @@ def _proven_surfaces_for_finding(finding: dict, endpoints, code_root: Path | Non
     """Mint HTTP capability only for a source-file-proven route→source→sink flow.
 
     A route adjacent to a sink is not evidence that its request data reaches the
-    sink.  This intentionally small, conservative proof accepts only a direct
-    request expression on the sink line or a one-hop local assignment from a
-    declared route parameter into that line.  More complex interprocedural
-    flows stay unresolved rather than becoming speculative HTTP probes.
+    sink.  The conservative proof accepts either a direct handler request read
+    or a statically resolved local Python call chain that preserves a declared
+    request parameter.  Unsupported flows stay unresolved rather than becoming
+    speculative HTTP probes.
     """
     if code_root is None:
         return []
     root = Path(code_root).resolve()
     bound = _surfaces_for_finding(finding, endpoints)
+    # A model/service-layer sink has no same-file decorator.  Every extracted
+    # route is considered only for the static intermodule proof below; a route
+    # that cannot prove parameter flow is never minted or requested.
+    proof_candidates = bound or [item for item in endpoints if isinstance(item, dict)]
     proven: list[dict] = []
-    for surface in bound:
+    python_index: dict | None = None
+    for surface in proof_candidates:
         proof = _source_route_sink_proof(finding, surface, root)
+        if proof is None:
+            python_index = python_index or _python_function_index(root)
+            proof = _intermodule_source_route_sink_proof(finding, surface, python_index)
         if proof is None:
             continue
         item = dict(surface)
@@ -1468,6 +1477,268 @@ def _source_route_sink_proof(finding: dict, surface: dict, root: Path) -> dict |
             if re.search(rf"\b{re.escape(variable)}\b", sink_text):
                 return _binding_proof(finding, surface, route_line, sink_line, name, "one_hop_local_assignment")
     return None
+
+
+def _intermodule_source_route_sink_proof(finding: dict, surface: dict, index: dict) -> dict | None:
+    """Prove a route request value reaches a sink through local Python calls.
+
+    This deliberately analyzes only parseable files under the scanned root,
+    literal local imports, named request reads, and positional/named Python call
+    arguments.  It never consumes model-produced call paths, nor does it infer a
+    route from a sink function name.  Unsupported flows remain unresolved.
+    """
+    try:
+        sink_file = _relative_python_path(finding.get("file"))
+        route_file = _relative_python_path(surface.get("file"))
+        sink_line = int(finding.get("start_line") or finding.get("line") or 0)
+        route_line = int(surface.get("line") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not sink_file or not route_file or sink_line <= 0 or route_line <= 0 or sink_file == route_file:
+        return None
+    route = _route_handler(index, route_file, route_line)
+    sink = _function_at_line(index, sink_file, sink_line)
+    if route is None or sink is None:
+        return None
+    source_parameters = {
+        str(parameter.get("name"))
+        for parameter in surface.get("params") or []
+        if isinstance(parameter, dict) and parameter.get("name")
+    }
+    for parameter in sorted(source_parameters):
+        depth = _trace_python_parameter_flow(
+            index, route, {parameter}, sink, sink_line, parameter, visited=set(), depth=0,
+        )
+        if depth is not None:
+            proof = _binding_proof(
+                finding, surface, route_line, sink_line, parameter, "intermodule_parameter_flow",
+            )
+            proof["call_depth"] = depth
+            return proof
+    return None
+
+
+def _relative_python_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").lstrip("./")
+
+
+def _python_function_index(root: Path) -> dict:
+    """Index only local Python modules and their literal import aliases."""
+    modules: dict[str, str] = {}
+    trees: dict[str, ast.Module] = {}
+    for path in root.rglob("*.py"):
+        if len(trees) >= 4000:
+            break
+        if any(part in {".git", ".venv", "venv", "__pycache__", "node_modules"} for part in path.parts):
+            continue
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+            trees[rel] = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            modules[_python_module_name(rel)] = rel
+        except (OSError, ValueError, SyntaxError):
+            continue
+    functions: dict[tuple[str, str], dict] = {}
+    for rel, tree in trees.items():
+        imports = _local_python_imports(tree, rel, modules)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            functions[(rel, node.name)] = {
+                "file": rel,
+                "name": node.name,
+                "node": node,
+                "imports": imports,
+                "params": [argument.arg for argument in (*node.args.posonlyargs, *node.args.args)],
+                "start": min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]]),
+                "end": getattr(node, "end_lineno", node.lineno),
+            }
+    return {"functions": functions}
+
+
+def _python_module_name(rel: str) -> str:
+    module = rel[:-3].replace("/", ".")
+    return module.rsplit(".__init__", 1)[0] if module.endswith(".__init__") else module
+
+
+def _local_python_imports(tree: ast.Module, rel: str, modules: dict[str, str]) -> dict[str, tuple[str, str]]:
+    imports: dict[str, tuple[str, str]] = {}
+    package = _python_module_name(rel).split(".")[:-1]
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        base = node.module.split(".") if node.module else []
+        if node.level:
+            base = package[:max(0, len(package) - node.level + 1)] + base
+        target_file = modules.get(".".join(base))
+        if not target_file:
+            continue
+        for alias in node.names:
+            imports[alias.asname or alias.name] = (target_file, alias.name)
+    return imports
+
+
+def _route_handler(index: dict, route_file: str, route_line: int) -> dict | None:
+    for function in index["functions"].values():
+        if function["file"] == route_file and function["start"] == route_line:
+            return function
+    return None
+
+
+def _function_at_line(index: dict, file_path: str, line: int) -> dict | None:
+    matches = [function for function in index["functions"].values()
+               if function["file"] == file_path and function["start"] <= line <= function["end"]]
+    return min(matches, key=lambda function: function["end"] - function["start"]) if matches else None
+
+
+def _trace_python_parameter_flow(index: dict, function: dict, tainted: set[str], sink: dict,
+                                 sink_line: int, source_parameter: str, *, visited: set, depth: int) -> int | None:
+    if depth > 6:
+        return None
+    key = (function["file"], function["name"], tuple(sorted(tainted)))
+    if key in visited:
+        return None
+    visited = {*visited, key}
+    node = function["node"]
+    if function is sink and _sink_line_uses_taint(
+            node, sink_line, _propagate_local_taint(node, tainted, source_parameter, sink_line)):
+        return depth
+    for call in sorted(_function_calls(node), key=lambda item: item.lineno):
+        target = _local_call_target(index, function, call)
+        if target is None:
+            continue
+        tainted_at_call = _propagate_local_taint(node, tainted, source_parameter, call.lineno)
+        target_taint = _tainted_call_parameters(call, target, tainted_at_call, source_parameter)
+        if not target_taint:
+            continue
+        result = _trace_python_parameter_flow(
+            index, target, target_taint, sink, sink_line, source_parameter,
+            visited=visited, depth=depth + 1,
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def _function_calls(node: ast.AST) -> list[ast.Call]:
+    calls: list[ast.Call] = []
+
+    class _Calls(ast.NodeVisitor):
+        def visit_FunctionDef(self, child):
+            if child is node:
+                self.generic_visit(child)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, child):
+            return None
+
+        def visit_Call(self, child):
+            calls.append(child)
+            self.generic_visit(child)
+
+    _Calls().visit(node)
+    return calls
+
+
+def _local_call_target(index: dict, function: dict, call: ast.Call) -> dict | None:
+    if not isinstance(call.func, ast.Name):
+        return None
+    name = call.func.id
+    target_key = function["imports"].get(name, (function["file"], name))
+    return index["functions"].get(target_key)
+
+
+def _propagate_local_taint(node: ast.AST, tainted: set[str], source_parameter: str,
+                           before_or_at: int) -> set[str]:
+    tainted = set(tainted)
+    json_aliases: set[str] = set()
+    assignments: list[ast.Assign | ast.AnnAssign] = []
+
+    class _Assignments(ast.NodeVisitor):
+        def visit_FunctionDef(self, child):
+            if child is node:
+                self.generic_visit(child)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, child):
+            return None
+
+        def visit_Assign(self, child):
+            assignments.append(child)
+            self.generic_visit(child)
+
+        def visit_AnnAssign(self, child):
+            assignments.append(child)
+            self.generic_visit(child)
+
+    _Assignments().visit(node)
+    for child in sorted(assignments, key=lambda item: item.lineno):
+        if child.lineno > before_or_at:
+            break
+        targets = [target.id for target in (child.targets if isinstance(child, ast.Assign) else [child.target])
+                   if isinstance(target, ast.Name)]
+        if not targets:
+            continue
+        if _is_request_json(child.value):
+            json_aliases.update(targets)
+        if (_expression_reads_request_parameter(child.value, source_parameter, json_aliases)
+                or _expression_uses_taint(child.value, tainted)):
+            tainted.update(targets)
+    return tainted
+
+
+def _is_request_json(value: ast.AST) -> bool:
+    return bool(isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and isinstance(value.func.value, ast.Name) and value.func.value.id == "request"
+                and value.func.attr == "get_json") or bool(
+                    isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                    and value.value.id == "request" and value.attr == "json")
+
+
+def _expression_reads_request_parameter(value: ast.AST, name: str, json_aliases: set[str]) -> bool:
+    escaped = re.escape(name)
+    try:
+        text = ast.unparse(value)
+    except Exception:  # noqa: BLE001 - parseable AST nodes should unparse, otherwise fail closed
+        return False
+    request_read = re.compile(
+        rf"request\.(?:args|form|values|json)\s*(?:\.get\(|\[)\s*['\"]{escaped}['\"]|"
+        rf"request\.get_json\(\)\.get\(\s*['\"]{escaped}['\"]|"
+        rf"request\.get_json\(\)\s*\[\s*['\"]{escaped}['\"]",
+    )
+    if request_read.search(text):
+        return True
+    return any(re.search(rf"\b{re.escape(alias)}\s*(?:\.get\(|\[)\s*['\"]{escaped}['\"]", text)
+               for alias in json_aliases)
+
+
+def _expression_uses_taint(value: ast.AST, tainted: set[str]) -> bool:
+    return any(isinstance(child, ast.Name) and child.id in tainted for child in ast.walk(value))
+
+
+def _tainted_call_parameters(call: ast.Call, target: dict, tainted: set[str],
+                             source_parameter: str) -> set[str]:
+    output: set[str] = set()
+    for position, argument in enumerate(call.args):
+        if position < len(target["params"]) and (
+                _expression_uses_taint(argument, tainted)
+                or _expression_reads_request_parameter(argument, source_parameter, set())):
+            output.add(target["params"][position])
+    for keyword in call.keywords:
+        if keyword.arg in target["params"] and (
+                _expression_uses_taint(keyword.value, tainted)
+                or _expression_reads_request_parameter(keyword.value, source_parameter, set())):
+            output.add(keyword.arg)
+    return output
+
+
+def _sink_line_uses_taint(node: ast.AST, sink_line: int, tainted: set[str]) -> bool:
+    return any(
+        isinstance(child, ast.Name) and child.id in tainted
+        and getattr(child, "lineno", 0) <= sink_line <= getattr(child, "end_lineno", child.lineno)
+        for child in ast.walk(node)
+    )
 
 
 def _request_parameter_pattern(name: str) -> re.Pattern | None:

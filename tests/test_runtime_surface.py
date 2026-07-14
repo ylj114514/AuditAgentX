@@ -8,7 +8,7 @@ import pytest
 from backend.dynamic.endpoint_extractor import candidate_attack_surfaces, extract_endpoints
 from backend.verifier.dynamic_verifier import DynamicVerifier, ProbeRecord, _replace_path_parameter
 from backend.verifier.evidence_collector import EvidenceCollector
-from backend.verifier.pipeline import ExploitPipeline
+from backend.verifier.pipeline import ExploitPipeline, _proven_surfaces_for_finding
 from backend.dynamic.source_route_binding import bind_server_surface, is_server_bound_surface
 
 
@@ -56,6 +56,55 @@ def search():
     endpoint = extract_endpoints(tmp_path)["endpoints"][0]
     assert endpoint["path"] == "/search"
     assert {"name": "search", "location": "json"} in endpoint["params"]
+
+
+def test_flask_blueprint_route_binds_handler_input_through_imported_model_sink(tmp_path):
+    """Blueprint prefixes and a proven local import chain authorize one route only."""
+    (tmp_path / "api_views").mkdir()
+    (tmp_path / "models").mkdir()
+    (tmp_path / "app.py").write_text(
+        """from flask import Flask
+from api_views.main import api
+app = Flask(__name__)
+app.register_blueprint(api, url_prefix='/api')
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "api_views" / "main.py").write_text(
+        """from flask import Blueprint, request
+from models.user_model import find_user
+api = Blueprint('api', __name__, url_prefix='/v1')
+
+@api.get('/users')
+def users():
+    username = request.args.get('username')
+    return find_user(username)
+
+@api.get('/health')
+def health():
+    return 'ok'
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "models" / "user_model.py").write_text(
+        """def find_user(username):
+    return db.execute(f\"SELECT * FROM users WHERE username = '{username}'\")
+""",
+        encoding="utf-8",
+    )
+
+    endpoints = extract_endpoints(tmp_path)["endpoints"]
+    endpoint = next(item for item in endpoints if item["path"] == "/api/users")
+    bound = _proven_surfaces_for_finding(
+        {"file": "models/user_model.py", "start_line": 2}, endpoints, tmp_path,
+    )
+
+    assert endpoint["framework"] == "flask"
+    assert endpoint["methods"] == ["GET"]
+    assert {"name": "username", "location": "query"} in endpoint["params"]
+    assert len(bound) == 1
+    assert bound[0]["path"] == "/api/users"
+    assert bound[0]["source_route_binding"]["proof_kind"] == "intermodule_parameter_flow"
 
 
 def test_static_attack_surface_resolves_express_router_mount_and_route_parameters(tmp_path):
