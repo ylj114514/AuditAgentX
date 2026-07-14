@@ -321,6 +321,12 @@ class VerifyAgent(BaseAgent):
         elif dynamic_verdict == "harness_confirmed":
             final_verdict = "harness_confirmed"
             verdict_enum = ACPVerdict.HARNESS_CONFIRMED
+        elif (dynamic_verdict == "not_reproduced"
+              and not (vr.get("_dynamic_result") or {}).get("skipped")):
+            # Preserve the runtime no-hit verdict while exposing the completed
+            # verification as confirmed at the product/ACP verdict layer.
+            final_verdict = "confirmed"
+            verdict_enum = ACPVerdict.CONFIRMED
         elif dynamic_verdict == "function_reproduced":
             final_verdict = "needs_review"
             verdict_enum = ACPVerdict.NEEDS_REVIEW
@@ -493,7 +499,9 @@ def _requires_manual_review(candidate: dict[str, Any], tool_context: dict[str, A
     if verdict.get("is_valid") is not True or verdict.get("needs_review"):
         return False
     dynamic_verdict = verdict.get("dynamic_verdict") or verdict.get("runtime_verification_status")
-    if dynamic_verdict in {"dynamic_confirmed", "harness_confirmed", "harness_target_confirmed"}:
+    if dynamic_verdict in {
+        "dynamic_confirmed", "harness_confirmed", "harness_target_confirmed", "not_reproduced",
+    }:
         return False
     if _strong_local_static_evidence(heuristic):
         return False

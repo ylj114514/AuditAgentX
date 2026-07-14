@@ -24,10 +24,13 @@ from backend.agents.exploit_agent import (
     build_authorization_workflow_poc,
     build_confirmed_http_poc,
     build_deterministic_bound_exploit,
+    build_executed_not_reproduced_http_replay,
 )
 from backend.verifier.dynamic_verifier import DynamicVerifier
 from backend.verifier.harness_verifier import HarnessVerifier
-from backend.verifier.evidence_collector import EvidenceCollector, apply_product_evidence_policy
+from backend.verifier.evidence_collector import (
+    EvidenceCollector, apply_product_evidence_policy, is_executed_not_reproduced_runtime,
+)
 from backend.verifier.poc_writer import canonicalize_confirmed_http_runtime
 from backend.verifier import exploit_templates as tpl
 from backend.verifier import app_runner
@@ -777,11 +780,7 @@ class ExploitPipeline:
                 and initial_static_verdict not in {"false_positive", "out_of_scope"}
             )
         )
-        static_http_not_reproduced = bool(
-            static_confirmed and dyn_result
-            and dyn_result.get("reproduction_status") == "not_reproduced"
-            and not dyn_result.get("skipped")
-        )
+        executed_http_not_reproduced = is_executed_not_reproduced_runtime(dyn_result)
         context = classify_finding_context(f)
         apply_context_to_finding(f, context)
         allow_confirmed = bool(context.get("allow_confirmed", True))
@@ -810,14 +809,16 @@ class ExploitPipeline:
             f["runtime_verification_status"] = dyn_result.get("reproduction_status")
             if dyn_result.get("reproducible") and not allow_confirmed:
                 f["runtime_verification_status"] = "dynamic_confirmed_blocked_by_context"
-            elif static_http_not_reproduced:
-                # A completed HTTP campaign without its oracle is diagnostic, not a
-                # refutation of an independent static confirmation. Do not claim a
-                # confirmed HTTP PoC, and do not let a non-confirming Harness erase it.
+            elif executed_http_not_reproduced:
+                # Preserve the completed no-hit runtime fact while confirming the
+                # finding for product/UI policy.  This is never dynamic_confirmed.
                 f["status"] = "confirmed"
                 f["verified"] = True
                 f["dynamically_verified"] = False
-                f["dynamic_method"] = "static_confirmation"
+                f["dynamic_method"] = "http_executed_not_reproduced"
+                dyn_result.setdefault("logs", []).append(
+                    "动态 HTTP 验证已执行但未命中成功判据（not_reproduced）；保留该运行时事实"
+                )
 
         # Harness 裁决：严格区分「真实目标函数确认」与「模板机理确认」
         hv = (harness_result or {}).get("verdict")
@@ -857,15 +858,15 @@ class ExploitPipeline:
                     f["confirmed_blockers"] = _dedupe(
                         list(f.get("confirmed_blockers") or []) + blockers)
                     f["downgrade_reason"] = f.get("downgrade_reason") or "; ".join(blockers)
-                elif not (dyn_result and dyn_result.get("reproducible")) and not static_http_not_reproduced:
+                elif not (dyn_result and dyn_result.get("reproducible")) and not executed_http_not_reproduced:
                     f["runtime_verification_status"] = "harness_target_blocked"
         elif hv == "function_reproduced":
             # 自包含切片只证明真实项目函数单元可触发，不证明生产入口可达。
             f["function_mechanism_verified"] = True
             f["function_unit_reproduced"] = True
-            if not http_confirmed and not static_http_not_reproduced:
+            if not http_confirmed and not executed_http_not_reproduced:
                 f["runtime_verification_status"] = "function_reproduced"
-            if not http_confirmed and not static_http_not_reproduced:
+            if not http_confirmed and not executed_http_not_reproduced:
                 f["status"] = "needs_review"
                 f["verified"] = False
                 f["dynamically_verified"] = False
@@ -882,10 +883,10 @@ class ExploitPipeline:
                 f["confidence"] = min(max(f.get("confidence", 0.5), mech_conf), 0.75)
             if not (dyn_result and dyn_result.get("reproducible")) and not independently_confirmed:
                 f["dynamically_verified"] = False
-            if not (dyn_result and dyn_result.get("reproducible")) and not static_http_not_reproduced:
+            if not (dyn_result and dyn_result.get("reproducible")) and not executed_http_not_reproduced:
                 f["runtime_verification_status"] = "harness_mechanism_confirmed"
             if (dyn_result is not None and not dyn_result.get("reproducible")
-                    and not static_http_not_reproduced):
+                    and not executed_http_not_reproduced):
                 dyn_result.setdefault("logs", []).append(
                     "模板 Harness 只证明漏洞机理，仍需 source-to-sink 或 HTTP 复现确认")
                 if not dyn_result.get("reason"):
@@ -896,12 +897,12 @@ class ExploitPipeline:
             f["synthetic_demo_only"] = True
             if harness_result is not None:
                 harness_result["counts_as_real_reproduction"] = False
-            if not (dyn_result and dyn_result.get("reproducible")) and not static_http_not_reproduced:
+            if not (dyn_result and dyn_result.get("reproducible")) and not executed_http_not_reproduced:
                 f["runtime_verification_status"] = "harness_synthetic_demo_only"
                 if not independently_confirmed:
                     f["dynamically_verified"] = False
         elif hv in {"unsafe_harness_blocked", "sandbox_failed", "not_reproduced"}:
-            if not (dyn_result and dyn_result.get("reproducible")) and not static_http_not_reproduced:
+            if not (dyn_result and dyn_result.get("reproducible")) and not executed_http_not_reproduced:
                 f["runtime_verification_status"] = hv
 
         # Canonicalize before constructing replay code.  A claimed runtime success
@@ -928,6 +929,27 @@ class ExploitPipeline:
                 "trigger_location",
                 f"{f.get('file')}:{f.get('start_line') or f.get('line')}",
             )
+        elif executed_http_not_reproduced:
+            records = (dyn_result or {}).get("records") or []
+            record = next(
+                (item for item in records if isinstance(item, dict) and item.get("role") == "attack"),
+                records[0] if records and isinstance(records[0], dict) else None,
+            )
+            if record:
+                try:
+                    exploit["exploit_code"] = build_executed_not_reproduced_http_replay(
+                        record, _recorded_poc_setup_steps(dyn_result),
+                    )
+                    exploit["code_kind"] = "executed_http_replay_not_reproduced"
+                    exploit["generation_status"] = "generated"
+                    exploit["validation_status"] = "executed_not_reproduced"
+                    exploit["verification_method"] = (
+                        "重放实际执行但未命中成功判据的动态请求；不声明漏洞命中"
+                    )
+                except ValueError:
+                    dyn_result.setdefault("logs", []).append(
+                        "已执行但未复现的请求记录不完整，未生成复放代码"
+                    )
         elif hv == "target_confirmed" and (harness_result or {}).get("harness_code"):
             exploit["exploit_code"] = harness_result["harness_code"]
             exploit["code_kind"] = "target_harness_reproduction"
@@ -952,6 +974,8 @@ class ExploitPipeline:
             final_verdict = dynamic_verdict
         elif f.get("status") in {"false_positive", "out_of_scope", "informational"}:
             final_verdict = f.get("status")
+        elif executed_http_not_reproduced:
+            final_verdict = "confirmed"
         elif f.get("status") == "confirmed":
             final_verdict = "statically_verified"
         else:
@@ -978,12 +1002,12 @@ class ExploitPipeline:
             sandbox=sandbox_meta,
         )
 
-        # 补项 1+3：仅在**真实动态确认**后，据真实确认记录生成专属 PoC 文件，
+        # 仅在真实动态确认或已执行但未命中的 HTTP 请求后生成专属 replay 文件，
         # 并把不可变复现元数据（源码 commit / 镜像摘要 / 时间 / PoC hash / 请求响应 hash）
         # 写入证据链——让报告成为可审计证据，而非 Agent 自然语言描述。
         primary_artifact = f["_evidence"]["artifacts"]["validated_poc"]
         if (f["_evidence"].get("verification") or {}).get("dynamic_method") in {
-            "http_dynamic", "target_harness",
+            "http_dynamic", "http_executed_not_reproduced", "target_harness",
         }:
             try:
                 from backend.verifier.poc_writer import generate_poc_file
@@ -997,7 +1021,11 @@ class ExploitPipeline:
                     f["_poc_file"] = poc["path"]
                     primary_artifact.update({
                         "generation_status": "generated",
-                        "validation_status": "validated",
+                        "validation_status": (
+                            "executed_not_reproduced"
+                            if (f["_evidence"].get("verification") or {}).get("dynamic_method")
+                            == "http_executed_not_reproduced" else "validated"
+                        ),
                         "persistence_status": "persisted",
                         "name": Path(poc["path"]).name,
                         "sha256": poc["sha256"],
@@ -1172,7 +1200,7 @@ def _writer_evidence(evidence: dict, exploit: dict, harness: dict | None) -> dic
 
 def _restore_persisted_primary_code(evidence: dict, exploit: dict,
                                     harness: dict | None) -> None:
-    """Restore only framework-confirmed code after its immutable artifact exists."""
+    """Restore confirmed or honestly executed replay code after persistence."""
     code = exploit.get("exploit_code") if isinstance(exploit, dict) else None
     if not code:
         return
@@ -1180,7 +1208,13 @@ def _restore_persisted_primary_code(evidence: dict, exploit: dict,
     evidence_exploit["exploit_code"] = code
     evidence_exploit["code_kind"] = exploit.get("code_kind") or "validated_http_replay"
     evidence_exploit["generation_status"] = "generated"
-    evidence_exploit["validation_status"] = "validated"
+    executed_without_hit = (
+        (evidence.get("verification") or {}).get("dynamic_method")
+        == "http_executed_not_reproduced"
+    )
+    evidence_exploit["validation_status"] = (
+        "executed_not_reproduced" if executed_without_hit else "validated"
+    )
     plan = evidence.get("attack_plan")
     if isinstance(plan, dict):
         plan["code"] = code
@@ -1189,7 +1223,9 @@ def _restore_persisted_primary_code(evidence: dict, exploit: dict,
         plan["artifact_sha256"] = artifact.get("sha256")
         plan["code_kind"] = exploit.get("code_kind") or "validated_http_replay"
         plan["generation_status"] = "generated"
-        plan["validation_status"] = "validated"
+        plan["validation_status"] = (
+            "executed_not_reproduced" if executed_without_hit else "validated"
+        )
     if (harness or {}).get("verdict") == "target_confirmed":
         evidence.setdefault("harness", {})["harness_code"] = (harness or {}).get("harness_code")
 
@@ -1198,9 +1234,15 @@ def _enforce_pipeline_poc_release(evidence: dict) -> None:
     """Defence in depth: UI-facing pipeline output has no unpersisted PoC code."""
     verification = evidence.get("verification") or {}
     artifact = (evidence.get("artifacts") or {}).get("validated_poc") or {}
-    authorized = bool(
+    runtime_authorized = (
         verification.get("dynamically_verified")
         and verification.get("dynamic_method") in {"http_dynamic", "target_harness"}
+    ) or (
+        verification.get("dynamic_method") == "http_executed_not_reproduced"
+        and is_executed_not_reproduced_runtime(evidence.get("runtime") or {})
+    )
+    authorized = bool(
+        runtime_authorized
         and artifact.get("persistence_status") == "persisted"
         and isinstance(artifact.get("sha256"), str)
         and artifact["sha256"].strip()

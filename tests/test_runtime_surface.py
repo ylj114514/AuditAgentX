@@ -513,7 +513,7 @@ def test_evidence_preserves_blocked_instead_of_relabeling_not_reproduced():
         (
             {"reproduction_status": "not_reproduced", "skipped": False},
             {"verdict": "not_applicable"},
-            "not_reproduced",
+            "http_executed_not_reproduced",
         ),
         (
             {"reproduction_status": "setup_failed", "skipped": False},

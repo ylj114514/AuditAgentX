@@ -433,29 +433,36 @@ def test_function_level_harness_code_is_never_exposed_as_evidence_code():
 
 
 @pytest.mark.parametrize("static_verdict", ["confirmed", "statically_verified"])
+@pytest.mark.parametrize("initial_status", ["confirmed", "needs_review"])
 @pytest.mark.parametrize("harness", [
     {"verdict": "not_applicable"},
     {"verdict": "mechanism_confirmed", "function_mechanism_verified": True},
 ])
-def test_static_confirmed_open_redirect_stays_confirmed_when_executed_http_does_not_reproduce(
-        static_verdict, harness):
-    """静态确认不能被已执行但无指示器的 HTTP 探测降级或伪装成 HTTP PoC。"""
+def test_executed_http_not_reproduced_confirms_and_persists_an_honest_replay(
+        monkeypatch, tmp_path, static_verdict, initial_status, harness):
+    """已执行但未命中的 HTTP 验证仍确认 finding，但绝不伪造命中。"""
+    from types import SimpleNamespace
     from backend.verifier.pipeline import ExploitPipeline
 
+    monkeypatch.setattr("backend.verifier.pipeline.settings", SimpleNamespace(data_path=tmp_path))
     pipeline = object.__new__(ExploitPipeline)
     pipeline.scan_id = "static-http-no-hit"
     pipeline._code_root = None
     finding = {
         "finding_id": "f-open-redirect", "type": "Open Redirect", "file": "routes.py",
-        "start_line": 12, "status": "confirmed", "verified": True, "confidence": 0.91,
+        "start_line": 12, "status": initial_status,
+        "verified": initial_status == "confirmed", "confidence": 0.91,
         "_verify": {"static_verdict": static_verdict, "final_verdict": static_verdict},
     }
     dynamic = {
         "reproduction_status": "not_reproduced", "reproducible": False, "verified": False,
         "skipped": False, "reason": "redirect indicator was not observed",
+        "server_binding": {"kind": "source_route", "route_file": "routes.py"},
         "records": [{
             "role": "attack", "url": "http://127.0.0.1:8080/redirect", "method": "GET",
-            "status_code": 200, "payload": "https://example.invalid",
+            "params": {"next": "https://example.invalid"}, "param": "next",
+            "status_code": 200, "response_headers": {"content-type": "text/plain"},
+            "payload": "https://example.invalid",
         }],
     }
 
@@ -467,9 +474,13 @@ def test_static_confirmed_open_redirect_stays_confirmed_when_executed_http_does_
     assert finding["runtime_verification_status"] == "not_reproduced"
     assert finding.get("dynamically_verified") is False
     assert verification["static_verdict"] == static_verdict
-    assert verification["final_verdict"] == "statically_verified"
+    assert verification["final_verdict"] == "confirmed"
     assert verification["dynamic_verdict"] == "not_reproduced"
-    assert verification["dynamic_method"] in (None, "static_confirmation")
-    assert verification["evidence_level"] == "static_confirmed_http_not_reproduced"
-    assert "poc_file" not in finding["_evidence"]
-    assert finding["_evidence"]["artifacts"]["validated_poc"]["generation_status"] == "not_generated"
+    assert verification["dynamic_method"] == "http_executed_not_reproduced"
+    assert verification["evidence_level"] == "http_executed_not_reproduced"
+    assert verification["execution_completed_without_hit"] is True
+    assert finding["_evidence"]["artifacts"]["validated_poc"]["persistence_status"] == "persisted"
+    assert finding["_evidence"]["exploit"]["code_kind"] == "executed_http_replay_not_reproduced"
+    assert finding["_evidence"]["exploit"]["exploit_code"]
+    assert "not_reproduced" in (tmp_path / "scans" / "static-http-no-hit" / "pocs" /
+                                  "f-open-redirect.md").read_text(encoding="utf-8")

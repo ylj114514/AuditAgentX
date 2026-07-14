@@ -42,6 +42,14 @@ def _sha256(data: Any) -> str:
     return hashlib.sha256(str(data).encode("utf-8", "ignore")).hexdigest()
 
 
+def runtime_is_executed_not_reproduced(runtime: dict) -> bool:
+    """Keep the no-hit runtime fact separate from dynamic confirmation."""
+    return bool(
+        runtime.get("reproduction_status") == "not_reproduced"
+        and not runtime.get("skipped")
+    )
+
+
 def _git_commit(code_root: Optional[str]) -> Optional[str]:
     if not code_root or not Path(code_root).exists():
         return None
@@ -177,11 +185,16 @@ def generate_poc_file(finding: dict, evidence: dict, out_dir: Path,
     """
     ev = evidence or {}
     ver = ev.get("verification") or {}
-    # 硬门槛：只有框架侧动态确认（HTTP 真实复现 / 入口级 harness）才生成 PoC
-    if not (ver.get("dynamically_verified") and finding.get("status") == "confirmed"
-            and finding.get("verified") is True):
-        return None
     method = ver.get("dynamic_method") or "dynamic"
+    executed_without_hit = (
+        method == "http_executed_not_reproduced"
+        and runtime_is_executed_not_reproduced(ev.get("runtime") or {})
+    )
+    # A completed no-hit HTTP request can be retained as an explicitly labeled
+    # replay artifact.  It is not a dynamic confirmation and must not claim one.
+    if not ((ver.get("dynamically_verified") or executed_without_hit)
+            and finding.get("status") == "confirmed" and finding.get("verified") is True):
+        return None
     runtime = ev.get("runtime") or {}
     exploit = ev.get("exploit") or {}
     harness = ev.get("harness") or {}
@@ -202,6 +215,21 @@ def generate_poc_file(finding: dict, evidence: dict, out_dir: Path,
             runtime.get("response_status") is not None,
             isinstance(runtime.get("response_headers"), dict),
             isinstance(runtime.get("matched_indicator"), str) and bool(runtime.get("matched_indicator").strip()),
+            isinstance(runtime.get("server_binding"), dict)
+            and bool(str(runtime.get("server_binding", {}).get("kind") or "").strip()),
+        )
+        if not all(required):
+            return None
+    elif method == "http_executed_not_reproduced":
+        required = (
+            runtime.get("reproduction_status") == "not_reproduced",
+            not runtime.get("skipped"),
+            all(req.get(key) not in (None, "") for key in ("url", "method", "param", "payload")),
+            isinstance(req.get("params"), dict),
+            req.get("param") in req.get("params", {}),
+            req.get("params", {}).get(req.get("param")) == req.get("payload"),
+            runtime.get("response_status") is not None,
+            isinstance(runtime.get("response_headers"), dict),
             isinstance(runtime.get("server_binding"), dict)
             and bool(str(runtime.get("server_binding", {}).get("kind") or "").strip()),
         )
@@ -245,8 +273,14 @@ def generate_poc_file(finding: dict, evidence: dict, out_dir: Path,
                    f"{route or '(见证据链)'}，用户输入送达危险 sink（{harness.get('sink_name') or ''}）。")
         repro = "由框架固定沙箱镜像内的 test-client 真实调用真实路由 handler 复现，见复现元数据。"
 
+    outcome_label = (
+        "已执行但未命中成功判据（not_reproduced）；不声明漏洞命中"
+        if executed_without_hit else "框架侧动态确认"
+    )
+    evidence_heading = "执行记录（未命中）" if executed_without_hit else "确认证据"
+    code_heading = "已执行请求复放代码（未命中）" if executed_without_hit else "精确利用代码"
     md = (
-        f"# PoC — {vtype}\n\n"
+        f"# {'Executed replay (not reproduced)' if executed_without_hit else 'PoC'} — {vtype}\n\n"
         f"> 仅供**本地授权靶场/沙箱**验证。所有动态操作默认仅限 localhost/127.0.0.1。\n\n"
         f"| 项 | 值 |\n|---|---|\n"
         f"| 漏洞类型 | {vtype} |\n"
@@ -256,8 +290,9 @@ def generate_poc_file(finding: dict, evidence: dict, out_dir: Path,
         f"| HTTP 方法 | {http_method} |\n"
         f"| 参数位置 | `{param or 'N/A'}` |\n"
         f"| Payload | `{payload or 'N/A'}` |\n"
-        f"| 成功判据 | {_sanitize(indicator) or 'N/A'} |\n\n"
-        "## 确认证据\n\n"
+        f"| 观察结果 | {outcome_label} |\n"
+        f"| 成功判据 | {_sanitize(indicator) or '未命中'} |\n\n"
+        f"## {evidence_heading}\n\n"
         f"- 服务端绑定：`{_sanitize(json.dumps(runtime.get('server_binding') or {}, ensure_ascii=False, sort_keys=True))}`\n"
         f"- 基线响应：`{_sanitize(json.dumps(runtime.get('baseline') or {}, ensure_ascii=False, sort_keys=True))}`\n"
         f"- 攻击响应状态：`{runtime.get('response_status')}`\n"
@@ -265,7 +300,7 @@ def generate_poc_file(finding: dict, evidence: dict, out_dir: Path,
         f"- 完整参数：`{_sanitize(json.dumps(req.get('params') or {}, ensure_ascii=False, sort_keys=True))}`\n\n"
         f"## 运行命令\n\n```bash\n{run_cmd}\n```\n\n"
         f"## 复现说明\n\n{repro}\n\n"
-        + (f"## 精确利用代码\n\n```python\n{exploit_code}\n```\n\n" if exploit_code else "")
+        + (f"## {code_heading}\n\n```python\n{exploit_code}\n```\n\n" if exploit_code else "")
         + (
             "## 脱敏环境说明\n\n"
             "- 目标必须是本地授权靶场；`target_guard` 默认仅放行 localhost/回环。\n"

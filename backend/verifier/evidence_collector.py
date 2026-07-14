@@ -37,6 +37,15 @@ _SINK_KEYWORDS = {
 }
 
 
+def is_executed_not_reproduced_runtime(runtime: dict | None) -> bool:
+    """Return true only for a completed HTTP campaign that had no oracle hit."""
+    return bool(
+        isinstance(runtime, dict)
+        and runtime.get("reproduction_status") == "not_reproduced"
+        and not runtime.get("skipped")
+    )
+
+
 def _derive_static_flow(finding: dict) -> dict:
     """从 finding 自身派生 source→sink→数据流：优先用 interproc 已产出的 taint_flow，
     否则从代码片段识别用户输入(source)与危险函数(sink)，至少给出 2 跳可读数据流。
@@ -663,13 +672,23 @@ def _build_attack_plan_evidence(exploit: dict, runtime: dict, *,
         plan["validation_status"] = "validated"
         plan["code_language"] = "python"
         plan["code"] = exploit["exploit_code"]
+    elif is_executed_not_reproduced_runtime(runtime) and exploit.get("exploit_code"):
+        plan["plan_status"] = "executed_not_reproduced_replay"
+        plan["label"] = "已执行请求复放；未命中成功判据"
+        plan["code_kind"] = "executed_http_replay_not_reproduced"
+        plan["generation_status"] = "generated"
+        plan["validation_status"] = "executed_not_reproduced"
+        plan["code_language"] = "python"
+        plan["code"] = exploit["exploit_code"]
     return _redact_sensitive(plan)
 
 
 def _initial_artifact_states(verification: dict) -> dict:
     method = verification.get("dynamic_method")
     level = verification.get("evidence_level")
-    primary_required = method in {"http_dynamic", "target_harness"}
+    primary_required = method in {
+        "http_dynamic", "http_executed_not_reproduced", "target_harness",
+    }
     forensic_required = level == "function_unit_reproduced"
 
     def state(required: bool, *, validation_pending: bool = False) -> dict:
@@ -835,9 +854,13 @@ def _enforce_poc_code_policy(evidence: dict) -> dict:
     runtime_validated = bool(verification.get("dynamically_verified")) and (
         verification.get("dynamic_method") in {"http_dynamic", "target_harness"}
     )
+    executed_without_hit = (
+        verification.get("dynamic_method") == "http_executed_not_reproduced"
+        and is_executed_not_reproduced_runtime(result.get("runtime") or {})
+    )
     artifacts = result.get("artifacts") or {}
     primary_persisted = is_persisted_validated_artifact(artifacts.get("validated_poc"))
-    code_authorized = runtime_validated and primary_persisted
+    code_authorized = (runtime_validated or executed_without_hit) and primary_persisted
     if not code_authorized:
         # Legacy/partial evidence can nest generated code under arbitrary
         # metadata.  Redact every code field in PoC-bearing sections, not only
@@ -891,20 +914,14 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
         bool(harness.get("function_mechanism_verified")) and not function_reproduced
     )
     runtime_status = runtime.get("reproduction_status")
-    runtime_completed_without_hit = (
-        runtime_status == "not_reproduced" and not runtime.get("skipped")
-    )
+    runtime_completed_without_hit = is_executed_not_reproduced_runtime(runtime)
     harness_completed_without_hit = harness_verdict == "not_reproduced"
-    static_confirmed = static_verdict in {"confirmed", "statically_verified"}
-
-    static_http_not_reproduced = bool(
-        static_confirmed and runtime_completed_without_hit and not harness_target
-    )
-    if static_http_not_reproduced:
+    executed_http_not_reproduced = runtime_completed_without_hit and not harness_target
+    if executed_http_not_reproduced:
         dynamic_verdict = runtime_status
-        final_verdict = "statically_verified"
-        dynamic_method = "static_confirmation"
-        evidence_level = "static_confirmed_http_not_reproduced"
+        final_verdict = "confirmed"
+        dynamic_method = "http_executed_not_reproduced"
+        evidence_level = "http_executed_not_reproduced"
     elif http_reproduced:
         dynamic_verdict = "dynamic_confirmed"
         final_verdict = "dynamic_confirmed"
@@ -929,8 +946,8 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
 
     # 是否经运行时证据（HTTP 复现 / 目标函数级 Harness）动态确认——供报告如实展示。
     dynamically_verified = bool(http_reproduced or harness_target)
-    if static_http_not_reproduced:
-        evidence_level = "static_confirmed_http_not_reproduced"
+    if executed_http_not_reproduced:
+        evidence_level = "http_executed_not_reproduced"
     elif http_reproduced:
         evidence_level = "http_reproduced"
     elif harness_target:
@@ -986,6 +1003,7 @@ def _build_verification_evidence(verify_result: dict, runtime: dict, harness: di
         "dynamically_verified": dynamically_verified,
         "dynamic_method": dynamic_method,
         "entrypoint_confirmed": bool(http_reproduced or harness_target),
+        "execution_completed_without_hit": executed_http_not_reproduced,
         "evidence_level": evidence_level,
         "execution_blocker": execution_blocker,
         "environment_status": environment_status,

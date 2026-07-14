@@ -195,12 +195,17 @@ class DynamicAnalysisAgent:
             # 路径①(dynamic_confirmed) + 路径②(harness_confirmed 入口级 / function_reproduced 函数级)
             # 任一非零即视为存在动态确定漏洞。
             dyn_confirmed_total = summary["dynamic_confirmed"] + summary["harness_confirmed"]
-            verdict_enum = (ACPVerdict.DYNAMIC_CONFIRMED
-                            if dyn_confirmed_total else ACPVerdict.STATICALLY_VERIFIED)
+            completed_no_hit_total = summary["executed_not_reproduced"]
+            verdict_enum = (
+                ACPVerdict.DYNAMIC_CONFIRMED if dyn_confirmed_total
+                else ACPVerdict.CONFIRMED if completed_no_hit_total
+                else ACPVerdict.STATICALLY_VERIFIED
+            )
             return make_reply(
                 request, sender=self.name,
                 message_type=ACPMessageType.DYNAMIC_VERIFY_RESULT,
-                intent=f"动态验证批处理完成：confirmed={dyn_confirmed_total}",
+                intent=("动态验证批处理完成："
+                        f"confirmed={dyn_confirmed_total + completed_no_hit_total}"),
                 payload={"findings": results, "dynamic_summary": summary,
                          "runtime_plan": self._last_runtime_plan},
                 state=ACPState.SUCCESS,
@@ -259,6 +264,8 @@ class DynamicAnalysisAgent:
             verdict_enum = ACPVerdict.DYNAMIC_CONFIRMED
         elif static_verdict == "false_positive":
             verdict_enum = ACPVerdict.FALSE_POSITIVE
+        elif dynamic_verdict == "not_reproduced":
+            verdict_enum = ACPVerdict.CONFIRMED
         else:
             verdict_enum = ACPVerdict.STATICALLY_VERIFIED
 
@@ -368,6 +375,10 @@ def _derive_final_verdict(static_verdict: str, dynamic_verdict: str) -> str:
         return "false_positive"
     if dynamic_verdict in DYNAMIC_CONFIRMED_VERDICTS:
         return dynamic_verdict
+    if dynamic_verdict == "not_reproduced":
+        # The runtime fact stays not_reproduced; this is the product-level
+        # confirmation required for an actually executed no-hit campaign.
+        return "confirmed"
     if dynamic_verdict == "function_reproduced":
         return "needs_review"
     if static_verdict in ("confirmed", "statically_verified"):
@@ -395,6 +406,10 @@ def _dynamic_summary(findings: list[dict], code_root: Path | None = None) -> dic
         "harness_confirmed": sum(
             1 for f in findings
             if is_target_harness_confirmed(f.get("_harness") or {})
+        ),
+        "executed_not_reproduced": sum(
+            1 for f in findings
+            if _verdict(f) == "not_reproduced"
         ),
         # 函数级复现（slice 主力典型结论）单列，不再被误并进 not_executed。
         "function_reproduced": sum(1 for f in findings if _verdict(f) == "function_reproduced"),

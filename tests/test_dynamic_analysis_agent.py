@@ -1,7 +1,9 @@
 """DynamicAnalysisAgent 测试（离线：plan 决策 + harness 执行，不依赖 LLM/靶场）。"""
 from pathlib import Path
 
-from backend.agents.dynamic_analysis_agent import DynamicAnalysisAgent, _derive_dynamic_verdict, _dynamic_summary
+from backend.agents.dynamic_analysis_agent import (
+    DynamicAnalysisAgent, _derive_dynamic_verdict, _derive_final_verdict, _dynamic_summary,
+)
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "vulnerable_projects" / "demo_flask_app"
 
@@ -124,6 +126,16 @@ def test_not_executed_only_when_both_channels_idle():
     assert _derive_dynamic_verdict(
         {"reproduction_status": "not_executed"},
         {"verdict": "not_reproduced"}) == "harness_not_reproduced"
+
+
+def test_executed_http_not_reproduced_is_finally_confirmed_without_relabeling_runtime():
+    """UI/final confirmation is separate from the honest runtime no-hit verdict."""
+    runtime = {"reproduction_status": "not_reproduced", "skipped": False}
+
+    dynamic_verdict = _derive_dynamic_verdict(runtime, {})
+
+    assert dynamic_verdict == "not_reproduced"
+    assert _derive_final_verdict("needs_review", dynamic_verdict) == "confirmed"
 
 
 def test_mechanism_harness_does_not_count_as_harness_confirmed():
