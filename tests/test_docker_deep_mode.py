@@ -105,9 +105,17 @@ def test_engine_ready_uses_platform_adapted_client(monkeypatch):
 def test_build_dockerfile_python_and_node():
     py = build_dockerfile({"framework": "Flask", "run_command": "python app.py",
                            "install_command": "pip install -r requirements.txt"}, 5000)
-    assert "FROM python" in py and "EXPOSE 5000" in py and "app.py" in py
+    assert "FROM python" in py and "EXPOSE 5000" in py and "--app app" in py
     node = build_dockerfile({"framework": "Express", "run_command": "npm start"}, 3000)
     assert "FROM node" in node and "npm" in node
+
+
+def test_generated_flask_entrypoint_binds_outside_container():
+    dockerfile = build_dockerfile(
+        {"framework": "Flask", "run_command": "python app.py", "install_command": "pip install -r requirements.txt"},
+        5000,
+    )
+    assert "python -m flask --app app run --host 0.0.0.0 --port 5000" in dockerfile
 
 
 def test_build_dockerfile_php_adds_composer_only_when_install_requires_it():

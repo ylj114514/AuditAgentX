@@ -202,6 +202,7 @@ def build_dockerfile(launch_plan: dict, port: int, *, python_image: str = _DEFAU
     install = launch_plan.get("install_command")
     run = launch_plan.get("run_command") or launch_plan.get("command") or ""
     run = run.replace("{port}", str(port))
+    run = _generated_flask_bind_command(framework, run, port)
     workdir = _safe_workdir(launch_plan.get("working_dir"))
     app_workdir = "/app" + ("/" + workdir if workdir else "")
 
@@ -269,6 +270,17 @@ def _uses_generated_python_image(launch_plan: dict) -> bool:
     """Whether ``build_dockerfile`` selects its Python branch for this plan."""
     framework = str(launch_plan.get("framework") or "").lower()
     return not any(runtime in framework for runtime in ("node", "express", "php", "spring", "java"))
+
+
+def _generated_flask_bind_command(framework: str, run_command: str, port: int) -> str:
+    """Expose simple auto-detected Flask entrypoints outside the container."""
+    if "flask" not in str(framework or "").lower():
+        return run_command
+    match = re.fullmatch(r"\s*python(?:3)?\s+([A-Za-z0-9_./-]+\.py)\s*", run_command)
+    if not match:
+        return run_command
+    module = match.group(1)[:-3].replace("/", ".").replace("\\", ".")
+    return f"python -m flask --app {module} run --host 0.0.0.0 --port {port}"
 
 
 def _should_retry_python_dependency_resolution(build_error: str, launch_plan: dict) -> bool:
