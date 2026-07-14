@@ -1403,7 +1403,7 @@ def build_js_express_open_redirect_entrypoint_harness(func: dict, vuln_type: str
         "function _express(){ return _expressApp(); }",
         "_express.Router=function(){return _expressApp();}; _express.json=function(){return function(_q,_s,next){if(next)next();};}; _express.urlencoded=_express.json; _express.static=function(){return function(_q,_s,next){if(next)next();};};",
         "const _targetPath=" + _json.dumps(target_path) + ";",
-        "const _originalLoad=Module._load; Module._load=function(request,parent,isMain){ const normalized=typeof request==='string'?request.replace(/\\\\/g,'/'):request; if(normalized===_targetPath) return _originalLoad.apply(this,arguments); if(request==='express') return _express; if(request==='child_process'||request==='node:child_process') return _stub(); if(request&&normalized!==_targetPath) return _stub(); return _originalLoad.apply(this,arguments); };",
+        "const _originalLoad=Module._load; Module._load=function(request,parent,isMain){ const normalized=typeof request==='string'?request.replace(/\\\\/g,'/'):request; if(normalized===_targetPath) return _originalLoad.apply(this,arguments); if(request==='express') return _express; if(request==='child_process'||request==='node:child_process') return _stub(); if(typeof request==='string'&&(request.indexOf('./')===0||request.indexOf('../')===0||request.indexOf('/')===0)){ try{return _originalLoad.apply(this,arguments);}catch(error){throw new Error('AAX_LOCAL_DEPENDENCY_UNRESOLVED:'+request+':'+String((error&&error.message)||error).slice(0,160));} } if(request&&normalized!==_targetPath) return _stub(); return _originalLoad.apply(this,arguments); };",
         "const _req={method:_expected.method.toUpperCase(),path:_expected.path,url:_expected.path,originalUrl:_expected.path,query:{url:_canary,redirect:_canary,next:_canary,returnUrl:_canary},body:{url:_canary,redirect:_canary,next:_canary},params:{url:_canary,redirect:_canary,next:_canary},session:{userId:'auditagentx-session-user',user:{id:'auditagentx-session-user'},authenticated:true},user:{id:'auditagentx-session-user'},isAuthenticated:function(){return true;},get:function(){return undefined;}};",
         "const _res={status:function(){return this;},send:function(){return this;},json:function(){return this;},end:function(){return this;},redirect:function(location){_redirects.push(String(location));return this;}};",
         "async function _dispatch(route,index){ if(index>=route.handlers.length)return; let advanced=false; const next=function(){ if(!advanced){advanced=true;return _dispatch(route,index+1);} }; return route.handlers[index].fn(_req,_res,next); }",
@@ -2256,6 +2256,8 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str,
     route_data = route_data if isinstance(route_data, dict) else {}
     middleware_data = route_data.get("middleware_chain")
     middleware_data = middleware_data if isinstance(middleware_data, dict) else {}
+    local_dependency_error = str(parsed.get("import_error") or "") if isinstance(parsed, dict) else ""
+    local_dependency_blocked = "AAX_LOCAL_DEPENDENCY_UNRESOLVED:" in local_dependency_error
     module_executed = bool(
         open_redirect_route and nonce and (MODULE_EXECUTED_MARKER + nonce) in stdout
     )
@@ -2283,6 +2285,10 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str,
             "completed": bool(middleware_data.get("completed")) and middleware_completed,
         },
         "handler_called": bool(route_data.get("handler_called")) and res["target_function_called"],
+        "local_dependency": {
+            "blocked": local_dependency_blocked,
+            "reason": local_dependency_error if local_dependency_blocked else None,
+        },
         "sink": {
             "name": (route_data.get("sink") or {}).get("name") if isinstance(route_data.get("sink"), dict) else None,
             "canary_observed": bool((route_data.get("sink") or {}).get("canary_observed"))
@@ -2292,6 +2298,7 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str,
     open_redirect_entrypoint = bool(
         open_redirect_route
         and module_executed and route_bound and entrypoint_marker_observed
+        and not local_dependency_blocked
         and middleware_count > 0 and middleware_completed
         and res["route_entrypoint_attestation"]["handler_called"]
         and res["route_entrypoint_attestation"]["sink"]["canary_observed"]
@@ -2346,6 +2353,8 @@ def _finalize(exec_out: dict, source: str, language: str, backend: str,
         res["verdict"] = V_MECHANISM_CONFIRMED
     if open_redirect_route and not open_redirect_entrypoint:
         missing = []
+        if local_dependency_blocked:
+            missing.append("local_dependency_unresolved")
         if not module_executed:
             missing.append("module_not_executed")
         if not route_bound:

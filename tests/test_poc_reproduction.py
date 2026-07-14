@@ -338,6 +338,8 @@ def test_pipeline_canonicalizes_confirmed_record_with_required_sibling_params(mo
     # Candidate code is restored only after the immutable artifact is on disk.
     assert evidence["exploit"]["exploit_code"]
     assert evidence["attack_plan"]["code"] == evidence["exploit"]["exploit_code"]
+    assert "'page': 1" in evidence["exploit"]["exploit_code"]
+    assert "request_data =" in evidence["exploit"]["exploit_code"]
     persisted = tmp_path / "scans" / "confirmed-siblings" / "pocs" / "f-siblings.md"
     assert persisted.is_file()
     assert hashlib.sha256(persisted.read_bytes()).hexdigest() == artifact["sha256"]
@@ -374,6 +376,41 @@ def test_ambiguous_confirmed_record_never_persists_or_releases_code(monkeypatch,
     assert artifact["failure_code"] == "required_artifact_not_generated"
     assert finding["_evidence"]["exploit"]["exploit_code"] is None
     assert finding["_evidence"]["attack_plan"]["code"] is None
+
+
+def test_pipeline_never_builds_http_poc_before_confirmed_record_is_canonical(monkeypatch, tmp_path):
+    """Incomplete dynamic claims may remain diagnostic, but cannot produce replay code."""
+    from types import SimpleNamespace
+    from backend.verifier import pipeline as pipeline_module
+    from backend.verifier.pipeline import ExploitPipeline
+
+    monkeypatch.setattr("backend.verifier.pipeline.settings", SimpleNamespace(data_path=tmp_path))
+    built = []
+    monkeypatch.setattr(
+        pipeline_module, "build_confirmed_http_poc",
+        lambda *_args, **_kwargs: (built.append(True) or "must not be created"),
+    )
+    pipeline = object.__new__(ExploitPipeline)
+    pipeline.scan_id = "uncanonical-confirmation"
+    pipeline._code_root = None
+    finding = {**_FINDING, "finding_id": "f-uncanonical", "status": "needs_review",
+               "verified": False, "confidence": 0.7,
+               "_verify": {"source": "request.args.id", "sink": "cursor.execute"}}
+    dynamic = {
+        "verified": True, "reproducible": True, "reproduction_status": "dynamic_confirmed",
+        "matched_indicator": "SQL syntax", "server_binding": {"kind": "source_route_sink"},
+        # Missing baseline_record makes the record non-canonical.
+        "confirmed_record": {
+            "url": "http://127.0.0.1:18080/search", "method": "POST", "transport": "json",
+            "params": {"query": "'"}, "payload": "'", "status_code": 500,
+            "response_headers": {"content-type": "text/plain"},
+        },
+    }
+
+    pipeline._assemble(finding, {"payloads": ["'"]}, dynamic, None, None)
+
+    assert built == []
+    assert finding["_evidence"]["exploit"]["exploit_code"] is None
 
 
 def test_function_level_harness_code_is_never_exposed_as_evidence_code():

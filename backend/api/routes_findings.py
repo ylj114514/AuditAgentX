@@ -18,7 +18,8 @@ from backend.agents.exploit_agent import ExploitAgent
 from backend.verifier.dynamic_verifier import DynamicVerifier
 from backend.verifier.evidence_collector import EvidenceCollector, apply_product_evidence_policy
 from backend.verifier.pipeline import (
-    ExploitPipeline, _proven_surfaces_for_finding, _static_counterevidence_reason,
+    ExploitPipeline, _auth_bootstrap_inventory, _proven_surfaces_for_finding,
+    _static_counterevidence_reason,
 )
 from backend.dynamic.endpoint_extractor import extract_endpoints
 from backend.verifier import exploit_templates as tpl
@@ -155,11 +156,13 @@ def verify_finding(finding_id: str, payload: VerifyRequest,
                     # Persisted evidence, ACP/MCP messages, and request JSON are
                     # all untrusted descriptions. Only a fresh server-side source
                     # extraction can mint a source→route capability for this run.
-                    bound_endpoints = _bound_requested_endpoints(
-                        requested_endpoints, _server_extracted_bound_endpoints(db, f),
-                    )
+                    target_inventory, auth_endpoints = _server_extracted_verification_inventories(db, f)
+                    bound_endpoints = _bound_requested_endpoints(requested_endpoints, target_inventory)
                     if bound_endpoints:
-                        dr = verifier.verify(base_url, exploit, bound_endpoints)
+                        dr = verifier.verify(
+                            base_url, exploit, bound_endpoints,
+                            auth_endpoints=auth_endpoints,
+                        )
                         dyn = dr.__dict__
                         if counterevidence:
                             dyn["manual_static_override"] = {
@@ -436,18 +439,24 @@ def _is_project_relative_path(path: str) -> bool:
 
 def _server_extracted_bound_endpoints(db: Session, finding: Finding) -> list[dict]:
     """Mint the batch pipeline's source→route→parameter capabilities for this run."""
+    return _server_extracted_verification_inventories(db, finding)[0]
+
+
+def _server_extracted_verification_inventories(db: Session, finding: Finding) -> tuple[list[dict], list[dict]]:
+    """Return finding scope and auth bootstrap inventory from one fresh extraction."""
     scan = db.get(Scan, finding.scan_id)
     project = db.get(Project, scan.project_id) if scan else None
     code_root = Path(str(project.local_path)) if project and project.local_path else None
     if not code_root or not code_root.is_dir():
-        return []
+        return [], []
     extracted = extract_endpoints(code_root).get("endpoints") or []
-    return _proven_surfaces_for_finding({
+    target_inventory = _proven_surfaces_for_finding({
         "file": finding.file_path,
         "start_line": finding.start_line,
         "line": finding.start_line,
         "type": finding.type,
     }, extracted, code_root)
+    return target_inventory, _auth_bootstrap_inventory(extracted)
 
 
 def _manual_policy_skip(counterevidence: str) -> dict:

@@ -61,9 +61,9 @@ def _nodegoat_auth_inventory():
 
 @contextmanager
 def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open_redirect=False,
-                      empty_nodegoat_csrf=False):
+                       empty_nodegoat_csrf=False, duplicate_rejecting=False):
     state = {"registered": False, "posts": 0, "register_csrf": "register-live-csrf",
-             "login_csrf": "login-live-csrf", "registered_identity": {}}
+             "login_csrf": "login-live-csrf", "registered_identity": {}, "users": set()}
     signup_path = "/signup" if form_variant == "nodegoat" else "/register"
 
     if form_variant == "external_action":
@@ -165,7 +165,13 @@ def _form_auth_target(*, oracle=True, protected=True, form_variant="valid", open
                             for key in ("userName", "email", "password")
                         }
                 else:
+                    username = values.get("username", [""])[0]
+                    if duplicate_rejecting and username in state["users"]:
+                        self._write(409, "duplicate user")
+                        return
                     state["registered"] = bool(values.get("username") and values.get("password"))
+                    if state["registered"]:
+                        state["users"].add(username)
                 self._write(204)
                 return
             if (self.path == "/login" and state["registered"]
@@ -348,6 +354,81 @@ def test_nodegoat_empty_conventional_csrf_is_omitted_then_requires_real_auth_suc
     submits = [item for item in result.setup_records
                if item["auth_bootstrap"]["stage"] == "form_submit"]
     assert all(item["auth_bootstrap"]["dynamic_csrf_field"] == "" for item in submits)
+
+
+def test_confirmed_auth_poc_uses_a_fresh_shared_identity_on_consecutive_runs(monkeypatch):
+    """Replay registration must not reuse a fixed username on duplicate-rejecting targets."""
+    with _form_auth_target(duplicate_rejecting=True) as (base_url, state):
+        result = DynamicVerifier().verify(
+            base_url, _exploit(), endpoints=[_inventory()[0]], auth_endpoints=_split_auth_inventory())
+        assert result.reproduction_status == "dynamic_confirmed"
+        code = build_confirmed_http_poc(
+            result.confirmed_record, result.matched_indicator,
+            _recorded_poc_setup_steps(result.__dict__),
+        )
+        assert "_aax_setup_username" in code
+        assert "secrets.token_hex" in code
+
+        exec(compile(code, "fresh_identity_replay.py", "exec"), {})
+        exec(compile(code, "fresh_identity_replay.py", "exec"), {})
+
+    # One verifier bootstrap plus two independent generated replays registered
+    # distinct users; every replay's login shared its signup identity.
+    assert len(state["users"]) == 3
+    assert state["posts"] == 6
+
+
+def test_manual_verify_discovers_auth_inventory_for_protected_form_target(monkeypatch, tmp_path):
+    """The one-finding API must pass the same fresh auth inventory as batch verification."""
+    import json
+    from fastapi.testclient import TestClient
+
+    from backend.core import ids
+    from backend.database import SessionLocal
+    from backend.main import app
+    from backend.models import Finding, Project, Scan
+
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/register', methods=['GET', 'POST'])\n"
+        "def register():\n"
+        "    return 'register'\n"
+        "@app.route('/login', methods=['GET', 'POST'])\n"
+        "def login():\n"
+        "    return 'login'\n"
+        "@app.route('/learn')\n"
+        "def learn():\n"
+        "    value = request.args.get('url')\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("backend.agents.exploit_agent.ExploitAgent.run", lambda *_args: _exploit())
+    from types import SimpleNamespace
+    monkeypatch.setattr("backend.verifier.pipeline.settings", SimpleNamespace(data_path=tmp_path))
+
+    db = SessionLocal()
+    project = Project(id=ids.project_id(), name="manual_form_auth", source_type="local",
+                      local_path=str(tmp_path), status="created")
+    scan = Scan(id=ids.scan_id(), project_id=project.id, scan_type="static", status="done")
+    finding = Finding(
+        id=ids.finding_id(), scan_id=scan.id, type="SQL Injection", severity="high",
+        file_path="app.py", start_line=12, code_snippet="value = request.args.get('url')",
+        confidence=0.7, verified=False, status="needs_review", detail_json=json.dumps({"_verify": {}}),
+    )
+    db.add_all([project, scan, finding])
+    db.commit()
+    finding_id = finding.id
+    db.close()
+
+    with _form_auth_target() as (base_url, state):
+        response = TestClient(app).post(f"/api/findings/{finding_id}/verify", json={
+            "mode": "url", "base_url": base_url, "endpoints": ["/learn"], "timeout": 5,
+        })
+
+    assert response.status_code == 200
+    assert response.json()["reproducible"] is True
+    assert state["posts"] == 2
 
 
 def test_no_auth_response_falls_back_to_existing_no_oracle_verdict():

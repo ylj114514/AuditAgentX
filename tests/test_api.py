@@ -313,7 +313,7 @@ def test_verify_finding_api_records_evidence_and_ingests_dynamic_confirmation_af
             "impact": "unauthorized data read",
         }
 
-    def fake_verify(self, base_url, exploit, endpoints=None):
+    def fake_verify(self, base_url, exploit, endpoints=None, **_kwargs):
         return FakeDynamicResult()
 
     monkeypatch.setattr("backend.agents.exploit_agent.ExploitAgent.run", fake_exploit_run)
@@ -742,7 +742,7 @@ def test_verify_finding_api_preserves_existing_verify_evidence(monkeypatch):
             "impact": "unauthorized data read",
         }
 
-    def fake_verify(self, base_url, exploit, endpoints=None):
+    def fake_verify(self, base_url, exploit, endpoints=None, **_kwargs):
         return FakeDynamicResult()
 
     monkeypatch.setattr("backend.agents.exploit_agent.ExploitAgent.run", fake_exploit_run)

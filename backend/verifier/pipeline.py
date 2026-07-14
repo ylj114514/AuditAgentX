@@ -904,9 +904,14 @@ class ExploitPipeline:
             if not (dyn_result and dyn_result.get("reproducible")) and not static_http_not_reproduced:
                 f["runtime_verification_status"] = hv
 
+        # Canonicalize before constructing replay code.  A claimed runtime success
+        # without the complete, unambiguous executed request remains diagnostic
+        # evidence only and must not release a PoC.
+        dyn_result = _canonicalize_confirmed_http_result(dyn_result)
+        canonical_http = canonicalize_confirmed_http_runtime(dyn_result)
         # HTTP 确认后，用实际命中的 method/path/transport/param/payload 重建精确利用代码，
         # 取代通用模板端点，确保报告里的代码可复现且与证据记录一一对应。
-        if dyn_result and dyn_result.get("reproducible") and dyn_result.get("confirmed_record"):
+        if canonical_http is not None:
             if (dyn_result.get("oracle") == "cross_identity_owner_secret_replay"
                     and exploit.get("authorization_workflow")):
                 exploit["exploit_code"] = build_authorization_workflow_poc(
@@ -929,7 +934,6 @@ class ExploitPipeline:
             exploit["generation_status"] = "generated"
             exploit["validation_status"] = "validated"
             exploit["verification_method"] = "在受控 Harness 中经真实入口调用目标代码并观察框架证明的 sink 触发"
-        dyn_result = _canonicalize_confirmed_http_result(dyn_result)
         f["_exploit"] = _redact_exploit_for_storage(exploit)
         f["_dynamic"] = dyn_result
         f["_harness"] = harness_result

@@ -581,6 +581,18 @@ def test_source_bound_open_redirect_runs_registered_express_chain_offline(monkey
         "module.exports = index;\n",
         encoding="utf-8",
     )
+    (tmp_path / "session.js").write_text(
+        "module.exports = class SessionHandler {\n"
+        "  constructor(db) {}\n"
+        "  get isLoggedInMiddleware() {\n"
+        "    return function(req, res, next) {\n"
+        "      if (req.session && req.session.userId) return next();\n"
+        "      return res.status(401).end();\n"
+        "    };\n"
+        "  }\n"
+        "};\n",
+        encoding="utf-8",
+    )
     func = extract_function(tmp_path, "routes.js", 6)
     assert func["function_name"] == "index"
     assert func["route_hints"] == [{"method": "get", "path": "/learn"}]
@@ -626,6 +638,81 @@ def test_source_bound_open_redirect_runs_registered_express_chain_offline(monkey
     assert verifier_result["verdict"] == "target_confirmed"
     assert verifier_result["harness_kind"] == "javascript_express_open_redirect_route"
     assert verifier_result["route_entrypoint_attestation"]["middleware_chain"]["completed"] is True
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="未安装 node，跳过 JS Harness 执行")
+def test_open_redirect_missing_local_auth_dependency_fails_closed(monkeypatch, tmp_path):
+    """A missing local auth module must not be replaced with a next()-calling proxy."""
+    from backend.skills import harness_tools
+    from backend.skills.harness_tools import scaffold_capability
+
+    (tmp_path / "routes.js").write_text(
+        "const SessionHandler = require('./session');\n"
+        "const index = (app, db) => {\n"
+        "  const auth = new SessionHandler(db).isLoggedInMiddleware;\n"
+        "  app.get('/learn', auth, (req, res) => res.redirect(req.query.url));\n"
+        "};\n"
+        "module.exports = index;\n",
+        encoding="utf-8",
+    )
+    func = {
+        "language": "javascript", "file": "routes.js",
+        "function_code": "function index(req, res) { return res.redirect(req.query.url); }",
+        "route_hints": [{"method": "get", "path": "/learn"}],
+    }
+    code = build_js_express_open_redirect_entrypoint_harness(func, "Open Redirect")
+    assert code is not None
+    monkeypatch.setattr(
+        harness_tools, "_run_in_docker",
+        lambda rendered, timeout, language, code_root=None, harness_kind=None: harness_tools._run_local(
+            rendered.replace("/target", tmp_path.as_posix()), timeout, language, "template",
+        ),
+    )
+
+    execution = run_harness(
+        code, language="javascript", source="scaffold", scaffold_token=scaffold_capability(),
+        code_root=str(tmp_path), harness_kind="javascript_express_open_redirect_route",
+    )
+
+    assert execution["verdict"] != "target_confirmed"
+    assert execution["entrypoint_reachable"] is False
+    assert "local_dependency_unresolved" in execution["reason"]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="未安装 node，跳过 JS Harness 执行")
+def test_open_redirect_harmless_nonlocal_stub_remains_supported(monkeypatch, tmp_path):
+    """Unrelated nonlocal dependencies remain safe record-only stubs."""
+    from backend.skills import harness_tools
+    from backend.skills.harness_tools import scaffold_capability
+
+    (tmp_path / "routes.js").write_text(
+        "const harmless = require('harmless-nonlocal-package');\n"
+        "const index = (app) => {\n"
+        "  app.get('/learn', (req, res, next) => next(), (req, res) => res.redirect(req.query.url));\n"
+        "};\n"
+        "module.exports = index;\n",
+        encoding="utf-8",
+    )
+    func = {
+        "language": "javascript", "file": "routes.js",
+        "function_code": "function index(req, res) { return res.redirect(req.query.url); }",
+        "route_hints": [{"method": "get", "path": "/learn"}],
+    }
+    code = build_js_express_open_redirect_entrypoint_harness(func, "Open Redirect")
+    assert code is not None
+    monkeypatch.setattr(
+        harness_tools, "_run_in_docker",
+        lambda rendered, timeout, language, code_root=None, harness_kind=None: harness_tools._run_local(
+            rendered.replace("/target", tmp_path.as_posix()), timeout, language, "template",
+        ),
+    )
+
+    execution = run_harness(
+        code, language="javascript", source="scaffold", scaffold_token=scaffold_capability(),
+        code_root=str(tmp_path), harness_kind="javascript_express_open_redirect_route",
+    )
+
+    assert execution["verdict"] == "target_confirmed", execution["stdout"] + execution["stderr"]
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="未安装 node，跳过 JS Harness 执行")
