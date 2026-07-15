@@ -1413,8 +1413,8 @@ def test_isolated_compose_hardens_selected_web_service_without_restricting_datab
     runner._cleanup()
 
 
-def test_isolated_compose_removes_baked_source_bind_without_masking_runtime_or_named_storage(tmp_path):
-    """A local-build source bind must not hide image-installed dependencies at runtime."""
+def test_isolated_compose_bakes_source_and_layers_disposable_dependencies(tmp_path):
+    """A source bind is baked while dependency mounts become disposable image layers."""
     import yaml
 
     (tmp_path / "Dockerfile").write_text(
@@ -1430,6 +1430,7 @@ def test_isolated_compose_removes_baked_source_bind_without_masking_runtime_or_n
         "    volumes:\n"
         "      - .:/app\n"
         "      - app_node_modules:/app/node_modules\n"
+        "      - app_python_env:/app/.venv\n"
         "      - ./runtime:/app/runtime\n"
         "  db:\n"
         "    image: mysql:8\n"
@@ -1439,6 +1440,7 @@ def test_isolated_compose_removes_baked_source_bind_without_masking_runtime_or_n
         "        target: /var/lib/mysql\n"
         "volumes:\n"
         "  app_node_modules: {}\n"
+        "  app_python_env: {}\n"
         "  db_data: {}\n",
         encoding="utf-8",
     )
@@ -1447,37 +1449,81 @@ def test_isolated_compose_removes_baked_source_bind_without_masking_runtime_or_n
     generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
     services = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]
 
+    derived = tmp_path / services["app"]["build"]["dockerfile"]
     assert services["app"]["volumes"] == [
-        "app_node_modules:/app/node_modules",
+        "/app/node_modules",
+        "/app/.venv",
         "./runtime:/app/runtime",
     ]
     assert services["db"]["volumes"] == [{
         "type": "volume", "source": "db_data", "target": "/var/lib/mysql",
     }]
-    assert any("removed baked source bind mounts: app:/app" in item
+    derived_text = derived.read_text(encoding="utf-8")
+    assert 'COPY [".", "/app/"]' in derived_text
+    assert "/opt/auditagentx-dependencies" in derived_text
+    assert any("baked source layers: app:/app" in item
                for item in runner.metadata["diagnostics"])
     runner._cleanup()
+    assert not derived.exists()
 
 
-def test_isolated_compose_leaves_source_binds_for_prebuilt_images_unchanged(tmp_path):
-    """Without a local build, the image may rely on its declared bind and is not rewritten."""
+def test_isolated_compose_bakes_entrypoint_available_only_from_source_bind(tmp_path):
+    """A derived image retains an entrypoint that the original dev image expected by bind."""
     import yaml
 
+    (tmp_path / "entrypoint-dev.sh").write_text("#!/bin/sh\nexec node app.js\n", encoding="utf-8")
+    (tmp_path / "Dockerfile-dev").write_text(
+        "FROM node:20-slim\nWORKDIR /app\nRUN npm install express\n"
+        'ENTRYPOINT ["/app/entrypoint-dev.sh"]\n',
+        encoding="utf-8",
+    )
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n"
         "  app:\n"
-        "    image: example/app\n"
-        "    working_dir: /app\n"
+        "    build:\n"
+        "      context: .\n"
+        "      dockerfile: Dockerfile-dev\n"
         "    ports: ['9090:9090']\n"
         "    volumes: ['.:/app']\n",
         encoding="utf-8",
     )
 
-    runner = DockerProjectRunner(tmp_path, {}, scan_id="prebuilt-source-bind")
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="bind-only-entrypoint")
     generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
     app = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]["app"]
 
-    assert app["volumes"] == [".:/app"]
+    derived = tmp_path / app["build"]["dockerfile"]
+    assert "volumes" not in app
+    assert 'COPY [".", "/app/"]' in derived.read_text(encoding="utf-8")
+    runner._cleanup()
+
+
+def test_isolated_compose_leaves_normal_baked_source_build_unchanged(tmp_path):
+    """A build with no source bind needs neither a derived Dockerfile nor dependency mount rewrite."""
+    import yaml
+
+    (tmp_path / "Dockerfile").write_text(
+        "FROM node:20-slim\nWORKDIR /app\nCOPY package.json ./\nRUN npm install\nCOPY . .\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    ports: ['9090:9090']\n"
+        "    volumes: ['app_data:/app/data']\n"
+        "volumes:\n"
+        "  app_data: {}\n",
+        encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="normal-baked-source")
+    generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
+    app = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]["app"]
+
+    assert app["build"] == "."
+    assert app["volumes"] == ["app_data:/app/data"]
+    assert not any("baked source layers:" in item for item in runner.metadata["diagnostics"])
     runner._cleanup()
 
 

@@ -17,6 +17,7 @@ import os
 import posixpath
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -137,6 +138,9 @@ _SQLITE_SOURCE_SUFFIXES = frozenset({
 })
 _SQLITE_SOURCE_FILE_LIMIT = 2000
 _SQLITE_SOURCE_FILE_BYTES = 512 * 1024
+_SOURCE_LAYER_DEPENDENCY_DIRS = (
+    "node_modules", ".venv", "venv", "env", "__pypackages__",
+)
 
 
 def _dockerfile_base_images(path: Path) -> list[str]:
@@ -1376,7 +1380,7 @@ class DockerProjectRunner:
                     self.metadata["diagnostics"].append("removed fixed Compose network name")
 
         services[web_service]["ports"] = [f"127.0.0.1::{target_port}"]
-        self._remove_baked_source_bind_mounts(services, source.parent)
+        self._layer_compose_source_and_dependencies(services, source.parent)
         self._harden_isolated_compose_services(services, web_service, source.parent)
         suffix = re.sub(r"[^a-z0-9]", "", self.scan_id.lower())[:12] or "scan"
         generated_name = f"docker-compose.auditagentx.{suffix}.yml"
@@ -1454,19 +1458,23 @@ class DockerProjectRunner:
             f"generated deterministic Node 8 nodemon compatibility Dockerfile for {web_service}"
         )
 
-    def _remove_baked_source_bind_mounts(self, services: dict, compose_dir: Path) -> None:
-        """Remove source-tree binds that would mask a locally built application's files.
+    def _layer_compose_source_and_dependencies(self, services: dict, compose_dir: Path) -> None:
+        """Bake source binds into a derived image without allowing host dependencies to win.
 
-        The generated Compose file belongs to this scan and builds local ``build``
-        contexts before starting services.  Re-mounting that same context over its
-        resolved application directory replaces image-installed dependencies (for
-        example, ``node_modules``) with the host checkout.  Only remove a bind when
-        both facts are statically proven: its source overlaps the local build context
-        and its target covers the service's configured or Dockerfile ``WORKDIR``.
-        Named volumes and descendant bind mounts remain available for databases and
-        runtime storage.
+        Dev Compose files commonly mount a checkout over ``WORKDIR``.  Removing that
+        bind outright breaks images whose entrypoint or application files exist only
+        in the checkout; retaining it masks dependencies installed during ``build``.
+        For a statically resolvable local build, append a per-scan Dockerfile that
+        stages image dependency directories, copies the bound source, then restores
+        those directories.  The bind can then be removed.  Any explicitly mounted
+        app dependency directory is replaced with an anonymous volume, while named
+        database/data mounts are untouched.  If the source cannot be copied from the
+        declared build context, retain it read-only rather than guessing a wider
+        context, but still isolate its declared dependency mounts.
         """
-        removed: list[str] = []
+        baked: list[str] = []
+        read_only: list[str] = []
+        disposable_dependencies: list[str] = []
         for name, service in services.items():
             if not isinstance(service, dict):
                 continue
@@ -1476,24 +1484,128 @@ class DockerProjectRunner:
             if build_context is None or app_root is None or not isinstance(volumes, list):
                 continue
 
-            retained = []
-            for volume in volumes:
+            source_layers: list[tuple[int, str, str]] = []
+            for index, volume in enumerate(volumes):
                 source, target = self._compose_bind_source_and_target(volume)
                 source_path = self._safe_project_relative_path(source, compose_dir) if source else None
                 if (source_path and self._paths_overlap(source_path, build_context) and target
                         and self._container_directory_covers(target, app_root)):
-                    removed.append(f"{name}:{target}")
+                    try:
+                        relative_source = source_path.relative_to(build_context).as_posix() or "."
+                    except ValueError:
+                        relative_source = ""
+                    source_layers.append((index, relative_source, target))
+            if not source_layers:
+                continue
+
+            bakeable = all(relative_source for _, relative_source, _ in source_layers)
+            source_indexes = {index for index, _, _ in source_layers}
+            retained: list = []
+            dependency_targets: set[str] = set()
+            for index, volume in enumerate(volumes):
+                if index in source_indexes and bakeable:
+                    continue
+                if index in source_indexes:
+                    source, target = self._compose_bind_source_and_target(volume)
+                    retained.append(self._read_only_source_bind(source, target, volume))
+                    read_only.append(f"{name}:{target}")
+                    continue
+                target = self._compose_volume_target(volume)
+                if target and self._is_app_dependency_directory(target, app_root):
+                    if target not in dependency_targets:
+                        retained.append(target)  # Compose target-only syntax => disposable anonymous volume.
+                        dependency_targets.add(target)
+                        disposable_dependencies.append(f"{name}:{target}")
                     continue
                 retained.append(volume)
-            if len(retained) != len(volumes):
-                if retained:
-                    service["volumes"] = retained
-                else:
-                    service.pop("volumes", None)
-        if removed:
+
+            if bakeable:
+                self._derive_source_layer_image(service, build_context, app_root, source_layers)
+                baked.extend(f"{name}:{target}" for _, _, target in source_layers)
+            if retained:
+                service["volumes"] = retained
+            else:
+                service.pop("volumes", None)
+        if baked:
             self.metadata["diagnostics"].append(
-                "isolated compose removed baked source bind mounts: " + ", ".join(removed)
+                "isolated compose baked source layers: " + ", ".join(baked)
             )
+        if read_only:
+            self.metadata["diagnostics"].append(
+                "isolated compose retained read-only source layers: " + ", ".join(read_only)
+            )
+        if disposable_dependencies:
+            self.metadata["diagnostics"].append(
+                "isolated compose replaced dependency mounts with disposable volumes: "
+                + ", ".join(disposable_dependencies)
+            )
+
+    def _derive_source_layer_image(self, service: dict, build_context: Path, app_root: str,
+                                   source_layers: list[tuple[int, str, str]]) -> None:
+        """Point one Compose build at a temporary Dockerfile with a controlled source layer."""
+        build = service.get("build")
+        dockerfile_value = "Dockerfile" if isinstance(build, str) else build.get("dockerfile") or "Dockerfile"
+        dockerfile = self._safe_project_relative_path(dockerfile_value, build_context)
+        if dockerfile is None:
+            raise RuntimeError("无法为 Compose 源码层解析 Dockerfile")
+        try:
+            original = dockerfile.read_text(encoding="utf-8", errors="ignore")
+            dockerfile.relative_to(build_context)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("无法为 Compose 源码层读取 Dockerfile") from exc
+
+        suffix = re.sub(r"[^a-z0-9]", "", self.scan_id.lower())[:12] or "scan"
+        derived = dockerfile.with_name(f"{dockerfile.name}.auditagentx.{suffix}.source")
+        index = 1
+        while derived.exists():
+            index += 1
+            derived = dockerfile.with_name(f"{dockerfile.name}.auditagentx.{suffix}.source.{index}")
+        derived.write_text(
+            original.rstrip() + "\n\n" + self._source_layer_dockerfile_appendix(app_root, source_layers),
+            encoding="utf-8",
+        )
+        self._generated_compat_dockerfiles.append(derived)
+        build_config = {"context": build} if isinstance(build, str) else dict(build)
+        build_config["dockerfile"] = derived.relative_to(build_context).as_posix()
+        service["build"] = build_config
+
+    @staticmethod
+    def _source_layer_dockerfile_appendix(app_root: str,
+                                          source_layers: list[tuple[int, str, str]]) -> str:
+        """Stage image dependencies around source COPY instructions in the final image stage."""
+        quoted_root = shlex.quote(app_root)
+        staged_root = "/opt/auditagentx-dependencies"
+        dependency_names = " ".join(_SOURCE_LAYER_DEPENDENCY_DIRS)
+        copy_lines = "".join(
+            f"COPY {_json.dumps([relative_source, target.rstrip('/') + '/'])}\n"
+            for _, relative_source, target in source_layers
+        )
+        return (
+            "# AuditAgentX isolated source/dependency layer\n"
+            f"RUN set -eu; mkdir -p {staged_root}; for dep in {dependency_names}; do "
+            f"if [ -e {quoted_root}/$dep ]; then cp -a {quoted_root}/$dep {staged_root}/$dep; fi; done\n"
+            + copy_lines
+            + f"RUN set -eu; for dep in {dependency_names}; do rm -rf {quoted_root}/$dep; "
+            f"if [ -e {staged_root}/$dep ]; then cp -a {staged_root}/$dep {quoted_root}/$dep; fi; "
+            f"done; rm -rf {staged_root}\n"
+        )
+
+    @staticmethod
+    def _is_app_dependency_directory(target: str, app_root: str) -> bool:
+        """Return whether a mount overlays a conventional dependency directory under the app."""
+        try:
+            relative = posixpath.relpath(target, app_root)
+        except ValueError:
+            return False
+        if relative in {".", ".."} or relative.startswith("../"):
+            return False
+        return relative.split("/", 1)[0] in _SOURCE_LAYER_DEPENDENCY_DIRS
+
+    def _read_only_source_bind(self, source: str | None, target: str | None, original):
+        """Return a normalized read-only bind only for the non-bakeable fallback."""
+        if not source or not target:
+            return original
+        return {"type": "bind", "source": source, "target": target, "read_only": True}
 
     @staticmethod
     def _container_directory_covers(mount_target: str, app_root: str) -> bool:
@@ -1747,6 +1859,16 @@ class DockerProjectRunner:
         remaining = raw[len(source):].lstrip(":")
         target = remaining.split(":", 1)[0]
         return source, self._safe_container_directory(target)
+
+    def _compose_volume_target(self, volume) -> str | None:
+        """Return a safe target for either short- or long-syntax service volume."""
+        if isinstance(volume, dict):
+            return self._safe_container_directory(volume.get("target"))
+        raw = str(volume or "")
+        source = _compose_short_volume_source(raw)
+        if source == raw:
+            return self._safe_container_directory(raw) if raw.startswith("/") else None
+        return self._safe_container_directory(raw[len(source):].lstrip(":").split(":", 1)[0])
 
     def _precheck_compose_environment_files(self, services: dict, compose_dir: Path) -> None:
         """Fail closed for missing env files, except one deterministic local DB shape.
