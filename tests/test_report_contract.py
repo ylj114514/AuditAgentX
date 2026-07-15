@@ -78,6 +78,11 @@ def test_structured_reports_preserve_required_dynamic_contract():
     assert ctx["schema_version"] == "1.0.0"
     assert ctx["report"]["id"] == "report-contract"
     assert ctx["report"]["completeness"] == "partial"
+    assert ctx["toc"][0] == {
+        "level": 2, "title": "1. 执行摘要", "anchor": "executive-summary",
+    }
+    assert next(item for item in ctx["toc"] if item["anchor"] == "scope-config")["level"] == 3
+    assert any(item["anchor"] == "finding-details" for item in ctx["toc"])
     assert ctx["metrics"]["by_status"]["confirmed"] == 1
     assert ctx["metrics"]["actionable_total"] == 1
     assert ctx["metrics"]["dynamically_verified"] == 1
@@ -100,6 +105,15 @@ def test_structured_reports_preserve_required_dynamic_contract():
     markdown = report_builder.render_markdown(ctx)
     html = report_builder.render_html(ctx)
     structured = json.loads(json.dumps(ctx, ensure_ascii=False))
+    assert "## 目录" in markdown
+    assert '<ul class="toc"' in markdown
+    assert 'class="toc-level-3"' in markdown
+    assert '<a href="#executive-summary">1. 执行摘要</a>' in markdown
+    assert "### 2.1 审计范围与配置" in markdown
+    assert '<nav class="toc" aria-label="目录">' in html
+    assert 'href="#finding-details"' in html
+    assert 'id="finding-details"' in html
+    assert '<h3 id="scope-config">2.1 审计范围与配置</h3>' in html
     for output in (markdown, html):
         assert "SQL Injection" in output
         assert "cursor.execute" in output

@@ -5,16 +5,27 @@
 {% if report.completeness != "complete" %}> **覆盖警告：本报告完整性为 `{{ report.completeness }}`。请先阅读“限制与覆盖缺口”，不得将本报告解释为全量无遗漏审计。**
 {% endif %}
 
+## 目录
+
+<ul class="toc" style="list-style: disc; padding-left: 22px;">
+{% for item in toc -%}
+  <li class="toc-level-{{ item.level }}"{% if item.level == 3 %} style="margin-left: 28px; font-size: 0.92em;"{% else %} style="font-size: 1.04em; font-weight: 600;"{% endif %}><a href="#{{ item.anchor }}">{{ item.title }}</a></li>
+{% endfor -%}
+</ul>
+
+<a id="executive-summary"></a>
 ## 1. 执行摘要
 
 {{ summary.executive_summary }}
 
 **总体风险等级：{{ summary.overall_risk | upper }}**
 
+<a id="project-summary"></a>
 ### 1.1 项目概况总结
 
 项目 {{ project.name }} 来源于 {{ project.url or project.local_path }}，主要语言为 {{ project.languages | join("、") or "未识别" }}，框架为 {{ project.frameworks | join("、") or "未识别" }}，共 {{ project.file_count }} 个文件、{{ project.loc }} 行代码。
 
+<a id="finding-summary"></a>
 ### 1.2 漏洞结果总结
 
 本次共发现 {{ findings | length }} 条漏洞，其中 Critical {{ stats.critical }} 条、High {{ stats.high }} 条、Medium {{ stats.medium }} 条、Low {{ stats.low }} 条。
@@ -24,6 +35,7 @@
 **动态验证总结：** {{ summary.dynamic_summary }}
 
 {% if summary.dynamic_breakdown %}
+<a id="dynamic-breakdown"></a>
 ### 1.3 动态验证拆解
 
 | 项目 | 值 |
@@ -44,12 +56,14 @@
 
 {% endif %}
 
+<a id="agent-workflow"></a>
 ### 1.4 多智能体工作流
 
 {% for step in summary.workflow_summary or [] %}
 {{ loop.index }}. {{ step }}
 {% endfor %}
 
+<a id="summary-agent-remediation"></a>
 ### 1.5 SummaryAgent 修改建议
 
 | 优先级 | 建议 | 说明 |
@@ -58,6 +72,7 @@
 | {{ item.priority }} | {{ item.title }} | {{ item.detail }} |
 {% endfor %}
 
+<a id="project-overview"></a>
 ## 2. 项目概况
 
 | 项 | 值 |
@@ -72,7 +87,8 @@
 | 报告 ID / Schema | {{ report.id }} / {{ schema_version }} |
 | 完整性 | {{ report.completeness }} |
 
-## 2.1 审计范围与配置
+<a id="scope-config"></a>
+### 2.1 审计范围与配置
 
 | 项目 | 值 |
 |---|---|
@@ -87,7 +103,8 @@
 {% for item in scope.excluded_paths %}- `{{ item.path }}`：{{ item.reason }}
 {% endfor %}{% endif %}
 
-## 2.2 工具执行矩阵
+<a id="tool-matrix"></a>
+### 2.2 工具执行矩阵
 
 | 工具 | 请求 | 状态 | 成功 | Partial | Findings | 原因 |
 |---|---|---|---|---|---:|---|
@@ -95,12 +112,14 @@
 | {{ tool_status.name }} | {{ "是" if tool_status.requested else "否" }} | {{ tool_status.status }} | {{ "是" if tool_status.success else "否" }} | {{ "是" if tool_status.partial_results else "否" }} | {{ tool_status.finding_count or 0 }} | {{ tool_status.error or "-" }} |
 {% endfor %}
 
-## 2.3 限制与覆盖缺口
+<a id="limitations"></a>
+### 2.3 限制与覆盖缺口
 
 {% for item in limitations %}- **{{ item.category }}{% if item.tool %} / {{ item.tool }}{% endif %}：** {{ item.detail }}。影响：{{ item.impact }}
 {% else %}- 未记录到已知覆盖缺口。
 {% endfor %}
 
+<a id="finding-statistics"></a>
 ## 3. 漏洞统计
 
 | 严重级 | 数量 |
@@ -111,6 +130,7 @@
 | Low | {{ stats.low }} |
 | **合计** | **{{ findings | length }}** |
 
+<a id="status-source"></a>
 ### 3.1 状态与来源
 
 **状态分布：** {% for key, value in metrics.by_status.items() %}`{{ key }}`={{ value }}{% if not loop.last %}；{% endif %}{% else %}无{% endfor %}
@@ -120,6 +140,7 @@
 **可行动风险：** {{ metrics.actionable_total }}；**动态确认：** {{ metrics.dynamically_verified }}。
 
 {% if evidence_stats %}
+<a id="evidence-coverage"></a>
 ### 3.2 证据链覆盖概览
 
 | 维度 | 覆盖条数 |
@@ -134,6 +155,7 @@
 > 漏洞按“动态确认 → 严重级 → 置信度”排序，最可信、最严重者优先展示。
 
 {% endif %}
+<a id="finding-details"></a>
 ## 4. 漏洞明细
 
 {% for f in findings %}
@@ -267,23 +289,28 @@
 
 {% endfor %}
 
+<a id="key-risks"></a>
 ## 5. 关键风险
 
 {% for r in summary.key_risks %}- {{ r }}
 {% endfor %}
 
+<a id="remediation"></a>
 ## 6. 修改建议
 
 {% for item in summary.remediation_plan or [] -%}
 - **{{ item.priority }} {{ item.title }}：** {{ item.detail }}
 {% endfor %}
 
+<a id="conclusion"></a>
 ## 7. 结论
 
 {{ summary.conclusion }}
 
+<a id="appendix"></a>
 ## 8. 附录
 
+<a id="finding-index"></a>
 ### 8.1 Finding 索引
 
 | ID | 类型 | 严重度 | 状态 | 位置 |
@@ -292,11 +319,13 @@
 | {{ item.id }} | {{ item.type }} | {{ item.severity }} | {{ item.status }} | `{{ item.file }}:{{ item.line }}` |
 {% endfor %}
 
+<a id="status-glossary"></a>
 ### 8.2 状态术语
 
 {% for key, value in appendices.status_glossary.items() %}- `{{ key }}`：{{ value }}
 {% endfor %}
 
+<a id="redaction-policy"></a>
 ### 8.3 脱敏策略
 
 策略版本 {{ redaction.policy_version }}；已处理：{{ redaction.categories | join("、") }}。

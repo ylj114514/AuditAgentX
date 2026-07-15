@@ -99,6 +99,39 @@ def evidence_stats(findings: list[dict]) -> dict[str, int]:
     return stats
 
 
+def _report_toc(summary: dict, evidence_summary: dict | None = None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = [
+        {"level": 2, "title": "1. 执行摘要", "anchor": "executive-summary"},
+        {"level": 3, "title": "1.1 项目概况总结", "anchor": "project-summary"},
+        {"level": 3, "title": "1.2 漏洞结果总结", "anchor": "finding-summary"},
+    ]
+    if summary.get("dynamic_breakdown"):
+        items.append({"level": 3, "title": "1.3 动态验证拆解", "anchor": "dynamic-breakdown"})
+    items.extend([
+        {"level": 3, "title": "1.4 多智能体工作流", "anchor": "agent-workflow"},
+        {"level": 3, "title": "1.5 SummaryAgent 修改建议", "anchor": "summary-agent-remediation"},
+        {"level": 2, "title": "2. 项目概况", "anchor": "project-overview"},
+        {"level": 3, "title": "2.1 审计范围与配置", "anchor": "scope-config"},
+        {"level": 3, "title": "2.2 工具执行矩阵", "anchor": "tool-matrix"},
+        {"level": 3, "title": "2.3 限制与覆盖缺口", "anchor": "limitations"},
+        {"level": 2, "title": "3. 漏洞统计", "anchor": "finding-statistics"},
+        {"level": 3, "title": "3.1 状态与来源", "anchor": "status-source"},
+    ])
+    if evidence_summary:
+        items.append({"level": 3, "title": "3.2 证据链覆盖概览", "anchor": "evidence-coverage"})
+    items.extend([
+        {"level": 2, "title": "4. 漏洞明细", "anchor": "finding-details"},
+        {"level": 2, "title": "5. 关键风险", "anchor": "key-risks"},
+        {"level": 2, "title": "6. 修改建议", "anchor": "remediation"},
+        {"level": 2, "title": "7. 结论", "anchor": "conclusion"},
+        {"level": 2, "title": "8. 附录", "anchor": "appendix"},
+        {"level": 3, "title": "8.1 Finding 索引", "anchor": "finding-index"},
+        {"level": 3, "title": "8.2 状态术语", "anchor": "status-glossary"},
+        {"level": 3, "title": "8.3 脱敏策略", "anchor": "redaction-policy"},
+    ])
+    return items
+
+
 def build_context(project: dict, scan: dict, findings: list[dict],
                   summary: dict, *, report_id: str | None = None,
                   options: dict[str, Any] | None = None) -> dict:
@@ -168,6 +201,8 @@ def build_context(project: dict, scan: dict, findings: list[dict],
     limitations = _limitations(scan, methodology, scope)
     generated_at = datetime.now(timezone.utc).isoformat()
     completeness = _completeness(scan)
+    severity_summary = severity_stats(ordered)
+    evidence_summary = evidence_stats(ordered)
     return _redact_value({
         "schema_version": REPORT_SCHEMA_VERSION,
         "report": {
@@ -182,11 +217,12 @@ def build_context(project: dict, scan: dict, findings: list[dict],
         "scope": scope,
         "methodology": methodology,
         "findings": ordered,
-        "stats": severity_stats(ordered),
+        "stats": severity_summary,
         "metrics": metrics,
-        "evidence_stats": evidence_stats(ordered),
+        "evidence_stats": evidence_summary,
         "summary": summary,
         "limitations": limitations,
+        "toc": _report_toc(summary, evidence_summary),
         "appendices": {
             "tool_status": methodology["tools"],
             "finding_index": [
