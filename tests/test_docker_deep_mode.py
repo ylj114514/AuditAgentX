@@ -1413,6 +1413,74 @@ def test_isolated_compose_hardens_selected_web_service_without_restricting_datab
     runner._cleanup()
 
 
+def test_isolated_compose_removes_baked_source_bind_without_masking_runtime_or_named_storage(tmp_path):
+    """A local-build source bind must not hide image-installed dependencies at runtime."""
+    import yaml
+
+    (tmp_path / "Dockerfile").write_text(
+        "FROM node:8\nWORKDIR /app\nCOPY package.json ./\nRUN npm install\nCOPY . .\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    ports: ['9090:9090']\n"
+        "    depends_on: [db]\n"
+        "    volumes:\n"
+        "      - .:/app\n"
+        "      - app_node_modules:/app/node_modules\n"
+        "      - ./runtime:/app/runtime\n"
+        "  db:\n"
+        "    image: mysql:8\n"
+        "    volumes:\n"
+        "      - type: volume\n"
+        "        source: db_data\n"
+        "        target: /var/lib/mysql\n"
+        "volumes:\n"
+        "  app_node_modules: {}\n"
+        "  db_data: {}\n",
+        encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="source-bind-mask")
+    generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
+    services = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]
+
+    assert services["app"]["volumes"] == [
+        "app_node_modules:/app/node_modules",
+        "./runtime:/app/runtime",
+    ]
+    assert services["db"]["volumes"] == [{
+        "type": "volume", "source": "db_data", "target": "/var/lib/mysql",
+    }]
+    assert any("removed baked source bind mounts: app:/app" in item
+               for item in runner.metadata["diagnostics"])
+    runner._cleanup()
+
+
+def test_isolated_compose_leaves_source_binds_for_prebuilt_images_unchanged(tmp_path):
+    """Without a local build, the image may rely on its declared bind and is not rewritten."""
+    import yaml
+
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    image: example/app\n"
+        "    working_dir: /app\n"
+        "    ports: ['9090:9090']\n"
+        "    volumes: ['.:/app']\n",
+        encoding="utf-8",
+    )
+
+    runner = DockerProjectRunner(tmp_path, {}, scan_id="prebuilt-source-bind")
+    generated = tmp_path / runner._prepare_isolated_compose("docker-compose.yml", None)
+    app = yaml.safe_load(generated.read_text(encoding="utf-8"))["services"]["app"]
+
+    assert app["volumes"] == [".:/app"]
+    runner._cleanup()
+
+
 def test_isolated_compose_mounts_declared_relative_sqlite_storage_on_tmpfs(tmp_path):
     """A declared project-relative SQLite directory stays writable per scan."""
     (tmp_path / "Dockerfile").write_text(

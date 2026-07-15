@@ -1376,6 +1376,7 @@ class DockerProjectRunner:
                     self.metadata["diagnostics"].append("removed fixed Compose network name")
 
         services[web_service]["ports"] = [f"127.0.0.1::{target_port}"]
+        self._remove_baked_source_bind_mounts(services, source.parent)
         self._harden_isolated_compose_services(services, web_service, source.parent)
         suffix = re.sub(r"[^a-z0-9]", "", self.scan_id.lower())[:12] or "scan"
         generated_name = f"docker-compose.auditagentx.{suffix}.yml"
@@ -1452,6 +1453,67 @@ class DockerProjectRunner:
         self.metadata["diagnostics"].append(
             f"generated deterministic Node 8 nodemon compatibility Dockerfile for {web_service}"
         )
+
+    def _remove_baked_source_bind_mounts(self, services: dict, compose_dir: Path) -> None:
+        """Remove source-tree binds that would mask a locally built application's files.
+
+        The generated Compose file belongs to this scan and builds local ``build``
+        contexts before starting services.  Re-mounting that same context over its
+        resolved application directory replaces image-installed dependencies (for
+        example, ``node_modules``) with the host checkout.  Only remove a bind when
+        both facts are statically proven: its source overlaps the local build context
+        and its target covers the service's configured or Dockerfile ``WORKDIR``.
+        Named volumes and descendant bind mounts remain available for databases and
+        runtime storage.
+        """
+        removed: list[str] = []
+        for name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            build_context = self._compose_service_build_context(service, compose_dir)
+            app_root = self._compose_baked_service_app_root(service, compose_dir)
+            volumes = service.get("volumes")
+            if build_context is None or app_root is None or not isinstance(volumes, list):
+                continue
+
+            retained = []
+            for volume in volumes:
+                source, target = self._compose_bind_source_and_target(volume)
+                source_path = self._safe_project_relative_path(source, compose_dir) if source else None
+                if (source_path and self._paths_overlap(source_path, build_context) and target
+                        and self._container_directory_covers(target, app_root)):
+                    removed.append(f"{name}:{target}")
+                    continue
+                retained.append(volume)
+            if len(retained) != len(volumes):
+                if retained:
+                    service["volumes"] = retained
+                else:
+                    service.pop("volumes", None)
+        if removed:
+            self.metadata["diagnostics"].append(
+                "isolated compose removed baked source bind mounts: " + ", ".join(removed)
+            )
+
+    @staticmethod
+    def _container_directory_covers(mount_target: str, app_root: str) -> bool:
+        """Return whether a mount target overlays the application working directory."""
+        return mount_target == "/" or app_root == mount_target or app_root.startswith(
+            mount_target.rstrip("/") + "/"
+        )
+
+    @staticmethod
+    def _paths_overlap(first: Path, second: Path) -> bool:
+        """Return whether either project-local path contains the other."""
+        try:
+            first.relative_to(second)
+            return True
+        except ValueError:
+            try:
+                second.relative_to(first)
+                return True
+            except ValueError:
+                return False
 
     def _harden_isolated_compose_services(self, services: dict, web_service: str,
                                           compose_dir: Path) -> None:
@@ -1583,9 +1645,9 @@ class DockerProjectRunner:
 
     def _compose_service_app_root(self, service: dict, compose_dir: Path) -> str | None:
         """Resolve a static in-container application root without trusting host paths."""
-        configured = self._safe_container_directory(service.get("working_dir"))
-        if configured:
-            return configured
+        baked_root = self._compose_baked_service_app_root(service, compose_dir)
+        if baked_root:
+            return baked_root
 
         for volume in service.get("volumes") or []:
             source, target = self._compose_bind_source_and_target(volume)
@@ -1595,17 +1657,22 @@ class DockerProjectRunner:
             if candidate == self.code_root:
                 return target
 
-        build = service.get("build")
-        if isinstance(build, str):
-            context_value, dockerfile_value = build, "Dockerfile"
-        elif isinstance(build, dict):
-            context_value = build.get("context", ".")
-            dockerfile_value = build.get("dockerfile") or "Dockerfile"
-        else:
-            return None
-        context = self._safe_project_relative_path(context_value, compose_dir)
+        return None
+
+    def _compose_baked_service_app_root(self, service: dict, compose_dir: Path) -> str | None:
+        """Resolve an app root declared by the service or its locally built Dockerfile."""
+        configured = self._safe_container_directory(service.get("working_dir"))
+        if configured:
+            return configured
+
+        context = self._compose_service_build_context(service, compose_dir)
         if context is None:
             return None
+        build = service.get("build")
+        dockerfile_value = (
+            "Dockerfile" if isinstance(build, str)
+            else build.get("dockerfile") or "Dockerfile"
+        )
         dockerfile = self._safe_project_relative_path(dockerfile_value, context)
         if dockerfile is None:
             return None
@@ -1629,6 +1696,18 @@ class DockerProjectRunner:
             if workdir is None:
                 return None
         return workdir
+
+    def _compose_service_build_context(self, service: dict, compose_dir: Path) -> Path | None:
+        """Return a local build context only when it resolves inside this scan's source tree."""
+        build = service.get("build")
+        if isinstance(build, str):
+            context_value = build
+        elif isinstance(build, dict):
+            context_value = build.get("context", ".")
+        else:
+            return None
+        context = self._safe_project_relative_path(context_value, compose_dir)
+        return context
 
     def _safe_project_relative_path(self, value, base: Path) -> Path | None:
         raw = str(value or "").strip()
