@@ -25,7 +25,7 @@ class BanditScanner(BaseScanner):
         except json.JSONDecodeError as exc:
             raise RuntimeError("bandit did not produce valid JSON") from exc
         if proc.returncode not in (0, 1) and not data.get("results"):
-            raise RuntimeError(f"bandit failed with exit={proc.returncode}: {(proc.stderr or '')[:300]}")
+            raise RuntimeError(f"bandit failed with exit={proc.returncode}: {(proc.stderr or '')[:1000]}")
         for r in data.get("results", []):
             filename = r.get("filename", "")
             line = r.get("line_number", 0)

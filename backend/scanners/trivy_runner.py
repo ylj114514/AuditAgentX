@@ -76,7 +76,7 @@ class TrivyScanner(BaseScanner):
         try:
             proc = self._exec(cmd, timeout=1200, env={"TRIVY_DISABLE_VEX_NOTICE": "true"})
             if proc.returncode != 0:
-                raise RuntimeError(f"trivy failed with exit={proc.returncode}: {(proc.stderr or '')[:300]}")
+                raise RuntimeError(f"trivy failed with exit={proc.returncode}: {(proc.stderr or '')[:1000]}")
             try:
                 raw_json = proc.stdout if use_docker else report.read_text(encoding="utf-8")
                 data = json.loads(raw_json or "{}")

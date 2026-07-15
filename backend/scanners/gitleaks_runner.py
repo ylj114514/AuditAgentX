@@ -63,7 +63,7 @@ class GitleaksScanner(BaseScanner):
             report_text = Path(report_path).read_text(encoding="utf-8")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"gitleaks failed with exit={proc.returncode}: {(proc.stderr or '')[:300]}"
+                    f"gitleaks failed with exit={proc.returncode}: {(proc.stderr or '')[:1000]}"
                 )
             if not report_text.strip():
                 raise RuntimeError("gitleaks produced an empty JSON report")

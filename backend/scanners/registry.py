@@ -105,7 +105,7 @@ def _format_scanner_error(tool: str, exc: Exception) -> str:
         return f"{tool} timed out after {tail}"
     if text.startswith("Command '['"):
         return f"{tool} subprocess failed; see backend logs for command details"
-    return text[:300]
+    return text[:1000]
 
 
 def run_scanner_tool(tool: str, target: Path, *, max_files: int = 20000,

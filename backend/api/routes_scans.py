@@ -369,7 +369,7 @@ def _terminal_state_from_scan(scan: Scan) -> tuple[str, str, str | None]:
         for item in scanner_failures
     )
     return "partial_completed", "finished_with_tool_failures", (
-        f"部分扫描器未完整执行: {summary}"[:1000]
+        f"部分扫描器未完整执行: {summary}"[:4000]
     )
 
 

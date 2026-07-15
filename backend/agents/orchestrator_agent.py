@@ -168,7 +168,7 @@ class OrchestratorAgent:
                         f"{item.get('tool')}: {item.get('error') or ('partial results' if item.get('partial_results') else 'failed')}"
                         for item in scanner_failures
                     )
-                    self.scan.error = f"部分扫描器未完整执行: {summary}"[:1000]
+                    self.scan.error = f"部分扫描器未完整执行: {summary}"[:4000]
                 self.scan.finished_at = datetime.utcnow()
                 self._raise_if_cancelled_locked()
                 self.db.commit()

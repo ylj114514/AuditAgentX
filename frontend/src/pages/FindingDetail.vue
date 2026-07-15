@@ -100,9 +100,11 @@
               </ol>
             </div>
 
-            <div v-if="evidence?.knowledge?.references?.length" class="tool-call-list">
+            <div v-if="evidence?.knowledge?.references?.length" class="flow-block reference-flow">
               <h3>知识来源</h3>
-              <p v-for="(ref, index) in evidence.knowledge.references" :key="`ref-${index}`"><code>{{ ref }}</code></p>
+              <ol>
+                <li v-for="(ref, index) in evidence.knowledge.references" :key="`ref-${index}`">{{ ref }}</li>
+              </ol>
             </div>
 
             <div v-if="evidence?.knowledge?.retrieval" class="tool-call-list">
@@ -119,7 +121,13 @@
             <el-input v-model="verifyForm.endpoints" placeholder="/user,/search" />
             <el-button type="primary" :loading="verifying" @click="runVerify">执行动态验证</el-button>
           </div>
-          <el-alert type="warning" show-icon :closable="false" title="动态验证仅限本地授权靶场，不要对真实第三方系统使用。" />
+          <el-alert
+            type="warning"
+            show-icon
+            :closable="false"
+            title="动态验证仅限本地授权靶场，不要对真实第三方系统使用。"
+            class="dynamic-warning-alert"
+          />
 
           <el-descriptions v-if="evidence?.sandbox" :column="2" border class="evidence-desc" title="Docker 沙箱环境">
             <el-descriptions-item label="沙箱模式">{{ evidence.sandbox.mode || "N/A" }}</el-descriptions-item>
@@ -134,7 +142,7 @@
             <el-descriptions-item label="容器动作">
               构建 {{ evidence.sandbox.image_build_attempted ? "已尝试" : "未尝试" }} / 启动 {{ evidence.sandbox.container_start_attempted ? "已尝试" : "未尝试" }}
             </el-descriptions-item>
-            <el-descriptions-item label="启动命令" :span="2"><code>{{ evidence.sandbox.launch_command || "N/A" }}</code></el-descriptions-item>
+            <el-descriptions-item label="启动命令" :span="2"><span class="desc-text">{{ evidence.sandbox.launch_command || "N/A" }}</span></el-descriptions-item>
             <el-descriptions-item label="诊断" :span="2">{{ sandboxReason(evidence.sandbox, evidence.runtime) }}</el-descriptions-item>
             <el-descriptions-item label="容器日志摘要" :span="2"><pre class="mini-pre">{{ evidence.sandbox.logs_excerpt || "N/A" }}</pre></el-descriptions-item>
           </el-descriptions>
@@ -155,8 +163,8 @@
             <el-descriptions-item label="状态码">{{ evidence.runtime.response_status || "N/A" }}</el-descriptions-item>
             <el-descriptions-item label="原因" :span="2">{{ evidence.runtime.reason || "N/A" }}</el-descriptions-item>
             <el-descriptions-item v-if="evidence.runtime.candidate_endpoints?.length" label="候选入口" :span="2">{{ evidence.runtime.candidate_endpoints.join(", ") }}</el-descriptions-item>
-            <el-descriptions-item label="Payload" :span="2"><code>{{ evidence.runtime.request?.payload || "N/A" }}</code></el-descriptions-item>
-            <el-descriptions-item label="响应摘要" :span="2"><pre class="mini-pre">{{ evidence.runtime.response_excerpt || "N/A" }}</pre></el-descriptions-item>
+            <el-descriptions-item label="Payload" :span="2"><span class="desc-text">{{ evidence.runtime.request?.payload || "N/A" }}</span></el-descriptions-item>
+            <el-descriptions-item label="响应摘要" :span="2"><div class="desc-text desc-text-block">{{ evidence.runtime.response_excerpt || "N/A" }}</div></el-descriptions-item>
           </el-descriptions>
           <div v-if="evidence?.runtime?.evidence_flow?.length" class="flow-block">
             <h3>动态证据流</h3>
@@ -681,6 +689,19 @@ onMounted(load);
 .tab-intro p { color: #667085; margin: 6px 0 0; }
 .code-block { background: #0b1220; color: #d7e3f1; padding: 16px; border-radius: 14px; overflow: auto; border: 1px solid rgba(255,255,255,.08); max-height: 520px; }
 .mini-pre { margin: 0; padding: 12px; background: #f5f8fc; border: 1px solid #e4ebf3; border-radius: 10px; overflow: auto; max-height: 360px; }
+.desc-text {
+  color: #475467;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.desc-text-block {
+  display: block;
+  max-height: 220px;
+  overflow: auto;
+}
 .evidence-desc { margin-top: 16px; }
 .harness-block { margin-top: 20px; }
 .harness-block h3 { margin: 0 0 4px; color: #162235; }
@@ -716,11 +737,18 @@ onMounted(load);
 .knowledge-block { display: grid; gap: 16px; }
 .warning-flow { border-color: #f59e0b; background: #fffbeb; }
 .fix-flow { border-color: #10b981; background: #f0fdf4; }
+.reference-flow { border-color: #93c5fd; background: #eff6ff; }
 .tool-call-list { display: grid; gap: 12px; }
 .tool-call-list h3 { margin: 0; color: #162235; }
 .tool-call-card { border: 1px solid #dce6f0; border-radius: 14px; padding: 14px; background: linear-gradient(180deg, #fff, #fbfdff); box-shadow: 0 8px 22px rgba(16,32,51,.04); }
 .tool-call-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
-.verify-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; margin-bottom: 14px; }
+.verify-panel { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+.verify-panel :deep(.el-input) { width: 260px; max-width: 100%; }
+.dynamic-warning-alert {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 560px;
+}
 .exploit-block { display: grid; gap: 16px; }
 .attack-plan-banner { display: flex; align-items: center; gap: 10px; padding: 11px 13px; color: #40536a; background: #eef5fb; border-left: 3px solid #2f80ed; border-radius: 8px; font-size: 13px; line-height: 1.55; }
 .attack-payloads { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; color: #526477; font-size: 13px; }

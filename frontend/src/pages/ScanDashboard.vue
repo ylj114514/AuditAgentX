@@ -52,8 +52,14 @@
     </el-card>
 
     <div v-if="status" class="summary-grid">
-      <el-card shadow="never" class="summary-card">
-        <span>任务状态</span><strong><el-tag :type="statusTagType(status.status)">{{ statusLabel(status.status) }}</el-tag></strong><small>{{ status.current_stage || "等待阶段信息" }}</small>
+      <el-card shadow="never" class="summary-card task-status-card">
+        <span>任务状态</span>
+        <strong class="task-status-value">
+          <el-tag class="task-status-tag" :type="statusTagType(status.status)">
+            {{ statusLabel(status.status) }}
+          </el-tag>
+        </strong>
+        <small>{{ status.current_stage || "等待阶段信息" }}</small>
       </el-card>
       <el-card shadow="never" class="summary-card">
         <span>扫描进度</span><strong>{{ status.progress }}%</strong><el-progress :percentage="status.progress" :show-text="false" />
@@ -71,8 +77,10 @@
       <el-card shadow="never" class="summary-card">
         <span>可处置漏洞</span><strong>{{ actionableFindings.length }}</strong><small>高危 {{ highCount }} / 已验证 {{ verifiedCount }} / 非处置结果 {{ informationalCount }}</small>
       </el-card>
-      <el-card shadow="never" class="summary-card">
-        <span>报告</span><strong>HTML</strong><el-button text type="primary" @click="genReport">生成报告</el-button>
+      <el-card shadow="never" class="summary-card report-summary-card">
+        <span>报告</span>
+        <strong style="font-size: 20px">HTML / Markdown / JSON / PDF</strong>
+        <el-button type="primary" plain class="report-export-button" @click="openReportExport">报告导出</el-button>
       </el-card>
     </div>
 
@@ -156,7 +164,7 @@
       show-icon
       :closable="false"
       class="error-alert"
-      :title="status.error || '扫描已部分完成（partial_completed）：部分阶段被跳过或未产出完整结果，以下为已获得的结果。'"
+      :title="partialCompletedMessage"
     />
 
     <el-alert
@@ -200,7 +208,7 @@
       </template>
     </el-alert>
 
-    <el-card v-if="status" shadow="never" class="tabs-card">
+    <el-card v-if="status" ref="tabsCardRef" shadow="never" class="tabs-card">
       <el-tabs v-model="activeTab">
         <el-tab-pane label="静态分析" name="static">
           <div class="tab-intro">
@@ -285,9 +293,12 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="证据等级" min-width="160">
+            <el-table-column label="证据等级" min-width="220">
               <template #default="scope">
-                <el-tag :type="evidenceLevelMeta(scope.row.verification, scope.row).tone">
+                <el-tag
+                  class="evidence-level-tag"
+                  :type="evidenceLevelMeta(scope.row.verification, scope.row).tone"
+                >
                   {{ evidenceLevelMeta(scope.row.verification, scope.row).label }}
                 </el-tag>
               </template>
@@ -401,8 +412,10 @@
             <el-select v-model="agentFilters.messageType" clearable filterable placeholder="按消息类型过滤">
               <el-option v-for="item in agentMessageTypeOptions" :key="item" :label="item" :value="item" />
             </el-select>
-            <el-checkbox v-model="agentFilters.onlyProblems">只看异常 / 待复核</el-checkbox>
-            <el-checkbox v-model="agentFilters.collapse">折叠重复 Verify 消息</el-checkbox>
+            <div class="agent-filter-checks">
+              <el-checkbox v-model="agentFilters.onlyProblems">只看异常 / 待复核</el-checkbox>
+              <el-checkbox v-model="agentFilters.collapse">折叠重复 Verify 消息</el-checkbox>
+            </div>
           </div>
           <div class="agent-stats">
             <el-tag size="small" type="info">原始 {{ agentMessages.length }}</el-tag>
@@ -492,10 +505,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { FindingApi, ProjectApi, ReportApi, ScanApi } from "../api";
+import { FindingApi, ProjectApi, ScanApi } from "../api";
 import { readHistory, upsertHistory, type AuditHistoryRecord } from "../api/history";
 import {
   evidenceLevelMeta,
@@ -531,6 +544,7 @@ const evidenceLoaded = ref(false);
 const agentMessagesLoading = ref(false);
 const agentMessagesLoaded = ref(false);
 const status = ref<any>(null);
+const tabsCardRef = ref<any>(null);
 const findings = ref<any[]>([]);
 const evidenceMap = ref<Record<string, any>>({});
 const agentMessages = ref<any[]>([]);
@@ -681,6 +695,19 @@ const exploitGroups = computed(() => {
 
 const stageDetail = computed<Record<string, any>>(() => status.value?.stage_detail || {});
 const scannerStatuses = computed<any[]>(() => stageDetail.value.scanner_status || []);
+const partialCompletedMessage = computed(() => {
+  const scannerMessages = scannerStatuses.value
+    .filter((row) => row && (row.partial_results || row.success === false))
+    .map((row) => {
+      const tool = String(row.tool || "unknown");
+      const reason = row.error || (row.partial_results ? "partial results" : "failed");
+      return `${tool}: ${reason}`;
+    });
+  if (scannerMessages.length) {
+    return `部分扫描器未完整执行: ${scannerMessages.join("；")}`;
+  }
+  return status.value?.error || "扫描已部分完成（partial_completed）：部分阶段被跳过或未产出完整结果，以下为已获得的结果。";
+});
 function scannerCoverageGaps(row: any): any[] {
   const workspace = Array.isArray(row?.workspace?.coverage_missing_files)
     ? row.workspace.coverage_missing_files : [];
@@ -1217,18 +1244,12 @@ async function ensureAgentMessagesLoaded() {
   }
 }
 
-async function genReport() {
+function openReportExport() {
   if (!scanId.value) {
     ElMessage.warning("请先查询一个扫描任务");
     return;
   }
-  try {
-    const { data } = await ReportApi.create({ scan_id: scanId.value, format: "html" });
-    window.open(ReportApi.download(data.report_id));
-    ElMessage.success("报告已生成");
-  } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || error?.message || "报告生成失败");
-  }
+  router.push(`/reports/${encodeURIComponent(scanId.value)}`);
 }
 
 function querySearch(queryString: string, cb: (items: SearchSuggestion[]) => void) {
@@ -1553,7 +1574,16 @@ async function mapLimit<T, R>(items: T[], limit: number, mapper: (item: T) => Pr
   return results;
 }
 
+function scrollTabsCardIntoView() {
+  const element = tabsCardRef.value?.$el || tabsCardRef.value;
+  if (!(element instanceof HTMLElement)) return;
+  const top = element.getBoundingClientRect().top + window.scrollY - 12;
+  window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+}
+
 watch(activeTab, async (tab) => {
+  await nextTick();
+  scrollTabsCardIntoView();
   if (tab === "dynamic" || tab === "exploit") {
     await ensureEvidenceLoaded();
   }
@@ -1566,6 +1596,13 @@ watch(activeTab, async (tab) => {
 });
 
 watch(pageSize, () => { currentPage.value = 1; });
+
+watch(() => route.query.scanId, (newId) => {
+  if (newId && newId !== scanId.value) {
+    searchText.value = newId as string;
+    loadByScanId(newId as string);
+  }
+});
 
 onMounted(() => {
   refreshHistoryRecords();
@@ -1600,6 +1637,38 @@ onUnmounted(() => {
 .summary-card span { display: block; color: #667085; font-size: 13px; }
 .summary-card strong { display: block; margin: 8px 0; font-size: 26px; color: #162235; }
 .summary-card small { color: #667085; }
+.report-summary-card small { display: block; margin-bottom: 10px; }
+.report-export-button { width: 100%; margin-top: 2px; }
+.summary-card .task-status-value {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  font-size: 12px;
+}
+.task-status-tag.el-tag {
+  height: 24px;
+  padding: 0 9px;
+  line-height: 22px;
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.task-status-tag.el-tag--success,
+.task-status-tag.el-tag--success :deep(.el-tag__content) {
+  color: var(--el-color-success);
+}
+.task-status-tag.el-tag--warning,
+.task-status-tag.el-tag--warning :deep(.el-tag__content) {
+  color: var(--el-color-warning);
+}
+.task-status-tag.el-tag--danger,
+.task-status-tag.el-tag--danger :deep(.el-tag__content) {
+  color: var(--el-color-danger);
+}
+.task-status-tag.el-tag--info,
+.task-status-tag.el-tag--info :deep(.el-tag__content) {
+  color: var(--el-color-info);
+}
 .stage-summary-card strong { font-size: 24px; }
 .error-alert { border-radius: 12px; }
 .partition-card { border-radius: 18px; }
@@ -1613,12 +1682,54 @@ onUnmounted(() => {
 .partition-value { color: #162235; font-size: 22px; }
 .partition-hint { color: #98a2b3; font-size: 12px; }
 .dynamic-info-desc { margin-bottom: 16px; }
+.evidence-level-tag.el-tag {
+  height: auto;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 3px 9px;
+  line-height: 1.45;
+  white-space: normal;
+}
+.evidence-level-tag.el-tag :deep(.el-tag__content) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
 @media (max-width: 980px) { .partition-grid, .partition-grid--counts { grid-template-columns: repeat(2, 1fr); } }
 .warning-action-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .tab-intro { margin-bottom: 16px; }
 .tab-intro h2 { margin: 0; color: #162235; }
-.tab-intro p { margin: 6px 0 0; color: #667085; }
-.exploit-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 14px; padding: 10px 14px; color: #526477; font-size: 13px; background: #f4f8fc; border: 1px solid #dce6f0; border-radius: 10px; }
+.tab-intro p {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(100%, 920px);
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px solid #d5e7ff;
+  border-radius: 8px;
+  background: #f4f9ff;
+  color: #3f5875;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.tab-intro p::before {
+  content: "i";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #2f80ed;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+.exploit-summary { display: inline-flex; flex-wrap: wrap; gap: 8px 18px; max-width: 100%; margin: 0 0 14px; padding: 10px 14px; color: #526477; font-size: 13px; background: #f4f8fc; border: 1px solid #dce6f0; border-radius: 10px; }
 .exploit-summary b { color: #162235; }
 .validation-hypothesis-panel { display: grid; gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid #f3d19e; border-radius: 12px; background: #fffbf2; }
 .validation-hypothesis-panel h3 { margin: 0; color: #7a4a00; }
@@ -1645,7 +1756,9 @@ onUnmounted(() => {
 .artifact-state-list { display: grid; gap: 8px; margin-top: 12px; }
 .artifact-state-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 9px 11px; border: 1px solid #e4ebf3; border-radius: 10px; color: #526477; font-size: 13px; }
 .exploit-safety { margin: 10px 0 0; color: #718096; font-size: 12px; line-height: 1.5; }
-.agent-toolbar { display: grid; grid-template-columns: minmax(180px, 240px) minmax(180px, 260px) auto auto; align-items: center; gap: 12px; margin-bottom: 10px; }
+.agent-toolbar { display: grid; grid-template-columns: minmax(180px, 240px) minmax(180px, 260px) auto; align-items: center; gap: 12px; margin-bottom: 10px; }
+.agent-filter-checks { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.agent-filter-checks :deep(.el-checkbox) { margin-right: 0; }
 .agent-stats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .agent-timeline { padding: 8px 0 0; }
 .agent-message-card { border: 1px solid #dce6f0; border-radius: 12px; padding: 12px 14px; background: #fbfdff; }

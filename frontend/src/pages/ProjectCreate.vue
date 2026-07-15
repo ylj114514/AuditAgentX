@@ -24,7 +24,7 @@
           </el-form-item>
           <el-form-item label="本地路径" v-else>
             <div class="local-input-row">
-              <el-input v-model="form.local_path" placeholder="examples/vulnerable_projects/demo_flask_app" />
+              <el-input v-model="form.local_path" placeholder="examples/vulnerable_projects/demo_app" />
               <el-button :disabled="submitting" @click="pickDirectory">上传目录</el-button>
             </div>
             <input
@@ -73,13 +73,15 @@
 
         <el-form :model="scanScope" label-position="top" class="scope-form">
           <el-form-item label="审计范围">
-            <el-checkbox v-model="scanScope.include_test_findings">
-              包含测试、样例、Demo、Fixture 和 Benchmark 资产
-            </el-checkbox>
-            <p class="deep-hint">
-              默认只审计生产代码。OWASP Benchmark 等故意包含漏洞的评测项目必须开启此项，
-              否则其 findings 会标记为 out_of_scope，不会进入 Verify 或动态验证。
-            </p>
+            <div class="scope-option">
+              <el-checkbox v-model="scanScope.include_test_findings">
+                包含测试、样例、Demo、Fixture 和 Benchmark 资产
+              </el-checkbox>
+              <p class="deep-hint scope-hint">
+                默认只审计生产代码。OWASP Benchmark 等故意包含漏洞的评测项目必须开启此项，
+                否则其 findings 会标记为 out_of_scope，不会进入 Verify 或动态验证。
+              </p>
+            </div>
           </el-form-item>
         </el-form>
 
@@ -147,10 +149,12 @@
 
         <el-form v-if="scanMode === 'deep'" :model="deep" label-position="top" class="dynamic-form">
           <el-form-item>
-            <el-checkbox v-model="deep.trust_project_container_config">
-              允许直接使用项目自带 Dockerfile（可选）
-            </el-checkbox>
-            <p class="deep-hint">默认由系统自动识别并生成受限启动方案。Compose 始终先经过安全策略检查；只有你勾选此项，才会直接执行项目自己的 Dockerfile。</p>
+            <div class="scope-option">
+              <el-checkbox v-model="deep.trust_project_container_config">
+                允许直接使用项目自带 Dockerfile（可选）
+              </el-checkbox>
+              <p class="deep-hint scope-hint">默认由系统自动识别并生成受限启动方案。Compose 始终先经过安全策略检查；只有你勾选此项，才会直接执行项目自己的 Dockerfile。</p>
+            </div>
           </el-form-item>
 
           <el-form-item label="动态验证候选数上限 max_dynamic_candidates">
@@ -171,23 +175,28 @@
           <el-collapse v-model="advancedOpen" class="advanced-collapse">
             <el-collapse-item name="override">
               <template #title>
-                <span class="advanced-title">高级覆盖（仅自动识别失败时使用）</span>
+                <span
+                  class="advanced-title"
+                  :class="{ 'is-open': advancedOpen.includes('override') }"
+                >
+                  高级覆盖（仅自动识别失败时使用）
+                </span>
               </template>
               <p class="deep-hint">
                 仅在自动识别启动方式失败时才需填写。留空即由系统自动识别 install / run 命令与端口；
                 任意填写项会合并进 launch_plan 覆盖自动识别结果。
               </p>
-              <el-form-item label="安装命令 install_command">
+              <el-form-item label="安装命令 install_command" class="override-input-item">
                 <el-input v-model="deep.override.install_command" placeholder="例如 pip install -r requirements.txt（留空自动识别）" />
               </el-form-item>
-              <el-form-item label="启动命令 run_command">
+              <el-form-item label="启动命令 run_command" class="override-input-item">
                 <el-input v-model="deep.override.run_command" placeholder="例如 python app.py（留空自动识别）" />
               </el-form-item>
               <div class="override-inline">
-                <el-form-item label="服务端口 port">
+                <el-form-item label="服务端口 port" class="override-input-item">
                   <el-input v-model="deep.override.port" placeholder="例如 8000（留空自动识别）" />
                 </el-form-item>
-                <el-form-item label="工作目录 working_dir">
+                <el-form-item label="工作目录 working_dir" class="override-input-item">
                   <el-input v-model="deep.override.working_dir" placeholder="例如 . 或 src（留空为仓库根）" />
                 </el-form-item>
               </div>
@@ -223,10 +232,10 @@ const sourceOptions = [
 ];
 
 const form = reactive({
-  name: "maccms10",
+  name: "",
   source_type: "git",
-  url: "https://github.com/magicblack/maccms10",
-  local_path: "examples/vulnerable_projects/demo_flask_app",
+  url: "",
+  local_path: "",
   branch: "",
 });
 
@@ -393,6 +402,8 @@ async function submit() {
 .mode-row b { display: block; color: #162235; }
 .mode-row p { margin: 4px 0 0; color: #667085; font-size: 13px; line-height: 1.5; }
 .deep-hint { color: #98a2b3; font-size: 13px; margin: 0 0 8px; }
+.scope-option { display: flex; flex-direction: column; width: 100%; }
+.scope-hint { margin-top: 4px; padding-left: 24px; line-height: 1.6; }
 .deep-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .notice { margin-top: 14px; }
 .verify-budget-form { margin-top: 14px; }
@@ -401,12 +412,64 @@ async function submit() {
 .static-tools-list :deep(.el-checkbox) { align-items: flex-start; height: auto; margin-right: 0; white-space: normal; }
 .static-tool-label { display: block; color: #344054; font-weight: 700; }
 .static-tool-description { display: block; color: #667085; font-size: 12px; line-height: 1.45; margin-top: 2px; }
-.verify-budget-form :deep(.el-input-number) { width: 100%; }
+.verify-budget-form :deep(.el-input-number) { width: 280px; max-width: 100%; }
 .dynamic-form { margin-top: 14px; }
-.advanced-collapse { margin-top: 6px; border-top: 1px dashed #e4ebf3; }
-.advanced-title { color: #475467; font-weight: 700; }
-.override-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 720px) { .override-inline, .static-tools-list { grid-template-columns: 1fr; } }
+.advanced-collapse { margin-top: 6px; border-top: 1px dashed #e4ebf3; border-bottom: none; }
+.advanced-collapse :deep(.el-collapse-item__header) {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  min-height: 34px;
+  padding-top: 10px;
+  border-bottom: none;
+  background: transparent;
+  pointer-events: none;
+}
+.advanced-collapse :deep(.el-collapse-item__arrow) { display: none; }
+.advanced-collapse :deep(.el-collapse-item__wrap) { border-bottom: none; }
+.advanced-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  padding: 7px 11px;
+  border: 1px solid #b9d7ff;
+  border-radius: 8px;
+  background: #f2f8ff;
+  color: #175cd3;
+  font-weight: 800;
+  line-height: 1.2;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.advanced-title::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform .15s ease;
+}
+.advanced-title.is-open::before { transform: rotate(45deg); }
+.advanced-title:hover {
+  border-color: #2f80ed;
+  background: #eaf3ff;
+  box-shadow: 0 6px 14px rgba(47, 128, 237, .12);
+}
+.override-input-item { max-width: 620px; }
+.override-input-item :deep(.el-input) { width: 100%; }
+.override-inline {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 304px));
+  gap: 12px;
+  max-width: 620px;
+}
+@media (max-width: 720px) {
+  .override-inline, .static-tools-list { grid-template-columns: 1fr; }
+  .override-input-item { max-width: 100%; }
+}
 .submit-btn { width: 100%; margin-top: 18px; }
 @media (max-width: 980px) { .create-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .page-title-row { align-items: flex-start; flex-direction: column; } }

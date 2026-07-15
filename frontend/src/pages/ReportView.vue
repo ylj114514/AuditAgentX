@@ -98,12 +98,14 @@ onMounted(() => {
 .page-title-row h1 { margin: 0; color: #162235; }
 .page-title-row p { margin: 6px 0 0; color: #667085; }
 .eyebrow { margin: 0; color: #2f80ed; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.panel-card { max-width: 760px; border-radius: 18px; }
+.panel-card { width: 100%; border-radius: 18px; }
 .report-card { background: linear-gradient(180deg, #fff, #f8fbff); }
-.report-hint { margin-bottom: 18px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: #fbfdff; }
+.report-hint { max-width: 720px; margin-bottom: 18px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: #fbfdff; }
 .report-hint b { color: #162235; }
 .report-hint p { margin: 6px 0 0; color: #667085; line-height: 1.7; }
+.report-card :deep(.el-form-item) { max-width: 520px; }
+.report-card :deep(.el-input) { max-width: 520px; }
 .msg { margin-top: 16px; }
 .option-grid { display: flex; flex-direction: column; gap: 8px; }
-.format-alert { margin-bottom: 16px; }
+.format-alert { max-width: 520px; margin-bottom: 16px; }
 </style>
