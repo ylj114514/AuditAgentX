@@ -19,7 +19,7 @@
       <el-descriptions :column="3" border>
         <el-descriptions-item label="类型">{{ detail.type }}</el-descriptions-item>
         <el-descriptions-item label="严重级"><el-tag :type="severityType(detail.severity)">{{ detail.severity || "unknown" }}</el-tag></el-descriptions-item>
-        <el-descriptions-item label="状态"><el-tag :type="findingStatusType(detail.verification.status)">{{ findingStatusLabel(detail.verification.status) }}</el-tag></el-descriptions-item>
+        <el-descriptions-item label="状态"><el-tag :type="findingDisplayMeta.tone">{{ findingDisplayMeta.label }}</el-tag></el-descriptions-item>
         <el-descriptions-item label="文件位置">{{ detail.file }}:{{ detail.start_line }}</el-descriptions-item>
         <el-descriptions-item label="置信度">{{ formatConfidence(detail.verification.confidence) }}</el-descriptions-item>
         <el-descriptions-item label="已验证"><el-tag :type="detail.verification.verified ? 'success' : 'info'">{{ detail.verification.verified ? "是" : "否" }}</el-tag></el-descriptions-item>
@@ -158,7 +158,28 @@
             <el-descriptions-item label="Payload" :span="2"><code>{{ evidence.runtime.request?.payload || "N/A" }}</code></el-descriptions-item>
             <el-descriptions-item label="响应摘要" :span="2"><pre class="mini-pre">{{ evidence.runtime.response_excerpt || "N/A" }}</pre></el-descriptions-item>
           </el-descriptions>
-          <div v-if="evidence?.runtime?.evidence_flow?.length" class="flow-block">
+           <el-alert
+             v-if="isConfirmedExecutedNoHitEvidence"
+             type="success"
+             show-icon
+             :closable="false"
+             class="confirmed-no-hit-alert"
+             title="确认：已执行但未复现"
+             description="攻击请求已实际执行；当前未命中成功判据。以下保留的基线、攻击响应和证据链可用于审计与复放。"
+           />
+           <section v-if="isConfirmedExecutedNoHitEvidence" class="flow-block http-evidence-chain">
+             <h3>HTTP 执行证据链</h3>
+             <el-table :data="httpEvidenceRows" size="small" stripe>
+               <el-table-column prop="stage" label="阶段" width="110" />
+               <el-table-column prop="method" label="方法" width="90" />
+               <el-table-column prop="url" label="请求 URL" min-width="240" show-overflow-tooltip />
+               <el-table-column prop="status" label="状态码" width="90" />
+               <el-table-column label="响应摘要" min-width="260" show-overflow-tooltip>
+                 <template #default="scope">{{ scope.row.response || "N/A" }}</template>
+               </el-table-column>
+             </el-table>
+           </section>
+           <div v-if="evidence?.runtime?.evidence_flow?.length" class="flow-block">
             <h3>动态证据流</h3>
             <ol>
               <li v-for="(step, index) in evidence.runtime.evidence_flow" :key="index">
@@ -242,8 +263,8 @@
               <el-descriptions-item label="MCP Server">{{ evidence?.verification?.mcp_server || evidence?.static_evidence_chain?.mcp_server || "N/A" }}</el-descriptions-item>
               <el-descriptions-item label="Skill">{{ evidence?.verification?.skill?.name || evidence?.verification?.skill || "N/A" }}</el-descriptions-item>
               <el-descriptions-item label="静态裁决">{{ evidence?.verification?.static_verdict || "N/A" }}</el-descriptions-item>
-              <el-descriptions-item label="动态裁决">{{ evidence?.verification?.dynamic_verdict || evidence?.runtime?.reproduction_status || "N/A" }}</el-descriptions-item>
-              <el-descriptions-item label="最终裁决" :span="2">{{ evidence?.verification?.final_verdict || detail.verification.status || "N/A" }}</el-descriptions-item>
+              <el-descriptions-item label="动态裁决">{{ verificationVerdictLabel(evidence?.verification?.dynamic_verdict || evidence?.runtime?.reproduction_status) }}</el-descriptions-item>
+              <el-descriptions-item label="最终裁决" :span="2">{{ verificationVerdictLabel(evidence?.verification?.final_verdict || detail.verification.status) }}</el-descriptions-item>
               <el-descriptions-item v-if="evidence?.verification?.false_positive_reason" label="误报原因" :span="2">{{ evidence.verification.false_positive_reason }}</el-descriptions-item>
             </el-descriptions>
 
@@ -296,6 +317,7 @@ import {
   evidenceLevelMeta,
   harnessStatusMeta,
   httpExecutionLabel,
+  isConfirmedExecutedNoHit,
   runtimeStatusMeta,
   sandboxReason,
   sandboxStatusMeta,
@@ -338,6 +360,51 @@ async function labelFinding(label: "true_positive" | "false_positive") {
 }
 
 const evidenceJson = computed(() => safeStringify({ finding: detail.value, evidence: evidence.value }));
+const isConfirmedExecutedNoHitEvidence = computed(() => isConfirmedExecutedNoHit(
+  evidence.value?.runtime,
+  detail.value,
+  evidence.value?.verification,
+));
+const findingDisplayMeta = computed(() => {
+  if (isConfirmedExecutedNoHitEvidence.value) {
+    return runtimeStatusMeta(evidence.value?.runtime, detail.value, evidence.value?.verification);
+  }
+  return {
+    label: findingStatusLabel(detail.value?.verification?.status),
+    tone: findingStatusType(detail.value?.verification?.status),
+  };
+});
+const httpEvidenceRows = computed(() => {
+  const runtime = evidence.value?.runtime || {};
+  const records = [
+    runtime.baseline,
+    ...(Array.isArray(runtime.baseline_records) ? runtime.baseline_records : []),
+    ...(Array.isArray(runtime.records) ? runtime.records : []),
+    ...(Array.isArray(runtime.confirmation_records) ? runtime.confirmation_records : []),
+  ].filter((record: any) => record && (record.url || record.method || record.response_excerpt));
+  const unique = new Map<string, any>();
+  records.forEach((record: any, index: number) => {
+    const key = [record.role || (index === 0 ? "baseline" : "attack"), record.url, record.method,
+      record.status_code ?? record.status, record.response_excerpt].join("|");
+    if (!unique.has(key)) unique.set(key, record);
+  });
+  return [...unique.values()].map((record: any) => ({
+    stage: httpEvidenceStage(record.role),
+    method: record.method || "-",
+    url: record.url || "-",
+    status: record.status_code ?? record.status ?? "-",
+    response: record.response_excerpt || record.error || "",
+  }));
+});
+function httpEvidenceStage(role: any) {
+  const labels: Record<string, string> = {
+    baseline: "基线响应",
+    attack: "攻击响应",
+    confirmation: "确认响应",
+    authorization_attack: "授权攻击响应",
+  };
+  return labels[String(role || "").toLowerCase()] || "HTTP 响应";
+}
 const pocDisplayAllowed = computed(() => canDisplayDetailedPoc({
   finding: detail.value,
   evidence: evidence.value,
@@ -518,6 +585,10 @@ function verdictLabel(v: string) {
   return VERDICT_LABELS[String(v || "").toLowerCase()] || v || "N/A";
 }
 
+function verificationVerdictLabel(verdict: any) {
+  return isConfirmedExecutedNoHitEvidence.value ? "确认：已执行但未复现" : verdictLabel(verdict);
+}
+
 function runtimeStatusLabel(runtime: any, finding?: any) {
   return runtimeStatusMeta(runtime, finding, evidence.value?.verification).label;
 }
@@ -587,7 +658,7 @@ function attackPlanLabel(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案";
   if (status === "static_confirmed_pending_runtime") return "静态确认待运行";
   if (status === "framework_confirmed_replay") return "已确认 HTTP PoC";
-  if (status === "executed_not_reproduced_replay") return "已执行请求复放（未复现）";
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHitEvidence.value) return "确认：已执行但未复现";
   if (status === "target_harness_reproduction") return "目标 Harness 复现";
   if (plan?.plan_status === "manual_plan_required") return "需人工补充";
   return "利用与复现材料";
@@ -614,7 +685,7 @@ function attackPlanDescription(plan: any) {
   if (status === "candidate_plan_pending_review") return "候选测试草案，尚待人工复核；不得计为已确认 PoC。";
   if (status === "static_confirmed_pending_runtime") return "静态证据已确认，代码仍待运行验证。";
   if (status === "framework_confirmed_replay") return "代码来自框架实际命中的本地 HTTP 请求。";
-  if (status === "executed_not_reproduced_replay") return "代码来自已执行的本地 HTTP 请求；未命中成功判据，不声明漏洞命中。";
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHitEvidence.value) return "确认：已执行但未复现。代码、基线/攻击响应与证据链均来自已持久化的本地 HTTP 执行记录。";
   if (status === "target_harness_reproduction") return "代码来自目标入口 Harness 的已确认复现。";
   return "当前材料不自动视为已确认 PoC。";
 }
@@ -624,7 +695,7 @@ function attackPlanCodeCaption(plan: any) {
   if (status === "candidate_plan_pending_review") return `${language} · 候选测试草案`;
   if (status === "static_confirmed_pending_runtime") return `${language} · 待运行测试计划`;
   if (status === "framework_confirmed_replay") return `${language} · 已确认 HTTP PoC`;
-  if (status === "executed_not_reproduced_replay") return `${language} · 已执行请求复放（未复现）`;
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHitEvidence.value) return `${language} · 确认：已执行但未复现`;
   if (status === "target_harness_reproduction") return `${language} · 目标 Harness 复现代码`;
   return `${language} · 利用与复现代码`;
 }

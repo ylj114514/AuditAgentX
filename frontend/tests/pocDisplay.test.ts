@@ -60,6 +60,13 @@ test("allows a persisted replay for a confirmed HTTP request executed without a 
   }), true);
 });
 
+test("allows a persisted no-hit replay when final product status is confirmed", () => {
+  assert.equal(canDisplayDetailedPoc({
+    finding: { final_status: "confirmed" },
+    evidence: executedNoHitReplayEvidence(),
+  }), true);
+});
+
 test("allows a persisted replay when completed-without-hit is supplied as the compatibility flag", () => {
   const evidence = executedNoHitReplayEvidence();
   evidence.verification = { execution_completed_without_hit: true };
@@ -101,6 +108,15 @@ test("rejects unresolved, failed, and blocked runtime outcomes", () => {
     const evidence = httpConfirmedEvidence();
     evidence.runtime = { reproduction_status: status, reproducible: false };
     assert.equal(canDisplayDetailedPoc({ finding: confirmedFinding(), evidence }), false, status);
+  }
+});
+
+test("rejects pending and generic-review findings even when a no-hit method is present", () => {
+  for (const status of ["needs_review", "validation_pending", "endpoint_unresolved", "sandbox_start_failed", "not_executed"]) {
+    assert.equal(canDisplayDetailedPoc({
+      finding: { status, verification: { dynamic_method: "http_executed_not_reproduced" } },
+      evidence: executedNoHitReplayEvidence(),
+    }), false, status);
   }
 });
 

@@ -15,6 +15,60 @@ function normalized(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function statusValues(finding: UnknownRecord, verification: UnknownRecord): string[] {
+  const findingVerification = asRecord(finding.verification);
+  return [
+    finding.status,
+    finding.final_status,
+    finding.product_status,
+    findingVerification.status,
+    findingVerification.final_verdict,
+    verification.status,
+    verification.final_verdict,
+  ].map(normalized).filter(Boolean);
+}
+
+function hasNonConfirmableStatus(finding: UnknownRecord, verification: UnknownRecord): boolean {
+  return statusValues(finding, verification).some((status) => (
+    ["needs_review", "validation_pending", "not_executed", "endpoint_unresolved",
+      "endpoint_not_found", "blocked", "inconclusive", "failed"].includes(status)
+    || status.includes("sandbox_")
+    || status.includes("_failed")
+  ));
+}
+
+function isConfirmedProductFinding(finding: UnknownRecord, verification: UnknownRecord): boolean {
+  return statusValues(finding, verification).includes("confirmed")
+    && !hasNonConfirmableStatus(finding, verification);
+}
+
+function hasExecutedHttpRequest(runtime: UnknownRecord): boolean {
+  const records = [
+    ...(Array.isArray(runtime.records) ? runtime.records : []),
+    ...(Array.isArray(runtime.confirmation_records) ? runtime.confirmation_records : []),
+  ];
+  return records.some((record) => {
+    const item = asRecord(record);
+    return ["attack", "confirmation", "authorization_attack"].includes(normalized(item.role))
+      && Boolean(item.url && item.method)
+      && (item.status_code !== undefined || item.status !== undefined || item.error);
+  });
+}
+
+function isConfirmedExecutedNoHit(
+  runtime: UnknownRecord,
+  finding: UnknownRecord,
+  verification: UnknownRecord,
+): boolean {
+  const noHitMethod = normalized(verification.dynamic_method) === "http_executed_not_reproduced"
+    || verification.execution_completed_without_hit === true;
+  return normalized(runtime.reproduction_status) === "not_reproduced"
+    && runtime.skipped !== true
+    && !hasNonConfirmableStatus(finding, verification)
+    && (hasExecutedHttpRequest(runtime) || noHitMethod)
+    && (isConfirmedProductFinding(finding, verification) || noHitMethod);
+}
+
 function isRevoked(artifact: UnknownRecord): boolean {
   return artifact.usable === false || Boolean(artifact.revoked_by_finding_status);
 }
@@ -56,10 +110,7 @@ function hasTargetHarnessConfirmation(evidence: UnknownRecord, verification: Unk
 
 function hasExecutedNoHitHttpReplay(evidence: UnknownRecord, verification: UnknownRecord): boolean {
   const runtime = asRecord(evidence.runtime);
-  return (normalized(verification.dynamic_method) === "http_executed_not_reproduced"
-      || verification.execution_completed_without_hit === true)
-    && normalized(runtime.reproduction_status) === "not_reproduced"
-    && runtime.skipped !== true;
+  return isConfirmedExecutedNoHit(runtime, {}, verification);
 }
 
 /**
@@ -78,10 +129,13 @@ export function canDisplayDetailedPoc({ finding, evidence }: PocDisplayInput): b
   const artifacts = asRecord(proof.artifacts);
   const artifact = asRecord(artifacts.validated_poc || proof.poc_file);
 
-  if (normalized(currentFinding.status) !== "confirmed"
-    || (findingVerification.status && normalized(findingVerification.status) !== "confirmed")
-    || hasDowngrade(verification)) return false;
+  const runtime = asRecord(proof.runtime);
+  const executedNoHitReplay = isConfirmedExecutedNoHit(runtime, currentFinding, verification);
+  if (hasDowngrade(verification)) return false;
   if (!isPersistedArtifact(artifact)) return false;
+
+  if (executedNoHitReplay) return true;
+  if (!isConfirmedProductFinding(currentFinding, findingVerification)) return false;
 
   return hasActualHttpConfirmation(proof, verification)
     || hasTargetHarnessConfirmation(proof, verification)

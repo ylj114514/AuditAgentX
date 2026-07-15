@@ -69,7 +69,7 @@
         />
       </el-card>
       <el-card shadow="never" class="summary-card">
-        <span>可处置漏洞</span><strong>{{ actionableFindings.length }}</strong><small>高危 {{ highCount }} / 已验证 {{ verifiedCount }} / 非处置结果 {{ informationalCount }}</small>
+        <span>可处置漏洞</span><strong>{{ actionableFindings.length }}</strong><small>高危 {{ highCount }} / 已验证 {{ verifiedCount }} / <el-tag type="success" size="small">确认：已执行但未复现 {{ confirmedNoHitCount }}</el-tag></small>
       </el-card>
       <el-card shadow="never" class="summary-card">
         <span>报告</span><strong>HTML</strong><el-button text type="primary" @click="genReport">生成报告</el-button>
@@ -218,7 +218,7 @@
               <template #default="scope">{{ formatConfidence(scope.row.confidence) }}</template>
             </el-table-column>
             <el-table-column label="状态" width="130">
-              <template #default="scope"><el-tag :type="findingStatusType(scope.row.status)">{{ findingStatusLabel(scope.row.status) }}</el-tag></template>
+              <template #default="scope"><el-tag :type="findingDisplayMeta(scope.row).tone">{{ findingDisplayMeta(scope.row).label }}</el-tag></template>
             </el-table-column>
             <el-table-column label="操作" width="110" fixed="right">
               <template #default="scope"><el-button type="primary" link @click="openFinding(scope.row.finding_id)">详情</el-button></template>
@@ -342,7 +342,7 @@
                 <div>
                   <div class="exploit-title-line">
                     <h3>{{ row.type }}</h3>
-                    <el-tag size="small" :type="attackPlanTagType(row.attackPlan)">{{ attackPlanLabel(row.attackPlan) }}</el-tag>
+                    <el-tag size="small" :type="attackPlanTagType(row.attackPlan)">{{ attackPlanLabel(row.attackPlan, row) }}</el-tag>
                     <el-tag size="small" effect="plain" :type="severityType(row.severity)">{{ row.severity }}</el-tag>
                   </div>
                   <p>{{ row.attackPlan?.trigger_location || row.file }}</p>
@@ -351,7 +351,7 @@
               </div>
               <div class="exploit-plan-note">
                 <b>证据状态</b>
-                <span>{{ attackPlanDescription(row.attackPlan) }}</span>
+                <span>{{ attackPlanDescription(row.attackPlan, row) }}</span>
               </div>
               <dl class="exploit-facts">
                 <div><dt>攻击向量</dt><dd>{{ row.attackPlan?.attack_vector || "根据静态 source → sink 证据生成" }}</dd></div>
@@ -362,7 +362,7 @@
                 <b>Payload</b><code v-for="payload in row.attackPlan.payloads.slice(0, 4)" :key="payload">{{ payload }}</code>
               </div>
               <div v-if="canDisplayAttackPlanCode(row)" class="exploit-code-head">
-                <span>{{ attackPlanCodeCaption(row.attackPlan) }}</span>
+                <span>{{ attackPlanCodeCaption(row.attackPlan, row) }}</span>
                 <el-button size="small" @click="copyAttackPlan(row)">复制代码</el-button>
               </div>
               <pre v-if="canDisplayAttackPlanCode(row)"><code>{{ row.attackPlan?.code }}</code></pre>
@@ -502,6 +502,7 @@ import {
   harnessStatusMeta,
   httpExecutionLabel,
   httpWasExecuted,
+  isConfirmedExecutedNoHit,
   runtimeStatusMeta,
   sandboxReason,
   sandboxStatusMeta,
@@ -585,6 +586,10 @@ const actionableFindings = computed(() => findings.value.filter(
 const informationalCount = computed(() => findings.value.length - actionableFindings.value.length);
 const highCount = computed(() => actionableFindings.value.filter((item) => ["high", "critical"].includes(String(item.severity).toLowerCase())).length);
 const verifiedCount = computed(() => findings.value.filter((item) => item.verified).length);
+const confirmedNoHitCount = computed(() => findings.value.filter((item) => {
+  const evidence = findingEvidence(item);
+  return isConfirmedExecutedNoHit(evidence.runtime, item, evidence.verification);
+}).length);
 const staticFindings = computed(() => findings.value);
 const pagedStaticFindings = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value;
@@ -1327,12 +1332,12 @@ function severityType(severity: string) {
   return "success";
 }
 
-function attackPlanLabel(plan: any) {
+function attackPlanLabel(plan: any, row?: any) {
   const status = normalizedPlanStatus(plan);
   if (status === "candidate_plan_pending_review") return "候选测试草案";
   if (status === "static_confirmed_pending_runtime") return "静态确认待运行";
   if (status === "framework_confirmed_replay") return "已确认 HTTP PoC";
-  if (status === "executed_not_reproduced_replay") return "已执行请求复放（未复现）";
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHit(row?.evidence?.runtime, row, row?.evidence?.verification)) return "确认：已执行但未复现";
   if (status === "target_harness_reproduction") return "目标 Harness 复现";
   if (status === "manual_plan_required") return "需人工补充";
   return "其他利用与复现材料";
@@ -1345,23 +1350,23 @@ function attackPlanTagType(plan: any) {
   return "info";
 }
 
-function attackPlanDescription(plan: any) {
+function attackPlanDescription(plan: any, row?: any) {
   const status = normalizedPlanStatus(plan);
   if (status === "candidate_plan_pending_review") return "候选测试草案，尚待人工复核；不得计为已确认 PoC。";
   if (status === "static_confirmed_pending_runtime") return "静态证据已确认，代码仍待运行验证。";
   if (status === "framework_confirmed_replay") return "代码来自框架实际命中的本地 HTTP 请求，可用于复放。";
-  if (status === "executed_not_reproduced_replay") return "代码来自已执行的本地 HTTP 请求；未命中成功判据，不声明漏洞命中。";
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHit(row?.evidence?.runtime, row, row?.evidence?.verification)) return "确认：已执行但未复现。代码、基线/攻击响应与证据链均来自已持久化的本地 HTTP 执行记录。";
   if (status === "target_harness_reproduction") return "代码来自目标入口 Harness 的已确认复现。";
   return "请结合证据状态人工判断，当前材料不自动视为已确认 PoC。";
 }
 
-function attackPlanCodeCaption(plan: any) {
+function attackPlanCodeCaption(plan: any, row?: any) {
   const language = String(plan?.code_language || "python");
   const status = normalizedPlanStatus(plan);
   if (status === "candidate_plan_pending_review") return `${language} · 候选测试草案`;
   if (status === "static_confirmed_pending_runtime") return `${language} · 待运行测试计划`;
   if (status === "framework_confirmed_replay") return `${language} · 已确认 HTTP PoC`;
-  if (status === "executed_not_reproduced_replay") return `${language} · 已执行请求复放（未复现）`;
+  if (status === "executed_not_reproduced_replay" || isConfirmedExecutedNoHit(row?.evidence?.runtime, row, row?.evidence?.verification)) return `${language} · 确认：已执行但未复现`;
   if (status === "target_harness_reproduction") return `${language} · 目标 Harness 复现代码`;
   return `${language} · 利用与复现代码`;
 }
@@ -1434,6 +1439,17 @@ function formatConfidence(value: any) {
 
 function runtimeStatusLabel(runtime: any, finding?: any) {
   return runtimeStatusMeta(runtime, finding, finding?.verification).label;
+}
+
+function findingDisplayMeta(item: any) {
+  const evidence = findingEvidence(item);
+  if (isConfirmedExecutedNoHit(evidence.runtime, item, evidence.verification)) {
+    return runtimeStatusMeta(evidence.runtime, item, evidence.verification);
+  }
+  return {
+    label: findingStatusLabel(item?.status),
+    tone: findingStatusType(item?.status),
+  };
 }
 
 function runtimeTagType(runtime: any, finding?: any) {

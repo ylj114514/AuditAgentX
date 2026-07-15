@@ -102,8 +102,35 @@ export function httpWasExecuted(runtime: any): boolean {
   });
 }
 
-function isConfirmedFinding(finding: any): boolean {
-  return String(finding?.status || "").toLowerCase() === "confirmed";
+function normalized(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function findingStatusValues(finding: any, verification: any): string[] {
+  const findingVerification = finding?.verification || {};
+  return [
+    finding?.status,
+    finding?.final_status,
+    finding?.product_status,
+    findingVerification?.status,
+    findingVerification?.final_verdict,
+    verification?.status,
+    verification?.final_verdict,
+  ].map(normalized).filter(Boolean);
+}
+
+function hasNonConfirmableStatus(finding: any, verification: any): boolean {
+  return findingStatusValues(finding, verification).some((status) => (
+    ["needs_review", "validation_pending", "not_executed", "endpoint_unresolved",
+      "endpoint_not_found", "blocked", "inconclusive", "failed"].includes(status)
+    || status.includes("sandbox_")
+    || status.includes("_failed")
+  ));
+}
+
+export function isConfirmedFinding(finding: any, verification?: any): boolean {
+  return findingStatusValues(finding, verification).includes("confirmed")
+    && !hasNonConfirmableStatus(finding, verification);
 }
 
 function confirmedStaticMeta(): StatusMeta {
@@ -126,17 +153,18 @@ function isExecutedNoHitVerification(verification: any): boolean {
 
 function executedNoHitMeta(): StatusMeta {
   return {
-    label: "已确认：HTTP 请求已执行但未复现（未命中）",
+    label: "确认：已执行但未复现",
     tone: "success",
     trustworthyPositive: true,
   };
 }
 
-function isConfirmedExecutedNoHit(runtime: any, finding: any, verification: any): boolean {
-  return isConfirmedFinding(finding)
-    && String(runtime?.reproduction_status || "").toLowerCase() === "not_reproduced"
+export function isConfirmedExecutedNoHit(runtime: any, finding: any, verification: any): boolean {
+  return normalized(runtime?.reproduction_status) === "not_reproduced"
     && runtime?.skipped !== true
-    && isExecutedNoHitVerification(verification);
+    && !hasNonConfirmableStatus(finding, verification)
+    && (httpWasExecuted(runtime) || isExecutedNoHitVerification(verification))
+    && (isConfirmedFinding(finding, verification) || isExecutedNoHitVerification(verification));
 }
 
 export function runtimeStatusMeta(runtime: any, finding?: any, verification?: any): StatusMeta {
@@ -147,7 +175,7 @@ export function runtimeStatusMeta(runtime: any, finding?: any, verification?: an
     return EVIDENCE_LEVEL.static_confirmed_http_not_reproduced;
   }
   if (runtime?.reproducible === true && status === "dynamic_confirmed") return HTTP_STATUS.dynamic_confirmed;
-  if (isConfirmedFinding(finding) && status === "not_reproduced") return confirmedStaticMeta();
+  if (isConfirmedFinding(finding, resolvedVerification) && status === "not_reproduced" && runtime?.skipped !== true) return confirmedStaticMeta();
   if (status === "not_executed" && httpWasExecuted(runtime)) {
     return { label: "状态不一致：已有 HTTP 请求但标记为未执行", tone: "danger", trustworthyPositive: false };
   }
@@ -163,7 +191,7 @@ export function evidenceLevelMeta(verification: any, finding?: any, runtime?: an
   const level = String(verification?.evidence_level || "not_executed").toLowerCase();
   if (isConfirmedExecutedNoHit(runtime, finding, verification)) return executedNoHitMeta();
   if (level === "static_confirmed_http_not_reproduced") return EVIDENCE_LEVEL[level];
-  if (isConfirmedFinding(finding) && level === "not_reproduced") return confirmedStaticMeta();
+  if (isConfirmedFinding(finding, verification) && level === "not_reproduced" && runtime?.skipped !== true) return confirmedStaticMeta();
   return EVIDENCE_LEVEL[level] || fallback(level, "证据等级");
 }
 
