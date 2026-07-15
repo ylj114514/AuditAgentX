@@ -208,7 +208,7 @@
       </template>
     </el-alert>
 
-    <el-card v-if="status" shadow="never" class="tabs-card">
+    <el-card v-if="status" ref="tabsCardRef" shadow="never" class="tabs-card">
       <el-tabs v-model="activeTab">
         <el-tab-pane label="静态分析" name="static">
           <div class="tab-intro">
@@ -505,7 +505,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { FindingApi, ProjectApi, ScanApi } from "../api";
@@ -544,6 +544,7 @@ const evidenceLoaded = ref(false);
 const agentMessagesLoading = ref(false);
 const agentMessagesLoaded = ref(false);
 const status = ref<any>(null);
+const tabsCardRef = ref<any>(null);
 const findings = ref<any[]>([]);
 const evidenceMap = ref<Record<string, any>>({});
 const agentMessages = ref<any[]>([]);
@@ -1573,7 +1574,16 @@ async function mapLimit<T, R>(items: T[], limit: number, mapper: (item: T) => Pr
   return results;
 }
 
+function scrollTabsCardIntoView() {
+  const element = tabsCardRef.value?.$el || tabsCardRef.value;
+  if (!(element instanceof HTMLElement)) return;
+  const top = element.getBoundingClientRect().top + window.scrollY - 12;
+  window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+}
+
 watch(activeTab, async (tab) => {
+  await nextTick();
+  scrollTabsCardIntoView();
   if (tab === "dynamic" || tab === "exploit") {
     await ensureEvidenceLoaded();
   }
