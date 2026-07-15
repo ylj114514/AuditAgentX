@@ -154,3 +154,21 @@ def test_mechanism_harness_does_not_count_as_harness_confirmed():
     summary = _dynamic_summary([{"_harness": harness}], None)
     assert summary["harness_confirmed"] == 0
     assert summary["not_executed"] == 0   # 跑过 mechanism 的不算未执行
+
+
+def test_harness_model_gap_is_not_an_executed_no_hit():
+    """Pipeline evidence keeps an unsupported model distinct from a clean no-hit."""
+    harness = {
+        "verdict": "model_gap", "executed": True, "model_gap": True,
+        "function_completed": False, "missing_local_import": "helpers",
+    }
+
+    dynamic_verdict = _derive_dynamic_verdict({"reproduction_status": "not_executed"}, harness)
+
+    assert dynamic_verdict == "harness_model_gap"
+    summary = _dynamic_summary([{"_harness": harness}], None)
+    assert summary["model_gap"] == 1
+    assert summary["executed_not_reproduced"] == 0
+
+    no_hit = _dynamic_summary([{"_harness": {"verdict": "not_reproduced"}}], None)
+    assert no_hit["executed_not_reproduced"] == 1

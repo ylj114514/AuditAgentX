@@ -67,6 +67,7 @@ class ACPVerdict(str, Enum):
     完整取值集合——每个值的语义必须严格区分：
       not_executed   : 未曾尝试执行（如未配置 base_url）
       not_reproduced : 执行了但载荷未命中成功特征
+      model_gap      : Harness 已执行，但受控模型或本地导入无法代表目标代码
     """
     # 静态层
     CANDIDATE = "candidate"
@@ -84,6 +85,7 @@ class ACPVerdict(str, Enum):
     ENDPOINT_NOT_FOUND = "endpoint_not_found"
     REQUEST_TIMEOUT = "request_timeout"
     PAYLOAD_NOT_MATCHED = "payload_not_matched"
+    MODEL_GAP = "model_gap"
 
     # Harness 层
     HARNESS_CONFIRMED = "harness_confirmed"

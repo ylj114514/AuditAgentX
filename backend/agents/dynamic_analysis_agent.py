@@ -329,7 +329,7 @@ def _derive_dynamic_verdict(runtime: dict, harness: dict) -> str:
       harness_confirmed(入口/目标级) > dynamic_confirmed(HTTP端点级) >
       function_reproduced(harness函数级) > mechanism_confirmed(模板机理) >
       HTTP 明确结论(not_reproduced/blocked/inconclusive/...) >
-      harness 明确结论(not_reproduced/synthetic_demo_only/...) > not_executed(两路都没跑)
+      harness 明确结论(not_reproduced/model_gap/synthetic_demo_only/...) > not_executed(两路都没跑)
     只有两路都没有任何真实执行结果时，才返回 not_executed。
     """
     h = harness or {}
@@ -350,9 +350,9 @@ def _derive_dynamic_verdict(runtime: dict, harness: dict) -> str:
     if http_status and http_status != "not_executed":
         return http_status
     # 4) harness 有真实执行结论（跑了但未触发/被阻/合成）——也不是"未执行"
-    if hv in ("not_reproduced", "inconclusive", "synthetic_demo_only",
-              "sandbox_failed", "unsafe_harness_blocked"):
-        return f"harness_{hv}" if hv == "not_reproduced" else hv
+    if hv in ("not_reproduced", "model_gap", "inconclusive", "synthetic_demo_only",
+               "sandbox_failed", "unsafe_harness_blocked"):
+        return f"harness_{hv}" if hv in {"not_reproduced", "model_gap"} else hv
     # 5) 两路都没有任何真实执行结果
     return http_status or "not_executed"
 
@@ -409,7 +409,11 @@ def _dynamic_summary(findings: list[dict], code_root: Path | None = None) -> dic
         ),
         "executed_not_reproduced": sum(
             1 for f in findings
-            if _verdict(f) == "not_reproduced"
+            if _verdict(f) in {"not_reproduced", "harness_not_reproduced"}
+        ),
+        "model_gap": sum(
+            1 for f in findings
+            if _verdict(f) == "harness_model_gap"
         ),
         # 函数级复现（slice 主力典型结论）单列，不再被误并进 not_executed。
         "function_reproduced": sum(1 for f in findings if _verdict(f) == "function_reproduced"),

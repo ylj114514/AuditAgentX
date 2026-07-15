@@ -1414,3 +1414,106 @@ def test_nonce_attestation_is_framework_derived_and_does_not_expose_nonce():
     assert attestation["marker_observed"] is True
     assert len(attestation["digest"]) == 64
     assert nonce not in str(attestation)
+
+
+def test_selfcontained_sqlalchemy_text_adapter_preserves_tainted_statement(monkeypatch, tmp_path):
+    """The generic slice adapter must preserve SQL text provenance through text().
+
+    ``text(tainted_sql)`` is a structured SQLAlchemy statement, not an opaque
+    mock.  The execute observer must therefore see taint on the statement.
+    """
+    from backend.skills import harness_tools
+    from backend.skills.harness_tools import scaffold_capability
+
+    (tmp_path / "service.py").write_text(
+        "def search(term):\n"
+        "    statement = text(\"SELECT * FROM users WHERE name='\" + term + \"'\")\n"
+        "    return db.session.execute(statement)\n",
+        encoding="utf-8",
+    )
+    func = extract_function(tmp_path, "service.py", 3)
+    code = harness_tools.build_selfcontained_slice_harness(func, "SQL Injection")
+    assert code is not None
+    monkeypatch.setattr(
+        harness_tools, "_run_in_docker",
+        lambda rendered, timeout, language, code_root=None, harness_kind=None:
+        harness_tools._run_local(rendered, timeout, language, "template"),
+    )
+
+    result = run_harness(
+        code, source="scaffold", scaffold_token=scaffold_capability(),
+        harness_kind="selfcontained_slice",
+    )
+
+    assert result["verdict"] == "target_confirmed"
+    assert result["function_completed"] is True
+    assert result["sink_observer"]["statement_tainted"] is True
+    assert result["sink_observer"]["provenance"] == "sqlalchemy.text"
+
+
+def test_selfcontained_sqlalchemy_bound_parameters_are_an_executed_no_hit(monkeypatch, tmp_path):
+    """Taint in bound values is not taint in SQL program text."""
+    from backend.skills import harness_tools
+    from backend.skills.harness_tools import scaffold_capability
+
+    (tmp_path / "service.py").write_text(
+        "def search(term):\n"
+        "    return db.session.execute(text('SELECT * FROM users WHERE name=:term'), {'term': term})\n",
+        encoding="utf-8",
+    )
+    func = extract_function(tmp_path, "service.py", 2)
+    code = harness_tools.build_selfcontained_slice_harness(func, "SQL Injection")
+    assert code is not None
+    monkeypatch.setattr(
+        harness_tools, "_run_in_docker",
+        lambda rendered, timeout, language, code_root=None, harness_kind=None:
+        harness_tools._run_local(rendered, timeout, language, "template"),
+    )
+
+    result = run_harness(
+        code, source="scaffold", scaffold_token=scaffold_capability(),
+        harness_kind="selfcontained_slice",
+    )
+
+    assert result["verdict"] == "not_reproduced"
+    assert result["function_completed"] is True
+    assert result["model_gap"] is False
+    assert result["sink_observer"]["statement_tainted"] is False
+    assert result["sink_observer"]["bound_parameters_tainted"] is True
+
+
+def test_model_gap_slice_uses_readonly_local_helper_import_adapter(monkeypatch, tmp_path):
+    """A slice missing a local helper retries through the mounted source adapter.
+
+    This is a generic module/helper path: it must not rely on a benchmark or
+    application name, and remains function-level evidence.
+    """
+    from backend.skills import harness_tools
+
+    (tmp_path / "helpers.py").write_text(
+        "def build_command(host):\n    return 'ping ' + host\n", encoding="utf-8",
+    )
+    (tmp_path / "service.py").write_text(
+        "from helpers import build_command\n"
+        "import os\n"
+        "def probe(host):\n"
+        "    return os.system(build_command(host))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        harness_tools, "_run_in_docker",
+        lambda rendered, timeout, language, code_root=None, harness_kind=None:
+        harness_tools._run_local(
+            rendered.replace("/target", tmp_path.as_posix()), timeout, language, "template",
+        ),
+    )
+
+    result = HarnessVerifier().run(
+        {"type": "Command Injection", "file": "service.py", "line": 4, "start_line": 4},
+        tmp_path, max_retries=0,
+    )
+
+    assert [attempt["verdict"] for attempt in result["attempts"]] == ["model_gap", "target_confirmed"]
+    assert result["harness_kind"] == "local_import_adapter"
+    assert result["verdict"] == "function_reproduced"
+    assert result["entrypoint_reachable"] is False

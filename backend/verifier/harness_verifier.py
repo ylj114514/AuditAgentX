@@ -25,7 +25,7 @@ from backend.skills.harness_tools import (
     build_selfcontained_slice_harness, build_selfcontained_slice_harness_multilang,
     build_source_assertion_harness, scaffold_capability, deep_docker_capability,
     build_js_commonjs_import_harness, build_js_commonjs_entrypoint_harness,
-    build_js_express_open_redirect_entrypoint_harness,
+    build_js_express_open_redirect_entrypoint_harness, build_local_import_adapter_harness,
 )
 from backend.mcp.audit_mcp_server import AuditMCPServer
 from backend.skills.loader import load_skill
@@ -41,6 +41,7 @@ _VERDICT_EFFECT = {
     "mechanism_confirmed":    (False, True,  0.75),   # 仅模板机理，封顶 0.75，不算完全动态确认
     "synthetic_demo_only":    (False, False, 0.40),   # 玩具程序触发，不是项目漏洞证据
     "not_reproduced":         (False, False, 0.50),
+    "model_gap":              (False, False, 0.40),
     "inconclusive":           (False, False, 0.40),
     "sandbox_failed":         (False, False, 0.40),
     "unsafe_harness_blocked": (False, False, 0.40),
@@ -103,7 +104,10 @@ class HarnessVerifier(BaseAgent):
         harness_source = "llm"
         harness_lang = target_lang
 
-        for attempt in range(max_retries + 1):
+        model_gap_fallback_used = False
+        # A model-gap fallback is a deterministic control path, not an LLM retry.
+        # Allow it once even when callers set max_retries=0.
+        for attempt in range(max_retries + 2):
             gen = self._generate(finding, func, target_lang,
                                  previous=last_exec if attempt else None, code_root=code_root)
             harness_code = gen.get("harness_code") or ""
@@ -137,6 +141,10 @@ class HarnessVerifier(BaseAgent):
                 "verification_level": last_exec.get("verification_level"),
                 "backend": last_exec.get("backend"),
                 "sink_name": last_exec.get("sink_name"),
+                "function_completed": last_exec.get("function_completed", False),
+                "model_gap": last_exec.get("model_gap", False),
+                "missing_local_import": last_exec.get("missing_local_import"),
+                "sink_observer": last_exec.get("sink_observer"),
                 "reason": last_exec.get("reason"),
                 "stdout": (last_exec.get("stdout") or "")[:400],
             })
@@ -145,8 +153,13 @@ class HarnessVerifier(BaseAgent):
             # 当作结论；下一轮强制尝试不 import 应用的自包含切片。
             exec_verdict = last_exec.get("verdict")
             if (exec_verdict in ("target_confirmed", "mechanism_confirmed", "synthetic_demo_only",
-                                 "unsafe_harness_blocked", "sandbox_failed")):
+                                  "unsafe_harness_blocked", "sandbox_failed")):
                 break
+            if (exec_verdict == "model_gap" and harness_source == "scaffold"
+                    and last_exec.get("harness_kind") == "selfcontained_slice"
+                    and not model_gap_fallback_used):
+                model_gap_fallback_used = True
+                continue
             failed_route_or_import = (
                 harness_source == "scaffold"
                 and last_exec.get("harness_kind") in (
@@ -158,9 +171,13 @@ class HarnessVerifier(BaseAgent):
                      or bool(last_exec.get("import_error")))
             )
             if failed_route_or_import:
+                if attempt >= max_retries:
+                    break
                 continue
             # 切片、模板及其它确定性脚手架的失败不会靠相同生成器的重试变好。
             if harness_source in ("template", "scaffold"):
+                break
+            if attempt >= max_retries:
                 break
 
         # 执行级 verdict -> finding 级 verdict
@@ -172,7 +189,7 @@ class HarnessVerifier(BaseAgent):
     def _map_finding_verdict(last_exec: dict, harness_source: str) -> str:
         """run_harness 的执行级 verdict -> HarnessVerifier 的 finding 级 verdict。"""
         ev = last_exec.get("verdict") or "inconclusive"
-        if ev in ("unsafe_harness_blocked", "sandbox_failed", "not_reproduced",
+        if ev in ("unsafe_harness_blocked", "sandbox_failed", "not_reproduced", "model_gap",
                   "target_confirmed", "function_reproduced", "mechanism_confirmed",
                   "synthetic_demo_only"):
             return ev
@@ -238,6 +255,12 @@ class HarnessVerifier(BaseAgent):
             "sink_name": last_exec.get("sink_name"),
             "captured_argument": last_exec.get("captured_argument"),
             "payload": last_exec.get("payload"),
+            "executed": last_exec.get("executed", False),
+            "function_completed": last_exec.get("function_completed", False),
+            "sanitized_exception": last_exec.get("sanitized_exception"),
+            "model_gap": last_exec.get("model_gap", verdict == "model_gap"),
+            "missing_local_import": last_exec.get("missing_local_import"),
+            "sink_observer": last_exec.get("sink_observer"),
             "target_function_called": last_exec.get("target_function_called", False),
             "entrypoint_reachable": bool(last_exec.get("entrypoint_reachable")),
             "trigger_detail": last_exec.get("trigger_detail", ""),
@@ -271,6 +294,11 @@ class HarnessVerifier(BaseAgent):
                 "stdout": last_exec.get("stdout", ""),
                 "stderr": last_exec.get("stderr", ""),
                 "reason": last_exec.get("reason"),
+                "function_completed": last_exec.get("function_completed", False),
+                "sanitized_exception": last_exec.get("sanitized_exception"),
+                "model_gap": last_exec.get("model_gap", verdict == "model_gap"),
+                "missing_local_import": last_exec.get("missing_local_import"),
+                "sink_observer": last_exec.get("sink_observer"),
             },
             "skill": {"name": self.skill.get("name"), "version": self.skill.get("version"),
                       "workflow": self.skill.get("workflow", [])},
@@ -368,6 +396,13 @@ class HarnessVerifier(BaseAgent):
         if func.get("found"):
             if code_root:
                 previous_kind = (previous or {}).get("harness_kind")
+                if previous_kind == "selfcontained_slice" and (previous or {}).get("model_gap"):
+                    adapter = build_local_import_adapter_harness(func, finding.get("type"))
+                    if adapter:
+                        logger.info("切片模型缺口，改用【只读源码模块/本地 helper adapter】(func=%s)",
+                                    func.get("function_name"))
+                        return {"harness_code": adapter, "_source": "scaffold", "_language": "python",
+                                "_kind": "local_import_adapter"}
                 if target_lang == "javascript":
                     # Prefer a static project route dispatch over direct handler import.
                     # The latter remains function-level fallback only.

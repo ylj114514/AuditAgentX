@@ -233,6 +233,8 @@ class VerifyAgent(BaseAgent):
             dynamic_verdict = "harness_confirmed"
         elif harness_result.get("verdict") in {"function_reproduced", "mechanism_confirmed"}:
             dynamic_verdict = harness_result.get("verdict")
+        elif harness_result.get("verdict") == "model_gap":
+            dynamic_verdict = "harness_model_gap"
         elif dynamic_verdict == "not_executed" and harness_result.get("executed"):
             dynamic_verdict = "harness_inconclusive"
         verdict["dynamic_verdict"] = dynamic_verdict

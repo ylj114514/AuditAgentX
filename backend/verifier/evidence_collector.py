@@ -404,6 +404,12 @@ class EvidenceCollector:
                     "harness_code": hp.get("harness_code"),
                     "trigger_detail": hp.get("trigger_detail"),
                     "execution_backend": hp.get("execution_backend"),
+                    "executed": hp.get("executed", False),
+                    "function_completed": hp.get("function_completed", False),
+                    "sanitized_exception": hp.get("sanitized_exception"),
+                    "model_gap": hp.get("model_gap", False),
+                    "missing_local_import": hp.get("missing_local_import"),
+                    "sink_observer": hp.get("sink_observer"),
                     "attempts": hp.get("attempts"),
                     "execution_log": hp.get("execution_log"),
                 }
@@ -589,6 +595,11 @@ def _build_harness_evidence(harness: dict) -> dict:
             "execution_backend": None,
             "attempts": None,
             "execution_log": None,
+            "function_completed": False,
+            "sanitized_exception": None,
+            "model_gap": False,
+            "missing_local_import": None,
+            "sink_observer": None,
         }
     harness_code = harness.get("harness_code")
     harness_hash = harness.get("harness_code_sha256") or (
@@ -624,6 +635,11 @@ def _build_harness_evidence(harness: dict) -> dict:
         "safety": harness.get("safety"),
         "attempts": harness.get("attempts"),
         "execution_log": harness.get("execution_log"),
+        "function_completed": harness.get("function_completed", False),
+        "sanitized_exception": harness.get("sanitized_exception"),
+        "model_gap": harness.get("model_gap", False),
+        "missing_local_import": harness.get("missing_local_import"),
+        "sink_observer": harness.get("sink_observer"),
     }
 
 
