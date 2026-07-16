@@ -82,28 +82,46 @@
             <div v-if="evidence?.knowledge?.verification_checks?.length" class="flow-block">
               <h3>验证条件</h3>
               <ol>
-                <li v-for="(item, index) in evidence.knowledge.verification_checks" :key="`check-${index}`">{{ item }}</li>
+                <li v-for="(item, index) in knowledgeVerificationChecks" :key="`check-${index}`">
+                  <span class="knowledge-original">{{ item.original }}</span>
+                  <span v-if="item.zh" class="knowledge-translation">{{ item.machine ? "机器翻译：" : "中文说明：" }}{{ item.zh }}</span>
+                </li>
               </ol>
             </div>
 
             <div v-if="evidence?.knowledge?.false_positive_signals?.length" class="flow-block warning-flow">
               <h3>误报信号</h3>
               <ol>
-                <li v-for="(item, index) in evidence.knowledge.false_positive_signals" :key="`fp-${index}`">{{ item }}</li>
+                <li v-for="(item, index) in knowledgeFalsePositiveSignals" :key="`fp-${index}`">
+                  <span class="knowledge-original">{{ item.original }}</span>
+                  <span v-if="item.zh" class="knowledge-translation">{{ item.machine ? "机器翻译：" : "中文说明：" }}{{ item.zh }}</span>
+                </li>
               </ol>
             </div>
 
             <div v-if="evidence?.knowledge?.remediation?.length" class="flow-block fix-flow">
               <h3>修复建议</h3>
               <ol>
-                <li v-for="(item, index) in evidence.knowledge.remediation" :key="`fix-${index}`">{{ item }}</li>
+                <li v-for="(item, index) in knowledgeRemediation" :key="`fix-${index}`">
+                  <span class="knowledge-original">{{ item.original }}</span>
+                  <span v-if="item.zh" class="knowledge-translation">{{ item.machine ? "机器翻译：" : "中文说明：" }}{{ item.zh }}</span>
+                </li>
               </ol>
             </div>
 
             <div v-if="evidence?.knowledge?.references?.length" class="flow-block reference-flow">
               <h3>知识来源</h3>
               <ol>
-                <li v-for="(ref, index) in evidence.knowledge.references" :key="`ref-${index}`">{{ ref }}</li>
+                <li v-for="(ref, index) in evidence.knowledge.references" :key="`ref-${index}`">
+                  <a
+                    v-if="isHttpReference(ref)"
+                    class="knowledge-reference-link"
+                    :href="String(ref)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >{{ ref }}</a>
+                  <span v-else>{{ ref }}</span>
+                </li>
               </ol>
             </div>
 
@@ -298,7 +316,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { FindingApi } from "../api";
 import {
   evidenceLevelMeta,
@@ -327,11 +345,27 @@ const labeling = ref<"" | "true_positive" | "false_positive">("");
 async function labelFinding(label: "true_positive" | "false_positive") {
   const id = route.params.id as string;
   if (!id) return;
+  const isTruePositive = label === "true_positive";
+  try {
+    await ElMessageBox.confirm(
+      isTruePositive
+        ? "确认将该 finding 标记为真漏洞吗？该操作会更新本地 finding 状态，并可能写入 RAG 自进化反馈知识库。"
+        : "确认将该 finding 标记为误报吗？该操作会更新本地 finding 状态、取消已验证标记，并可能写入 RAG 自进化反馈知识库。",
+      isTruePositive ? "确认标记为真漏洞" : "确认标记为误报",
+      {
+        confirmButtonText: "确认",
+        cancelButtonText: "取消",
+        type: isTruePositive ? "success" : "warning",
+      },
+    );
+  } catch {
+    return;
+  }
   labeling.value = label;
   try {
     const { data } = await FindingApi.label(id, label);
     ElMessage.success(
-      (label === "true_positive" ? "已标记为真漏洞" : "已标记为误报") +
+      (isTruePositive ? "已标记为真漏洞" : "已标记为误报") +
       (data.learned ? "，已录入 RAG 自进化知识库" : "（未满足录入条件）"),
     );
     if (label === "false_positive" && detail.value) {
@@ -481,6 +515,255 @@ const hasKnowledgeEvidence = computed(() => {
     return value !== null && value !== undefined && value !== "";
   });
 });
+type KnowledgeDisplayItem = {
+  original: string;
+  zh?: string;
+  machine?: boolean;
+};
+
+const KNOWLEDGE_ZH_NOTES: Record<string, string> = {
+  "Confirm user-controlled input reaches SQL construction or execution.": "检查用户可控数据是否真的进入 SQL 拼接或执行位置。",
+  "Confirm the query is built with string concatenation, interpolation, or formatting.": "判断 SQL 是否由拼接、模板插值或格式化字符串生成。",
+  "Confirm no prepared statement, parameter binding, or strong type conversion separates data from SQL.": "确认没有用参数绑定、预编译语句或严格类型转换隔离用户数据。",
+  "The sink uses parameter placeholders with a separate parameter tuple/list.": "如果代码已经用占位符和独立参数传值，通常不是 SQL 注入。",
+  "The value is converted to a strict numeric type before reaching SQL.": "如果进入 SQL 前已经强制转成数字，风险通常会降低。",
+  "The SQL statement is a static literal and user input is not interpolated.": "如果 SQL 是固定字面量且没有插入用户输入，通常不是注入点。",
+  "Use prepared statements or parameterized queries.": "改用参数化查询或预编译语句。",
+  "Do not concatenate user-controlled strings into SQL.": "不要把用户输入直接拼进 SQL 字符串。",
+  "Run database users with least privilege and avoid detailed SQL errors in responses.": "数据库账号按最小权限配置，响应里不要暴露详细 SQL 错误。",
+  "Confirm attacker-controlled input reaches a command execution sink.": "检查攻击者可控输入是否进入命令执行函数。",
+  "Confirm a shell string is built from user input or shell=True is used.": "重点看是否用用户输入拼 shell 命令，或启用了 shell=True。",
+  "Confirm input validation or argument separation does not remove command metacharacter impact.": "确认现有校验没有消除命令元字符带来的影响。",
+  "Replace shell commands with library calls.": "优先用语言库 API 替代 shell 命令。",
+  "Use argument arrays and shell=False.": "调用外部程序时使用参数数组，并关闭 shell 解释。",
+  "Confirm the user-controlled value is concatenated or joined into a filesystem path.": "检查用户输入是否被拼进文件路径。",
+  "Confirm traversal markers or absolute paths can influence the final path.": "确认 ../ 或绝对路径是否能改变最终访问位置。",
+  "Confirm canonical path checks do not enforce an allowed base directory.": "确认规范化后的路径没有被限制在允许目录内。",
+  "Canonicalize the path and confirm it stays under an allowlisted base directory.": "规范化路径后，必须校验它仍在允许目录下。",
+  "Reject traversal sequences and use safe file APIs.": "拒绝目录穿越片段，并使用安全文件访问接口。",
+  "Confirm untrusted input is written into an HTML, attribute, JS, or URL context.": "检查不可信输入是否输出到 HTML、属性、JS 或 URL 位置。",
+  "Confirm output encoding matches the browser context.": "确认编码方式与实际浏览器上下文匹配。",
+  "Confirm framework auto-escaping has not been disabled.": "确认模板或框架的自动转义没有被关闭。",
+  "Apply context-aware output encoding.": "按 HTML、属性、JS、URL 等不同上下文分别编码。",
+  "Keep template auto-escaping on and avoid safe/raw markers on untrusted data.": "保持模板自动转义开启，不要给不可信数据标记 safe/raw。",
+  "Confirm user input controls URL, host, or scheme of a server-side request.": "检查用户输入是否能控制服务端请求的 URL、主机或协议。",
+  "Check for an allowlist of schemes/hosts and blocking of internal ranges and cloud metadata endpoints.": "检查是否限制协议和主机，并阻止内网地址、云元数据地址。",
+  "Confirm redirects and DNS rebinding are considered if network access is allowed.": "如果允许发起网络请求，还要考虑重定向和 DNS rebinding。",
+  "Enforce a scheme/host allowlist and block internal ranges and metadata IPs.": "只允许可信协议和主机，同时阻止内网网段与元数据 IP。",
+  "Resolve and validate the target host before requesting.": "请求前先解析并校验目标主机。",
+  "Confirm untrusted input is passed to a deserialization sink.": "检查不可信数据是否进入反序列化函数。",
+  "Confirm no integrity check (HMAC/signature) protects the serialized blob.": "确认序列化数据没有签名或 HMAC 保护。",
+  "Prefer safe formats (JSON) and safe loaders (yaml.safe_load).": "优先使用 JSON 等安全格式，YAML 使用 safe_load。",
+  "If unavoidable, sign+verify payloads and restrict allowed classes.": "无法避免时，对数据签名校验，并限制可反序列化的类型。",
+  "Confirm user input reaches eval/exec-style execution.": "检查用户输入是否真的进入 eval、exec 或类似代码执行位置。",
+  "Confirm attacker-controlled input reaches an eval/exec/code compilation sink.": "检查攻击者可控输入是否进入 eval、exec 或代码编译类函数。",
+  "Confirm no safe evaluator (ast.literal_eval) or allowlist is used.": "确认没有使用 ast.literal_eval 这类安全解析器，也没有白名单限制。",
+  "Confirm the evaluated expression is not restricted to a fixed allowlist or parsed by a safe data parser.": "确认被求值的表达式没有被固定白名单限制，也没有交给安全数据解析器处理。",
+  "Prefer a function-level harness that feeds a harmless marker expression and observes whether evaluation occurs.": "更适合用函数级 harness 投入无害标记表达式，观察是否真的发生求值。",
+  "ast.literal_eval is used instead of eval.": "如果已经用 ast.literal_eval 替代 eval，通常不是代码注入。",
+  "ast.literal_eval or another data-only parser is used instead of eval/exec.": "如果已经用只解析数据的解析器替代 eval/exec，通常不是代码注入。",
+  "The evaluated expression is a fixed literal.": "如果被求值内容是固定字面量，通常没有用户可控执行。",
+  "The expression is a fixed literal or selected from a strict allowlist.": "如果表达式固定，或只能从严格白名单中选择，风险通常较低。",
+  "The evaluator runs in a sandbox that blocks side effects and imports.": "如果求值器运行在阻止副作用和 import 的沙箱中，误报可能性更高。",
+  "Avoid eval/exec on user input.": "避免对用户输入使用 eval 或 exec。",
+  "Remove eval/exec on untrusted input.": "不要对不可信输入使用 eval 或 exec。",
+  "Remove eval/exec/new Function on untrusted input.": "不要对不可信输入使用 eval、exec 或 new Function。",
+  "Use ast.literal_eval or a safe parser.": "只需要解析数据时，改用 ast.literal_eval 或安全解析器。",
+  "Use safe parsers or explicit allowlists for supported expressions.": "需要支持表达式时，使用专用安全解析器或明确白名单。",
+  "Use safe data parsers or a purpose-built expression parser.": "使用安全数据解析器，或专门为业务设计的表达式解析器。",
+  "Validate against a strict allowlist.": "把允许的值、字段或操作限制在严格白名单内。",
+  "If dynamic behavior is required, restrict operations through an explicit allowlist and sandbox.": "如果业务必须支持动态行为，就用明确白名单限制可执行操作，并放进沙箱中运行。",
+  "Confirm the redirect target or header value is user-controlled.": "检查重定向目标或响应头是否受用户输入控制。",
+  "Confirm no allowlist restricts destinations to trusted hosts.": "确认没有把跳转目标限制到可信主机。",
+  "Allowlist redirect destinations or require relative paths.": "只允许白名单目标，或只接受相对路径。",
+  "Reject CR/LF and normalize hosts before validation.": "拒绝换行字符，并在校验前规范化主机名。",
+};
+
+const KNOWLEDGE_MACHINE_TERMS: Array<[RegExp, string]> = [
+  [/\buser-controlled input\b/gi, "用户可控输入"],
+  [/\battacker-controlled input\b/gi, "攻击者可控输入"],
+  [/\buntrusted input\b/gi, "不可信输入"],
+  [/\buser input\b/gi, "用户输入"],
+  [/\bsource variable\b/gi, "source 变量"],
+  [/\bsource\b/gi, "source"],
+  [/\bsink\b/gi, "sink"],
+  [/\bSQL construction\b/gi, "SQL 构造"],
+  [/\bSQL execution\b/gi, "SQL 执行"],
+  [/\bSQL sink\b/gi, "SQL sink"],
+  [/\bSQL error\b/gi, "SQL 错误"],
+  [/\bSQL string concatenation\b/gi, "SQL 字符串拼接"],
+  [/\bquery template\b/gi, "查询模板"],
+  [/\bexecutable sink\b/gi, "可执行 sink"],
+  [/\bprepared statements?\b/gi, "预编译语句"],
+  [/\bseparate parameter binding\b/gi, "独立参数绑定"],
+  [/\bparameter binding\b/gi, "参数绑定"],
+  [/\bparameterized queries\b/gi, "参数化查询"],
+  [/\bparameterized query\b/gi, "参数化查询"],
+  [/\bstring concatenation\b/gi, "字符串拼接"],
+  [/\binterpolation\b/gi, "插值"],
+  [/\bformatting\b/gi, "格式化"],
+  [/\bcommand execution sink\b/gi, "命令执行 sink"],
+  [/\bcommand execution\b/gi, "命令执行"],
+  [/\bshell commands?\b/gi, "shell 命令"],
+  [/\bshell string\b/gi, "shell 字符串"],
+  [/\bshell=True\b/g, "shell=True"],
+  [/\bshell=False\b/g, "shell=False"],
+  [/\bcommand metacharacter impact\b/gi, "命令元字符影响"],
+  [/\bargument arrays\b/gi, "参数数组"],
+  [/\bargument separation\b/gi, "参数分离"],
+  [/\binput validation\b/gi, "输入校验"],
+  [/\blibrary calls\b/gi, "库 API 调用"],
+  [/\bfilesystem path\b/gi, "文件系统路径"],
+  [/\babsolute paths?\b/gi, "绝对路径"],
+  [/\bfinal path\b/gi, "最终路径"],
+  [/\bcanonical path checks?\b/gi, "规范化路径检查"],
+  [/\ballowlisted base directory\b/gi, "白名单基础目录"],
+  [/\bbase directory\b/gi, "基础目录"],
+  [/\btraversal sequences?\b/gi, "目录穿越序列"],
+  [/\btraversal markers?\b/gi, "目录穿越标记"],
+  [/\bsafe file APIs\b/gi, "安全文件 API"],
+  [/\bHTML, attribute, JS, or URL context\b/gi, "HTML、属性、JS 或 URL 上下文"],
+  [/\bbrowser context\b/gi, "浏览器上下文"],
+  [/\boutput encoding\b/gi, "输出编码"],
+  [/\bauto-escaping\b/gi, "自动转义"],
+  [/\bsafe\/raw markers?\b/gi, "safe/raw 标记"],
+  [/\bserver-side request\b/gi, "服务端请求"],
+  [/\bschemes?\/hosts?\b/gi, "协议/主机"],
+  [/\bscheme\/host allowlist\b/gi, "协议/主机白名单"],
+  [/\ballowlist\b/gi, "白名单"],
+  [/\binternal ranges?\b/gi, "内网地址段"],
+  [/\bcloud metadata endpoints?\b/gi, "云元数据端点"],
+  [/\bmetadata IPs?\b/gi, "元数据 IP"],
+  [/\bDNS rebinding\b/gi, "DNS rebinding"],
+  [/\bredirects?\b/gi, "重定向"],
+  [/\btarget host\b/gi, "目标主机"],
+  [/\bdeserialization sink\b/gi, "反序列化 sink"],
+  [/\bserialized blob\b/gi, "序列化数据"],
+  [/\bintegrity check\b/gi, "完整性校验"],
+  [/\bHMAC\/signature\b/gi, "HMAC/签名"],
+  [/\bsafe loaders?\b/gi, "安全加载器"],
+  [/\bsafe formats?\b/gi, "安全格式"],
+  [/\ballowed classes\b/gi, "允许的类"],
+  [/\bpayloads?\b/gi, "payload"],
+  [/\bcode execution sinks?\b/gi, "代码执行 sink"],
+  [/\bcode compilation sink\b/gi, "代码编译 sink"],
+  [/\beval\/exec-style execution\b/gi, "eval/exec 类执行"],
+  [/\bsafe evaluator\b/gi, "安全求值器"],
+  [/\bevaluated expression\b/gi, "被求值表达式"],
+  [/\bfixed literal\b/gi, "固定字面量"],
+  [/\bstrict allowlist\b/gi, "严格白名单"],
+  [/\bsafe data parser\b/gi, "安全数据解析器"],
+  [/\bdata-only parser\b/gi, "只解析数据的解析器"],
+  [/\bfunction-level harness\b/gi, "函数级 harness"],
+  [/\bharmless marker expression\b/gi, "无害标记表达式"],
+  [/\bevaluation occurs\b/gi, "发生求值"],
+  [/\bside effects\b/gi, "副作用"],
+  [/\bimports\b/gi, "import"],
+  [/\btrusted hosts\b/gi, "可信主机"],
+  [/\brelative paths\b/gi, "相对路径"],
+  [/\bCR\/LF\b/g, "CR/LF"],
+  [/\bhosts?\b/gi, "主机"],
+  [/\bURL\b/g, "URL"],
+  [/\bJSON\b/g, "JSON"],
+];
+
+const KNOWLEDGE_MACHINE_PATTERNS: Array<[RegExp, (...values: string[]) => string]> = [
+  [/^Confirm (.+)$/i, (value) => `确认${translateKnowledgeClause(value)}`],
+  [/^Check whether (.+)$/i, (value) => `检查是否${translateKnowledgeClause(value)}`],
+  [/^Check for (.+)$/i, (value) => `检查是否存在${translateKnowledgeClause(value)}`],
+  [/^Trace whether (.+)$/i, (value) => `跟踪确认是否${translateKnowledgeClause(value)}`],
+  [/^Use (.+)$/i, (value) => `使用${translateKnowledgeClause(value)}`],
+  [/^Avoid (.+)$/i, (value) => `避免${translateKnowledgeClause(value)}`],
+  [/^Do not (.+)$/i, (value) => `不要${translateKnowledgeClause(value)}`],
+  [/^Never (.+)$/i, (value) => `绝不要${translateKnowledgeClause(value)}`],
+  [/^Remove (.+)$/i, (value) => `移除${translateKnowledgeClause(value)}`],
+  [/^Replace (.+) with (.+)$/i, (from, to) => `用${translateKnowledgeClause(to)}替代${translateKnowledgeClause(from)}`],
+  [/^Prefer (.+)$/i, (value) => `优先使用${translateKnowledgeClause(value)}`],
+  [/^Reject (.+)$/i, (value) => `拒绝${translateKnowledgeClause(value)}`],
+  [/^Apply (.+)$/i, (value) => `应用${translateKnowledgeClause(value)}`],
+  [/^Keep (.+) on and avoid (.+)$/i, (first, second) => `保持${translateKnowledgeClause(first)}开启，并避免${translateKnowledgeClause(second)}`],
+  [/^Enforce (.+)$/i, (value) => `强制实施${translateKnowledgeClause(value)}`],
+  [/^Resolve and validate (.+) before requesting$/i, (value) => `发起请求前解析并校验${translateKnowledgeClause(value)}`],
+  [/^If (.+), (.+)$/i, (condition, action) => `如果${translateKnowledgeClause(condition)}，则${translateKnowledgeClause(action)}`],
+  [/^(.+) is used instead of (.+)$/i, (first, second) => `使用${translateKnowledgeClause(first)}替代${translateKnowledgeClause(second)}`],
+  [/^(.+) are used on (.+)$/i, (first, second) => `在${translateKnowledgeClause(second)}上使用${translateKnowledgeClause(first)}`],
+  [/^(.+) is present$/i, (value) => `已经存在${translateKnowledgeClause(value)}`],
+  [/^(.+) is a (.+)$/i, (first, second) => `${translateKnowledgeClause(first)}是${translateKnowledgeClause(second)}`],
+  [/^(.+) is (.+)$/i, (first, second) => `${translateKnowledgeClause(first)}是${translateKnowledgeClause(second)}`],
+  [/^(.+) are (.+)$/i, (first, second) => `${translateKnowledgeClause(first)}是${translateKnowledgeClause(second)}`],
+];
+
+function translateKnowledgeClause(value: string) {
+  let translated = value.trim();
+  KNOWLEDGE_MACHINE_TERMS.forEach(([pattern, replacement]) => {
+    translated = translated.replace(pattern, replacement);
+  });
+  translated = translated
+    .replace(/\brather than\b/gi, "而不是")
+    .replace(/\bwithout\b/gi, "且没有")
+    .replace(/\bthrough\b/gi, "通过")
+    .replace(/\bagainst\b/gi, "依据")
+    .replace(/\bbefore\b/gi, "在...之前")
+    .replace(/\bafter\b/gi, "在...之后")
+    .replace(/\bfrom\b/gi, "来自")
+    .replace(/\binto\b/gi, "进入")
+    .replace(/\bto\b/gi, "到")
+    .replace(/\bof\b/gi, "的")
+    .replace(/\bwith\b/gi, "使用")
+    .replace(/\bon\b/gi, "在")
+    .replace(/\bin\b/gi, "在")
+    .replace(/\bor\b/gi, "或")
+    .replace(/\band\b/gi, "并且")
+    .replace(/\bno longer\b/gi, "不再")
+    .replace(/\bdoes not\b/gi, "不会")
+    .replace(/\bdo not\b/gi, "不要")
+    .replace(/\bnot\b/gi, "不")
+    .replace(/\bno\b/gi, "没有")
+    .replace(/\ba\b/gi, "")
+    .replace(/\ban\b/gi, "")
+    .replace(/\bthe\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;])/g, "$1")
+    .trim();
+  return translated;
+}
+
+function machineTranslateKnowledgeText(original: string) {
+  if (!original || /[\u4e00-\u9fff]/.test(original)) return "";
+  const normalized = original.replace(/\s+/g, " ").trim().replace(/[.。]\s*$/, "");
+  for (const [pattern, render] of KNOWLEDGE_MACHINE_PATTERNS) {
+    const match = normalized.match(pattern);
+    if (match) {
+      const translated = render(...match.slice(1));
+      return translated ? `${translated}。` : "";
+    }
+  }
+  const translated = translateKnowledgeClause(normalized);
+  return translated && translated !== normalized ? `${translated}。` : "";
+}
+
+function knowledgeDisplayList(values: unknown): KnowledgeDisplayItem[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .map((original) => {
+      const exact = KNOWLEDGE_ZH_NOTES[original];
+      return exact
+        ? { original, zh: exact }
+        : { original, zh: machineTranslateKnowledgeText(original), machine: true };
+    });
+}
+
+const knowledgeVerificationChecks = computed(() =>
+  knowledgeDisplayList(evidence.value?.knowledge?.verification_checks));
+const knowledgeFalsePositiveSignals = computed(() =>
+  knowledgeDisplayList(evidence.value?.knowledge?.false_positive_signals));
+const knowledgeRemediation = computed(() =>
+  knowledgeDisplayList(evidence.value?.knowledge?.remediation));
+function isHttpReference(value: unknown) {
+  return /^https?:\/\//i.test(String(value ?? "").trim());
+}
 const hasAgentEvidence = computed(() => {
   return Boolean(
     hasVerificationEvidence.value
@@ -733,6 +1016,11 @@ onMounted(load);
 .flow-block { margin-top: 16px; padding: 16px; border: 1px solid #dce6f0; border-radius: 14px; background: linear-gradient(180deg, #fff, #fbfdff); }
 .flow-block h3 { margin: 0 0 8px; color: #162235; }
 .flow-block ol { margin: 0; padding-left: 20px; color: #475467; line-height: 1.8; }
+.flow-block li { margin: 4px 0; }
+.knowledge-original { color: #344054; }
+.knowledge-translation { display: inline; margin-left: 8px; color: #667085; font-size: 13px; }
+.knowledge-reference-link { color: #2563eb; text-decoration: none; overflow-wrap: anywhere; }
+.knowledge-reference-link:hover { text-decoration: underline; }
 .agent-evidence-block { display: grid; gap: 16px; }
 .knowledge-block { display: grid; gap: 16px; }
 .warning-flow { border-color: #f59e0b; background: #fffbeb; }
