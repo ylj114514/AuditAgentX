@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="440" viewBox="0 0 1400 440" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">AuditAgentX — code security auditing</title>
+  <desc id="desc">A summer-term course project connecting static scanning, agent review, verification, and evidence reports. Navy and cyan project banner; an illustration, not an application screenshot.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1400" y2="440" gradientUnits="userSpaceOnUse"><stop stop-color="#081426"/><stop offset="1" stop-color="#102E43"/></linearGradient>
+    <linearGradient id="accent" x1="68" y1="109" x2="171" y2="220" gradientUnits="userSpaceOnUse"><stop stop-color="#67E8F9"/><stop offset="1" stop-color="#2DD4BF"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="#A5D9F1" stroke-opacity=".045"/></pattern>
+  </defs>
+  <rect width="1400" height="440" rx="26" fill="url(#bg)"/>
+  <rect width="1400" height="440" rx="26" fill="url(#grid)"/>
+  <path d="M984 0L1400 252V440H1323L721 0H984Z" fill="#2DD4BF" fill-opacity=".035"/>
+  <rect x="56" y="43" width="373" height="32" rx="16" fill="#17394A" stroke="#326273"/>
+  <circle cx="77" cy="59" r="4" fill="#5EEAD4"/>
+  <text x="92" y="64" fill="#C0F4F1" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="600" letter-spacing="1.5">SUMMER-TERM COURSE PROJECT</text>
+  <path d="M111 110L158 128V167C158 200 135 222 111 232C87 222 64 200 64 167V128L111 110Z" fill="#0E3141" stroke="url(#accent)" stroke-width="4"/>
+  <path d="M96 148L82 163L96 178M126 148L140 163L126 178" stroke="#67E8F9" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M100 198L110 207L129 187" stroke="#5EEAD4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="190" y="165" fill="#F2F8FF" font-family="Segoe UI,Arial,sans-serif" font-size="66" font-weight="700" letter-spacing="-2">AuditAgentX</text>
+  <text x="191" y="205" fill="#B9CBDD" font-family="Segoe UI,Arial,sans-serif" font-size="20">Code security auditing, from findings to evidence.</text>
+  <text x="60" y="279" fill="#7FABC2" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="2">SCAN</text>
+  <path d="M111 274H139" stroke="#316474" stroke-width="1.5"/>
+  <text x="154" y="279" fill="#7FABC2" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="2">REVIEW</text>
+  <path d="M224 274H252" stroke="#316474" stroke-width="1.5"/>
+  <text x="267" y="279" fill="#7FABC2" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="2">VERIFY</text>
+  <path d="M333 274H361" stroke="#316474" stroke-width="1.5"/>
+  <text x="376" y="279" fill="#7FABC2" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="2">REPORT</text>
+  <g font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#C8DDEA">
+    <rect x="58" y="337" width="86" height="33" rx="8" fill="#17364A" stroke="#2B5268"/><text x="80" y="359">Python</text>
+    <rect x="154" y="337" width="93" height="33" rx="8" fill="#17364A" stroke="#2B5268"/><text x="175" y="359">FastAPI</text>
+    <rect x="257" y="337" width="80" height="33" rx="8" fill="#17364A" stroke="#2B5268"/><text x="279" y="359">Vue 3</text>
+    <rect x="347" y="337" width="117" height="33" rx="8" fill="#17364A" stroke="#2B5268"/><text x="367" y="359">LLM Agents</text>
+    <rect x="474" y="337" width="116" height="33" rx="8" fill="#17364A" stroke="#2B5268"/><text x="492" y="359">MCP + RAG</text>
+  </g>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <rect x="862" y="78" width="476" height="286" rx="19" fill="#0B2032" stroke="#285268"/>
+    <circle cx="888" cy="101" r="4" fill="#43647C"/><circle cx="903" cy="101" r="4" fill="#43647C"/><circle cx="918" cy="101" r="4" fill="#43647C"/>
+    <text x="1088" y="106" fill="#6F9BB4" font-size="11" letter-spacing="1.6">AUDIT WORKFLOW</text>
+    <path d="M936 157V291" stroke="#275970" stroke-width="2" stroke-dasharray="4 7"/>
+    <g fill="#12384A" stroke="#366579"><rect x="918" y="133" width="36" height="36" rx="10"/><rect x="918" y="187" width="36" height="36" rx="10"/><rect x="918" y="241" width="36" height="36" rx="10"/><rect x="918" y="295" width="36" height="36" rx="10"/></g>
+    <g fill="#5EEAD4" font-size="13" font-weight="600"><text x="927" y="156">01</text><text x="927" y="210">02</text><text x="927" y="264">03</text><text x="927" y="318">04</text></g>
+    <g fill="#E5F2FC" font-size="16" font-weight="600"><text x="972" y="149">Static findings</text><text x="972" y="203">Agent review</text><text x="972" y="257">Verification</text><text x="972" y="311">Evidence report</text></g>
+    <g fill="#88AABD" font-size="12"><text x="972" y="167">Tools, rules and source context</text><text x="972" y="221">Inspect paths and protections</text><text x="972" y="275">Separate function and endpoint proof</text><text x="972" y="329">Keep conclusions traceable</text></g>
+  </g>
+  <text x="59" y="409" fill="#668CA4" font-family="Segoe UI,Arial,sans-serif" font-size="11" letter-spacing="1">LEARNING BY BUILDING · AUTHORIZED LOCAL EXPERIMENTS</text>
+</svg>
